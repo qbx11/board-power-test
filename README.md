@@ -1,6 +1,6 @@
 # board-power-test
 
-Narzędzie do pomiaru poboru prądu płytek z nRF54L15 (PPK2). Jedna
+Narzędzie do pomiaru poboru prądu płytek Nordic za pomocą PPK2. Jedna
 komenda buduje czysty obraz pomiarowy, wgrywa go i prowadzi przez pomiar
 w nRF Connect Power Profiler. **Pomiar wykonujesz w Power Profilerze** — narzędzie
 zapisuje odczyt do wspólnego dziennika `reports/pomiary.csv`.
