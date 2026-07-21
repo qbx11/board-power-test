@@ -28,7 +28,7 @@ from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Collapsible, DataTable, Header, Input,
+from textual.widgets import (Button, Collapsible, DataTable, Input,
                              Label, Log, Select, SelectionList, Static)
 from textual.widgets.selection_list import Selection
 
@@ -71,6 +71,24 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
+class ChoiceScreen(ModalScreen[str]):
+    """Dialog z kilkoma opcjami; zwraca id klikniętego przycisku."""
+
+    def __init__(self, text, choices):
+        super().__init__()
+        self.text, self.choices = text, choices  # choices: [(label, id), ...]
+
+    def compose(self):
+        with Vertical(classes="dialog"):
+            yield Static(self.text, classes="dialog-text")
+            with Horizontal(classes="dialog-buttons"):
+                for label, choice_id in self.choices:
+                    yield Button(label, id=choice_id)
+
+    def on_button_pressed(self, event):
+        self.dismiss(event.button.id)
+
+
 class MeasureScreen(ModalScreen):
     """Instrukcja pomiaru + pola: średni prąd i uwagi. Zwraca
     (prąd, uwagi) albo None przy pominięciu."""
@@ -87,8 +105,11 @@ class MeasureScreen(ModalScreen):
             yield Static(core.measure_instructions(self.scen, self.voltage,
                                                    self.settle_s),
                          classes="dialog-text")
-            yield Label("Średni prąd [µA]:")
-            yield Input(placeholder="np. 0.95", id="current")
+            yield Label("Średni prąd:")
+            with Horizontal(id="current-row"):
+                yield Input(placeholder="np. 0.95", id="current")
+                yield Select([("µA", "uA"), ("mA", "mA")], value="uA",
+                             allow_blank=False, id="unit")
             yield Label("Uwagi (opcjonalnie):")
             yield Input(placeholder="np. 'przed poprawką HW'", id="notes")
             with Horizontal(classes="dialog-buttons"):
@@ -112,10 +133,12 @@ class MeasureScreen(ModalScreen):
         try:
             current = float(raw)
         except ValueError:
-            self.app.notify("Podaj liczbę w µA, np. 0.95 albo 7,3.",
+            self.app.notify("Podaj liczbę, np. 0.95 albo 7,3.",
                             severity="error")
             self.query_one("#current", Input).focus()
             return
+        if self.query_one("#unit", Select).value == "mA":
+            current = round(current * 1000, 6)  # dziennik CSV trzyma µA
         self.dismiss((current, self.query_one("#notes", Input).value.strip()))
 
 
@@ -156,7 +179,6 @@ class RunScreen(Screen):
         self.names, self.sample = names, sample
 
     def compose(self):
-        yield Header()
         yield Static("", id="status")
         yield VerticalScroll(id="cmds")
         yield Static("Esc — przerwij i wróć · klik w tytuł komendy — pełny log",
@@ -168,22 +190,36 @@ class RunScreen(Screen):
     def note(self, text):
         self.query_one("#cmds").mount(Static(text, classes="note"))
 
+    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
     async def run_west(self, cmd, cwd, title):
-        """Komenda w zwijanej sekcji; pełne wyjście po kliknięciu/błędzie."""
+        """Komenda w zwijanej sekcji z animacją w trakcie działania;
+        pełne wyjście po kliknięciu/błędzie."""
         out = Log(classes="cmd-log")
-        section = Collapsible(out, title=f"⠿ {title}", collapsed=True)
+        section = Collapsible(out, title=f"{self.SPINNER[0]} {title}",
+                              collapsed=True)
         cmds = self.query_one("#cmds")
         await cmds.mount(section)
         cmds.scroll_end(animate=False)
         out.write_line(f"$ {shlex.join(cmd)}")
-        rc = await asyncio.to_thread(
-            _stream, cmd, cwd,
-            lambda line: self.app.call_from_thread(out.write_line, line))
+
+        frame = {"i": 0}
+
+        def tick():
+            frame["i"] = (frame["i"] + 1) % len(self.SPINNER)
+            section.title = f"{self.SPINNER[frame['i']]} {title}"
+
+        spinner = self.set_interval(1 / 8, tick)
+        try:
+            rc = await asyncio.to_thread(
+                _stream, cmd, cwd,
+                lambda line: self.app.call_from_thread(out.write_line, line))
+        finally:
+            spinner.stop()
         if rc != 0:
             section.title = f"✗ {title} — kod {rc}"
             section.collapsed = False
-            raise RuntimeError(f"'{title}' zakończone błędem (kod {rc}, "
-                               "szczegóły w rozwiniętym logu)")
+            raise RuntimeError(f"'{title}' zakończone błędem (kod {rc})")
         section.title = f"✓ {title}"
 
     @work
@@ -230,9 +266,33 @@ class RunScreen(Screen):
                 if not ok:
                     self.note(f"Pominięto {name}.")
                     continue
-                await self.run_west(core.make_flash_cmd(built[name],
-                                                        self.profile),
-                                    workspace, f"flash {name}")
+
+                # Flash z ponawianiem: zły kabel/programator nie cofa
+                # całego przebiegu – można poprawić i spróbować jeszcze raz.
+                skipped = False
+                while True:
+                    try:
+                        await self.run_west(core.make_flash_cmd(
+                            built[name], self.profile),
+                            workspace, f"flash {name}")
+                        break
+                    except RuntimeError as err:
+                        choice = await self.app.push_screen_wait(ChoiceScreen(
+                            f"[b]Flash nie powiódł się[/b]\n{err}\n\n"
+                            "Sprawdź: kabel SWD wpięty? programator widzi\n"
+                            "płytkę? płytka zasilona (VOUT z PPK2)?",
+                            [("Ponów flash", "retry"),
+                             ("Pomiń scenariusz", "skip"),
+                             ("Przerwij wszystko", "abort")]))
+                        if choice == "retry":
+                            continue
+                        if choice == "skip":
+                            skipped = True
+                            break
+                        raise
+                if skipped:
+                    self.note(f"Pominięto {name} (flash nieudany).")
+                    continue
 
                 # Twarde potwierdzenie SWD – jedyny przycisk, bez obejścia.
                 await self.app.push_screen_wait(ConfirmScreen(
@@ -270,7 +330,7 @@ class RunScreen(Screen):
 
 class PowerTestApp(App):
     TITLE = "board-power-test"
-    SUB_TITLE = "pomiar poboru prądu płytek (PPK2)"
+    ENABLE_COMMAND_PALETTE = False  # bez przycisku/skrótu palety komend
     BINDINGS = [("ctrl+q", "quit", "Wyjście")]
 
     # Monochromatycznie: jeden kolor (odcienie szarości), zero kolorowych
@@ -278,8 +338,6 @@ class PowerTestApp(App):
     # przyciski nie zmieniają tła w żadnym stanie (nic nie wygląda na
     # "wciśnięte" na stałe).
     CSS = """
-    Header { background: transparent; color: $text; }
-
     #setup { padding: 1 2; }
     .h { margin-top: 1; text-style: bold; }
     #profile, #sample, #scenarios { width: 72; max-width: 100%; }
@@ -319,6 +377,9 @@ class PowerTestApp(App):
     .dialog-buttons { margin-top: 1; height: auto; }
     .dialog-buttons Button { margin-right: 2; }
     .results DataTable { height: 18; background: transparent; }
+    #current-row { height: auto; }
+    #current-row #current { width: 32; }
+    #current-row #unit { width: 12; margin-left: 2; }
     """
 
     def __init__(self):
@@ -334,12 +395,10 @@ class PowerTestApp(App):
         default_prof = self.defaults.get("profile")
         if default_prof not in self.boards:
             default_prof = next(iter(self.boards))
-        yield Header()
         # VerticalScroll: przy małym oknie menu się przewija zamiast ucinać.
         with VerticalScroll(id="setup"):
             yield Label("Płytka", classes="h")
-            yield Select(((f"{_label(n, b)}  ·  {b['board']}", n)
-                          for n, b in self.boards.items()),
+            yield Select(((b["board"], n) for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
             yield Label("Scenariusze", classes="h")
             yield SelectionList(*(Selection(

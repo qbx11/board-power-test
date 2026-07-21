@@ -25,6 +25,10 @@ CLI="$REPO/tools/power-test/power_test.py"
 
 [ -f "$CLI" ] || { echo "board-power-test: nie znaleziono $CLI" >&2; exit 1; }
 
+# Tytuł okna/karty terminala (OSC 0) – aplikacja nie rysuje własnego
+# paska nagłówka, nazwa siedzi tam, gdzie w każdym porządnym CLI.
+printf '\033]0;board-power-test\007'
+
 # Interfejs okienkowy (TUI, Textual) żyje w lokalnym venv repo, tworzonym
 # automatycznie przy pierwszym uruchomieniu. Gdy instalacja się nie uda
 # (np. brak sieci), narzędzie działa dalej w trybie tekstowym.

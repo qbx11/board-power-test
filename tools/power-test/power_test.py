@@ -299,17 +299,30 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
     # --- 5. Wynik z Power Profilera -> dziennik CSV ---
     current = None
     while current is None:
-        raw = ask("Średni prąd [uA] (albo 'pomin', by nie zapisywać): ")
+        raw = ask("Średni prąd, np. '0.95' (µA) albo '2.5 mA' "
+                  "('pomin' = bez zapisu): ")
         if raw.lower() in ("pomin", "pomiń", "p"):
             print(f"Pominięto zapis scenariusza '{name}'.")
             return
         try:
-            current = float(raw.replace(",", "."))
+            current = parse_current(raw)
         except ValueError:
-            print("Podaj liczbę w uA, np. 0.95 albo 7,3.")
+            print("Podaj liczbę: '0.95' / '7,3' (µA) albo '2.5 mA'.")
 
     uwagi = ask("Uwagi (Enter = brak): ")
     append_row(make_row(name, scen, profile, sample, voltage, current, uwagi))
+
+
+def parse_current(raw):
+    """Wartość prądu -> µA. Przyjmuje '0.95', '7,3' (µA domyślnie),
+    '2.5 mA', '950 uA' / '950 µA'."""
+    s = raw.strip().lower().replace(",", ".").replace("µ", "u")
+    factor = 1.0
+    if s.endswith("ma"):
+        factor, s = 1000.0, s[:-2]
+    elif s.endswith("ua"):
+        s = s[:-2]
+    return round(float(s.strip()) * factor, 6)
 
 
 def measure_instructions(scen, voltage, settle_s):
@@ -381,8 +394,7 @@ def cmd_interactive():
     print("Płytka:")
     for i, n in enumerate(prof_names, 1):
         mark = "  (domyślna)" if n == default_prof else ""
-        print(f"  {i}. {profiles[n].get('label', n)} – "
-              f"{profiles[n]['board']}{mark}")
+        print(f"  {i}. {profiles[n]['board']}{mark}")
     prof_name = None
     while prof_name is None:
         raw = ask(f"Wybierz [Enter = {default_prof}]: ")

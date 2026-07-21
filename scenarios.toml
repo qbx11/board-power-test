@@ -15,16 +15,14 @@ voltage  = "3.0"   # napięcie źródła PPK2 [V] – wyświetlane i zapisywane 
 settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
 
 # --- Profile płytek -----------------------------------------
-# `label` to pełna nazwa pokazywana w interfejsie (klucz sekcji, np.
-# "btz", służy tylko do -p/--profile w CLI).
+# W interfejsie płytka jest pokazywana przez oficjalny target (`board`);
+# klucz sekcji (np. "btz") służy tylko do -p/--profile w CLI.
 [boards.btz]
-label      = "BTZ EndDevice (płytka docelowa)"
 board      = "BTZ_EndDevice/nrf54l15/cpuapp"
 runner     = "jlink"                                # west flash -r jlink (J-Link mini EDU)
 board_root = "../NCS-Projects/Projekt-BLE-Mesh/app" # względem katalogu projektu; nadpisze env BOARD_ROOT
 
 [boards.dk]
-label = "nRF54L15 DK (płytka referencyjna)"
 board = "nrf54l15dk/nrf54l15/cpuapp"
 # DK: definicja płytki jest w SDK (bez board_root), debugger wbudowany (bez runnera).
 

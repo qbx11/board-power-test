@@ -72,15 +72,18 @@ trwają, więc lecą jednym ciągiem, zanim usiądziesz przy płytce i PPK2.
 
 **FAZA 2 — flash + pomiar, scenariusz po scenariuszu:**
 1. **Flash** — `west flash --erase`; kasowanie jest domyślne, bo stan pinów
-   i UICR potrafi zostać z poprzedniego obrazu i zafałszować pomiar.
+   i UICR potrafi zostać z poprzedniego obrazu i zafałszować pomiar. Nieudany
+   flash (zły kabel, brak zasilania, programator nie widzi płytki) nie cofa
+   przebiegu — dialog daje wybór: ponów / pomiń scenariusz / przerwij.
 2. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana
    wg datasheetu (tylko do porównania na oko — narzędzie nie ocenia).
 3. **Twarde potwierdzenie odłączenia SWD** — w TUI osobny dialog z jednym
    przyciskiem, w CLI trzeba wpisać `tak`; podłączony debugger dodaje własny
    prąd i unieważnia pomiar minimum.
-4. **Wpis wyniku** z Power Profilera → wiersz w `reports/pomiary.csv`
-   (egzemplarz płytki, napięcie, flagi builda, uwagi). **Commituj ten plik** —
-   to wspólna historia pomiarów zespołu.
+4. **Wpis wyniku** z Power Profilera — w µA albo mA (w TUI wybór jednostki,
+   w CLI wpisz np. `2.5 mA`; dziennik zawsze trzyma µA) → wiersz w
+   `reports/pomiary.csv` (egzemplarz płytki, napięcie, flagi builda, uwagi).
+   **Commituj ten plik** — to wspólna historia pomiarów zespołu.
 
 ### Metodyka: najpierw DK, potem nowa płytka
 
