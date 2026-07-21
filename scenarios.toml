@@ -90,3 +90,29 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # ]
 # expected    = "..."
 # voltage     = "1.8"
+
+# --- Własny firmware zespołu --------------------------------
+# Dwa dodatkowe warianty wpisu (wykluczają się nawzajem i z powyższym):
+#
+# 1. `source` – zbuduj CUDZĄ aplikację Zephyr/NCS (katalog z własnym
+#    CMakeLists.txt/prj.conf) zamiast firmware z tego repo. Ścieżka
+#    względna (od katalogu repo) albo absolutna; katalog builda i tak
+#    powstaje tutaj (build_<scenariusz>/). `cmake_args` opcjonalne.
+#
+# [scenarios.moja_aplikacja]
+# label       = "Moja aplikacja — sen"
+# description = "Build aplikacji zespołu i pomiar jak zwykle."
+# source      = "../moj-projekt/app"
+# cmake_args  = ["-DEXTRA_CONF_FILE=low_power.conf"]   # opcjonalne
+# expected    = "..."
+#
+# 2. `hex` – GOTOWA binarka: FAZA 1 (build) jest pomijana, narzędzie
+#    tylko wgrywa wskazany plik (nrfutil device program, z pełnym
+#    kasowaniem jak przy --erase) i prowadzi przez pomiar.
+#    `cmake_args` są przy `hex` zabronione.
+#
+# [scenarios.gotowy_obraz]
+# label       = "Gotowy obraz — sen"
+# description = "Pomiar obrazu zbudowanego poza narzędziem."
+# hex         = "../moj-projekt/build/zephyr/zephyr.hex"
+# expected    = "..."

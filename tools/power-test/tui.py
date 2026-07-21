@@ -231,24 +231,47 @@ class RunScreen(Screen):
         defaults = self.app.defaults
         total = len(self.names)
         try:
-            if shutil.which("west") is None:
+            # Walidacja wpisów source/hex PRZED startem FAZY 1.
+            errors = core.validate_scenarios(self.names, scenarios)
+            if errors:
+                raise RuntimeError("\n".join(errors))
+
+            # Scenariusze `hex` mają gotową binarkę – FAZA 1 ich nie dotyczy.
+            to_build = [n for n in self.names if "hex" not in scenarios[n]]
+            if to_build and shutil.which("west") is None:
                 raise RuntimeError(
                     "brak 'west' w PATH – uruchom przez `board-power-test` "
                     "(launcher startuje środowisko NCS) albo w terminalu "
                     "nRF Connect")
-            workspace = await asyncio.to_thread(core.find_west_workspace)
-            if workspace != core.ROOT:
-                self.note(f"Workspace NCS: {workspace} (build out-of-tree)")
+            if len(to_build) < total and shutil.which("nrfutil") is None:
+                raise RuntimeError(
+                    "brak 'nrfutil' w PATH – potrzebny do wgrania gotowego "
+                    "pliku hex (scenariusze z polem `hex`)")
+            workspace = core.ROOT
+            if to_build:
+                workspace = await asyncio.to_thread(core.find_west_workspace)
+                if workspace != core.ROOT:
+                    self.note(f"Workspace NCS: {workspace} (build out-of-tree)")
 
             # --- FAZA 1: wszystkie buildy z góry ---
             built = {}
-            for i, name in enumerate(self.names, 1):
-                status.update(f"FAZA 1/2 · build {i}/{total} · {name}")
+            build_no = 0
+            for name in self.names:
+                scen = scenarios[name]
+                if "hex" in scen:
+                    built[name] = None
+                    self.note(f"{name}: gotowy hex ({scen['hex']}) – "
+                              "bez budowania.")
+                    continue
+                build_no += 1
+                status.update(f"FAZA 1/2 · build {build_no}/{len(to_build)}"
+                              f" · {name}")
                 cmd, build_dir = core.make_build_cmd(
-                    name, scenarios[name], self.prof_name, self.profile)
+                    name, scen, self.prof_name, self.profile)
                 await self.run_west(cmd, workspace, f"build {name}")
                 built[name] = build_dir
-            self.note(f"Zbudowano {total} obraz(ów).")
+            self.note(f"Zbudowano {len(to_build)} obraz(ów)." if to_build
+                      else "Nic do budowania (same gotowe pliki hex).")
 
             # --- FAZA 2: flash + pomiar ---
             saved = []
@@ -269,8 +292,9 @@ class RunScreen(Screen):
                         f"{scen.get('description', '')}\n\n"
                         "Programator podłączony i płytka ZASILONA\n"
                         "(np. VOUT z PPK2)?",
-                        yes=("Wgraj (flash --erase)" if attempt == 1
-                             else "Wgraj ponownie"),
+                        yes=("Wgraj ponownie" if attempt > 1
+                             else "Wgraj gotowy hex (z kasowaniem)"
+                             if scen.get("hex") else "Wgraj (flash --erase)"),
                         no="Pomiń scenariusz"))
                     if not ok:
                         self.note(f"Pominięto {name}.")
@@ -281,8 +305,8 @@ class RunScreen(Screen):
                     flashed = False
                     while True:
                         try:
-                            await self.run_west(core.make_flash_cmd(
-                                built[name], self.profile),
+                            await self.run_west(core.flash_cmd_for(
+                                scen, built[name], self.profile),
                                 workspace, f"flash {name}")
                             flashed = True
                             break

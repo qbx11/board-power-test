@@ -69,10 +69,14 @@ SDK (`~/ncs/<wersja>` albo `NCS_WORKSPACE`), woła westa stamtąd, a katalogi
 **FAZA 1 — buduj wszystko z góry:** `west build` (pristine, osobny katalog
 `build_<scenariusz>/`) dla **wszystkich** wybranych scenariuszy na raz — buildy
 trwają, więc lecą jednym ciągiem, zanim usiądziesz przy płytce i PPK2.
+Scenariusze z gotową binarką (pole `hex` w manifeście) tę fazę pomijają —
+liczniki i statusy pokazują tylko to, co faktycznie się buduje.
 
 **FAZA 2 — flash + pomiar, scenariusz po scenariuszu:**
-1. **Flash** — `west flash --erase`; kasowanie jest domyślne, bo stan pinów
-   i UICR potrafi zostać z poprzedniego obrazu i zafałszować pomiar. Nieudany
+1. **Flash** — `west flash --erase` (przy scenariuszu `hex`: bezpośrednio
+   `nrfutil device program` z pełnym kasowaniem); kasowanie jest domyślne,
+   bo stan pinów i UICR potrafi zostać z poprzedniego obrazu i zafałszować
+   pomiar. Nieudany
    flash (zły kabel, brak zasilania, programator nie widzi płytki) nie cofa
    przebiegu — dialog daje wybór: ponów / pomiń scenariusz / przerwij.
 2. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana
@@ -167,6 +171,35 @@ voltage     = "1.8"     # opcjonalne nadpisanie napięcia pomiaru
 Własne pliki conf/overlay wrzucaj do `scenarios/custom/`. Zupełnie nowy wariant
 firmware = nowa pozycja w `Kconfig` (choice) + gałąź w `src/main.c` — utrzymuj
 zasadę „jeden czysty obraz na scenariusz".
+
+### Własny firmware zespołu (source / hex)
+
+Scenariusz może mierzyć też **cudzy firmware**, nie tylko obrazy z tego repo —
+dwa dodatkowe, wzajemnie wykluczające się pola wpisu:
+
+```toml
+# wariant A: zbuduj własną aplikację Zephyr/NCS zespołu
+[scenarios.moja_aplikacja]
+description = "Build aplikacji zespołu i pomiar jak zwykle."
+source      = "../moj-projekt/app"    # katalog z CMakeLists.txt/prj.conf
+cmake_args  = ["-DEXTRA_CONF_FILE=low_power.conf"]   # opcjonalne
+
+# wariant B: gotowa binarka – bez budowania (FAZA 1 pomijana)
+[scenarios.gotowy_obraz]
+description = "Pomiar obrazu zbudowanego poza narzędziem."
+hex         = "../moj-projekt/build/zephyr/zephyr.hex"
+```
+
+- `source` — ścieżka względna (od katalogu repo) albo absolutna; build idzie
+  zwykłym `west build` (out-of-tree, katalog builda nadal `build_<scenariusz>/`
+  w tym repo), z profilem płytki i `BOARD_ROOT` jak dotąd.
+- `hex` — narzędzie tylko wgrywa wskazany plik (`nrfutil device program`,
+  z pełnym kasowaniem; `--no-erase` działa jak dotąd) i prowadzi przez pomiar;
+  `cmake_args` są tu zabronione.
+- Ścieżki są sprawdzane przed startem FAZY 1 — błędny wpis to czytelny błąd,
+  a nie wywrotka w połowie przebiegu. W dzienniku CSV kolumna `flagi` zawiera
+  odpowiednio flagi builda + `source=...` albo `hex=...`, żeby było wiadomo,
+  co dokładnie zmierzono.
 
 ## Profile płytek i dodanie własnej
 

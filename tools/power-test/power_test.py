@@ -154,6 +154,58 @@ def board_root_arg(profile):
     return None
 
 
+def resolve_path(path_str):
+    """Ścieżka z manifestu -> absolutna (względne liczone od katalogu repo)."""
+    p = Path(path_str).expanduser()
+    if not p.is_absolute():
+        p = ROOT / p
+    return p.resolve()
+
+
+def validate_scenarios(names, scenarios):
+    """Walidacja wpisów manifestu PRZED startem FAZY 1 – zwraca listę
+    czytelnych błędów (pusta = wszystko OK).
+
+    Warianty wpisu (wzajemnie wykluczające się):
+      - zwykły: `cmake_args` (firmware z tego repo),
+      - `source` = katalog własnej aplikacji Zephyr/NCS (cmake_args opcjonalne),
+      - `hex`    = gotowa binarka, bez budowania (cmake_args zabronione)."""
+    errors = []
+    for name in names:
+        scen = scenarios[name]
+        if "source" in scen and "hex" in scen:
+            errors.append(f"scenariusz '{name}': pola 'source' i 'hex' "
+                          "wykluczają się – zostaw jedno z nich")
+            continue
+        if "hex" in scen:
+            if scen.get("cmake_args"):
+                errors.append(f"scenariusz '{name}': 'cmake_args' nie działa "
+                              "z 'hex' (gotowa binarka nie jest budowana)")
+            p = resolve_path(scen["hex"])
+            if not p.is_file():
+                errors.append(f"scenariusz '{name}': plik hex "
+                              f"'{scen['hex']}' nie istnieje ({p})")
+        elif "source" in scen:
+            p = resolve_path(scen["source"])
+            if not p.is_dir():
+                errors.append(f"scenariusz '{name}': katalog źródeł "
+                              f"'{scen['source']}' nie istnieje ({p})")
+        elif not scen.get("cmake_args"):
+            errors.append(f"scenariusz '{name}' nie ma cmake_args w manifeście")
+    return errors
+
+
+def scenario_flags(scen):
+    """Zawartość kolumny 'flagi' w CSV – ma mówić, CO zmierzono:
+    flagi builda + ścieżka source, albo ścieżka gotowego hex."""
+    parts = list(scen.get("cmake_args", []))
+    if scen.get("source"):
+        parts.append(f"source={scen['source']}")
+    if scen.get("hex"):
+        parts.append(f"hex={scen['hex']}")
+    return " ".join(parts)
+
+
 def resolve_profile(manifest, name):
     profiles = manifest.get("boards", {})
     name = name or manifest.get("defaults", {}).get("profile")
@@ -202,15 +254,30 @@ def cmd_run(args):
         die(f"nieznane scenariusze: {', '.join(unknown)}. "
             f"Dostępne: {', '.join(scenarios)}")
 
+    # Walidacja manifestu (source/hex) PRZED startem FAZY 1 –
+    # lepiej wyłożyć się teraz niż w połowie przebiegu.
+    errors = validate_scenarios(names, scenarios)
+    if errors:
+        die("\n  ".join(["błędne wpisy w scenarios.toml:"] + errors))
+
+    # Scenariusze `hex` mają gotową binarkę – nie budujemy ich (i bez
+    # nich west może w ogóle nie być potrzebny).
+    to_build = [n for n in names if "hex" not in scenarios[n]]
+
     workspace = ROOT
     if not args.dry_run:
-        if shutil.which("west") is None:
+        if to_build and shutil.which("west") is None:
             die("brak 'west' w PATH. Otwórz terminal nRF Connect lub uruchom:\n"
                 "  nrfutil toolchain-manager launch --ncs-version v3.4.0 --shell")
-        workspace = find_west_workspace()
-        if workspace != ROOT:
-            print(f"Workspace NCS: {workspace} (repo poza workspace'em – "
-                  "build out-of-tree)")
+        if (len(to_build) < len(names)
+                and shutil.which("nrfutil") is None):
+            die("brak 'nrfutil' w PATH – potrzebny do wgrania gotowego "
+                "pliku hex (scenariusze z polem `hex`)")
+        if to_build:
+            workspace = find_west_workspace()
+            if workspace != ROOT:
+                print(f"Workspace NCS: {workspace} (repo poza workspace'em – "
+                      "build out-of-tree)")
 
     # Identyfikacja egzemplarza – obowiązkowa, żeby wyniki różnych
     # sztuk płytki się nie pomieszały.
@@ -221,12 +288,16 @@ def cmd_run(args):
 
     # --- FAZA 1: zbuduj WSZYSTKIE obrazy z góry (buildy trwają;
     #     przy płytce i PPK2 nie ma potem na co czekać) ---
-    print(f"\n=== FAZA 1/2: budowanie {len(names)} obraz(ów) ===")
+    print(f"\n=== FAZA 1/2: budowanie {len(to_build)} obraz(ów) ===")
+    if not to_build:
+        print("(nic do budowania – wybrane scenariusze mają gotowe pliki hex)")
     built = {}
     for name in names:
         scen = scenarios[name]
-        if not scen.get("cmake_args"):
-            die(f"scenariusz '{name}' nie ma cmake_args w manifeście")
+        if "hex" in scen:
+            print(f"\n--- {name}: gotowy hex ({scen['hex']}) – bez budowania")
+            built[name] = None
+            continue
         print(f"\n--- build: {name} – {scen.get('description', '')}")
         cmd, build_dir = make_build_cmd(name, scen, prof_name, profile)
         run_cmd(cmd, args.dry_run, cwd=workspace)
@@ -246,14 +317,19 @@ def cmd_run(args):
 def make_build_cmd(name, scen, prof_name, profile):
     """Komenda `west build` + katalog builda dla scenariusza.
 
-    Ścieżki absolutne, bo west może być wołany z katalogu SDK
-    (build out-of-tree, gdy repo leży poza workspace'em)."""
+    Źródłem jest to repo, chyba że wpis ma `source` – wtedy budujemy
+    wskazaną aplikację zespołu, ale katalog builda i tak zostaje tutaj
+    (build_<scenariusz>/). Ścieżki absolutne, bo west może być wołany
+    z katalogu SDK (build out-of-tree, gdy repo leży poza workspace'em)."""
     build_dir = f"build_{name}" if prof_name == "btz" else f"build_{prof_name}_{name}"
+    src = resolve_path(scen["source"]) if scen.get("source") else ROOT
     cmd = ["west", "build", "-b", profile["board"], "-p", "always",
-           "-d", str(ROOT / build_dir), str(ROOT)]
+           "-d", str(ROOT / build_dir), str(src)]
     root_arg = board_root_arg(profile)
-    extra = [root_arg] if root_arg else []
-    return cmd + ["--"] + extra + list(scen["cmake_args"]), build_dir
+    extra = ([root_arg] if root_arg else []) + list(scen.get("cmake_args", []))
+    if extra:
+        cmd += ["--"] + extra
+    return cmd, build_dir
 
 
 def make_flash_cmd(build_dir, profile, erase=True):
@@ -265,6 +341,28 @@ def make_flash_cmd(build_dir, profile, erase=True):
     if erase:
         cmd += ["--erase"]
     return cmd
+
+
+def make_hex_flash_cmd(hex_path, erase=True):
+    """Komenda wgrania GOTOWEGO pliku .hex (scenariusz z polem `hex`).
+
+    Nie przez `west flash --hex-file`: on wymaga katalogu builda (runner
+    i jego konfiguracja powstają przy buildzie), którego scenariusz `hex`
+    celowo nie ma. Wgrywamy bezpośrednio `nrfutil device program` –
+    nrfutil i tak jest wymaganiem narzędzia, obsługuje J-Link (DK i
+    zewnętrzny) i ma odpowiednik `--erase` (pełne kasowanie chipu);
+    bez erase zostaje domyślne kasowanie tylko zapisywanych stron."""
+    cmd = ["nrfutil", "device", "program", "--firmware", str(hex_path)]
+    if erase:
+        cmd += ["--options", "chip_erase_mode=ERASE_ALL"]
+    return cmd
+
+
+def flash_cmd_for(scen, build_dir, profile, erase=True):
+    """Właściwa komenda flash dla wpisu: gotowy hex albo katalog builda."""
+    if scen.get("hex"):
+        return make_hex_flash_cmd(resolve_path(scen["hex"]), erase=erase)
+    return make_flash_cmd(build_dir, profile, erase=erase)
 
 
 def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
@@ -280,7 +378,7 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
     if not args.dry_run:
         ask("Programator podłączony i płytka ZASILONA (np. VOUT z PPK2)? "
             "[Enter = wgrywam] ")
-    run_cmd(make_flash_cmd(build_dir, profile, erase=not args.no_erase),
+    run_cmd(flash_cmd_for(scen, build_dir, profile, erase=not args.no_erase),
             args.dry_run, cwd=workspace)
 
     # --- Instrukcja pomiaru (Power Profiler robi resztę) ---
@@ -346,7 +444,7 @@ def make_row(name, scen, profile, sample, voltage, current, uwagi):
         "plytka": profile["board"],
         "egzemplarz": sample,
         "scenariusz": name,
-        "flagi": " ".join(scen["cmake_args"]),
+        "flagi": scenario_flags(scen),
         "napiecie_V": voltage,
         "prad_uA": current,
         "oczekiwane": scen.get("expected", ""),
