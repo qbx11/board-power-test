@@ -139,7 +139,7 @@ def find_west_workspace():
 
 def board_root_arg(profile):
     """-DBOARD_ROOT=... : env BOARD_ROOT > manifest; tylko gdy katalog
-    faktycznie zawiera boards/ (jak w scripts/build.sh)."""
+    faktycznie zawiera boards/."""
     root = os.environ.get("BOARD_ROOT") or profile.get("board_root")
     if not root:
         return None
@@ -324,9 +324,8 @@ def make_build_cmd(name, scen, prof_name, profile, default_prof=None):
     z katalogu SDK (build out-of-tree, gdy repo leży poza workspace'em).
 
     Profil domyślny (`default_prof` z [defaults]) buduje do
-    build_<scenariusz>/ – jak scripts/build.sh i README; pozostałe
-    profile dostają prefiks (build_<profil>_<scenariusz>/), żeby ich
-    obrazy się nie nadpisywały."""
+    build_<scenariusz>/ – jak w README; pozostałe profile dostają prefiks
+    (build_<profil>_<scenariusz>/), żeby ich obrazy się nie nadpisywały."""
     prefix = "" if prof_name == default_prof else f"{prof_name}_"
     build_dir = f"build_{prefix}{name}"
     src = resolve_path(scen["source"]) if scen.get("source") else ROOT
