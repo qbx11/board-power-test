@@ -183,8 +183,7 @@ class RunScreen(Screen):
     def compose(self):
         yield Static("", id="status")
         yield VerticalScroll(id="cmds")
-        yield Static("Esc — przerwij i wróć · klik w tytuł komendy — pełny log",
-                     id="hint")
+        yield Static("Esc — przerwij i wróć", id="hint")
 
     def on_mount(self):
         self.flow()
@@ -396,12 +395,18 @@ class PowerTestApp(App):
                  padding: 0 1; }
     .scenario-row { height: auto; }
     .scen-check { border: none; background: transparent; padding: 0;
-                  height: 1; }
+                  height: 1; width: auto; }
     .scen-check:focus { text-style: bold; }
-    .scen-more { margin-left: 4; width: 1fr; height: auto; }
+    .scen-check.-on { text-style: bold; }
+    .scen-more { width: 1fr; height: auto; }
     .scen-more CollapsibleTitle { color: #888888; }
     .scen-desc { color: #888888; }
-    ToggleButton > .toggle--button { background: transparent; color: $text; }
+    /* X w checkboksie: niewidoczny gdy odznaczony (kolor tła), widoczny
+       po zaznaczeniu – inaczej nie widać, co jest wybrane. */
+    ToggleButton > .toggle--button { background: transparent;
+                                     color: $background; }
+    ToggleButton.-on > .toggle--button { background: transparent;
+                                         color: $text; }
     Input { background: transparent; border: round #555555; }
     Input:focus { border: round #aaaaaa; }
     SelectCurrent { background: transparent; border: round #555555; }
@@ -417,6 +422,8 @@ class PowerTestApp(App):
     Button:focus { background: transparent; border: round #aaaaaa;
                    text-style: bold; }
     Button.-active { background: transparent; border: round #aaaaaa; }
+    Button.pressed, Button.pressed:hover, Button.pressed:focus {
+        background: #333333; border: round #aaaaaa; }
     #actions { margin-top: 1; height: auto; }
     #actions Button { margin-right: 2; }
 
@@ -465,20 +472,18 @@ class PowerTestApp(App):
             yield Label("Scenariusze", classes="h")
             with Vertical(id="scenarios"):
                 # Wybór i opis to OSOBNE cele kliknięcia: checkbox z pełną
-                # nazwą zaznacza scenariusz, a zwijane "opis" pod spodem
-                # tylko rozwija szczegóły (wcześniej nazwa była tytułem
-                # Collapsible i klik w nią rozwijał opis zamiast wybierać).
+                # nazwą zaznacza scenariusz, a strzałka za nazwą (Collapsible
+                # z pustym tytułem) rozwija opis. Bez wartości oczekiwanych –
+                # te pokazuje dopiero instrukcja pomiaru.
                 for n, s in self.scenarios.items():
                     body = s.get("description", "")
-                    if s.get("expected"):
-                        body += f"\nOczekiwane: {s['expected']}"
                     if s.get("note"):
                         body += f"\nUwaga: {s['note']}"
-                    with Vertical(classes="scenario-row"):
+                    with Horizontal(classes="scenario-row"):
                         yield Checkbox(_label(n, s), value=False,
                                        classes="scen-check", id=f"check_{n}")
                         yield Collapsible(Static(body, classes="scen-desc"),
-                                          title="opis", collapsed=True,
+                                          title="", collapsed=True,
                                           classes="scen-more",
                                           id=f"more_{n}")
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
@@ -500,6 +505,13 @@ class PowerTestApp(App):
             self.push_screen(ResultsScreen())
         elif event.button.id == "start":
             self._start()
+
+    def on_checkbox_changed(self, event):
+        """'Zaznacz wszystkie' wygląda na wciśnięty dokładnie wtedy, gdy
+        zaznaczone są wszystkie scenariusze."""
+        boxes = self.query(".scen-check")
+        self.query_one("#select_all", Button).set_class(
+            bool(boxes) and all(box.value for box in boxes), "pressed")
 
     def _start(self):
         names = [n for n in self.scenarios

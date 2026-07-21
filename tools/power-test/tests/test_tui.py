@@ -90,8 +90,39 @@ class TuiSetupTests(TuiHarness):
 
             await pilot.click("#more_zwykly CollapsibleTitle")
             await pilot.pause()
-            self.assertFalse(more.collapsed)     # "opis" rozwija szczegóły
+            self.assertFalse(more.collapsed)     # strzałka rozwija szczegóły
             self.assertTrue(checkbox.value)      # ...nie ruszając wyboru
+
+    async def test_opis_bez_wartosci_oczekiwanych(self):
+        # W polu Scenariusze opis nie pokazuje oczekiwanych/zmierzonych
+        # zużyć (pole `expected`) – te widać dopiero w instrukcji pomiaru.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            body = str(app.query_one("#more_zwykly .scen-desc",
+                                     Static).render())
+            self.assertIn("Firmware z tego repo", body)
+            self.assertNotIn("Oczekiwane", body)
+            self.assertNotIn("0.95", body)
+
+    async def test_zaznacz_wszystkie_odzwierciedla_stan(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            from textual.widgets import Button
+            button = app.query_one("#select_all", Button)
+            self.assertFalse(button.has_class("pressed"))
+
+            await pilot.click("#select_all")
+            await pilot.pause()
+            self.assertTrue(button.has_class("pressed"))
+
+            # odznaczenie choć jednego scenariusza "wyciska" przycisk
+            app.query_one("#check_zwykly", Checkbox).value = False
+            await pilot.pause()
+            self.assertFalse(button.has_class("pressed"))
+
+            app.query_one("#check_zwykly", Checkbox).value = True
+            await pilot.pause()
+            self.assertTrue(button.has_class("pressed"))
 
 
 class TuiRunTests(TuiHarness):

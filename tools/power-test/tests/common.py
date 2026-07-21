@@ -41,6 +41,7 @@ board = "nrf54l15dk/nrf54l15/cpuapp"
 label       = "Zwykły"
 description = "Firmware z tego repo (regresja)."
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y"]
+expected    = "~0.5 uA (DK zmierzone ~0.95 uA)"
 
 [scenarios.zrodlowy]
 label       = "Źródłowy"
