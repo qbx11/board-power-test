@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ============================================================
+#  board-power-test – globalny launcher (jak `claude` w terminalu)
+# ============================================================
+# Wpisujesz `board-power-test` z DOWOLNEGO katalogu:
+#   bez argumentów -> menu interaktywne, z argumentami -> jak CLI
+#   (list / run / report, patrz --help).
+#
+# Gdy `west` nie jest w PATH (zwykły terminal, nie nRF Connect),
+# launcher sam startuje środowisko NCS przez nrfutil toolchain-manager.
+#   NCS_VERSION          – wersja toolchaina (domyślnie v3.4.0)
+#   BPT_NO_NCS_LAUNCH=1  – wyłącz auto-start (np. do dry-run bez NCS)
+set -euo pipefail
+
+# Rozwiąż symlinki (instalator linkuje nas do ~/.local/bin),
+# żeby znaleźć prawdziwy katalog repo.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+CLI="$REPO/tools/power-test/power_test.py"
+
+[ -f "$CLI" ] || { echo "board-power-test: nie znaleziono $CLI" >&2; exit 1; }
+
+# Tytuł okna/karty terminala (OSC 0) – aplikacja nie rysuje własnego
+# paska nagłówka, nazwa siedzi tam, gdzie w każdym porządnym CLI.
+printf '\033]0;board-power-test\007'
+
+# Interfejs okienkowy (TUI, Textual) żyje w lokalnym venv repo, tworzonym
+# automatycznie przy pierwszym uruchomieniu. Gdy instalacja się nie uda
+# (np. brak sieci), narzędzie działa dalej w trybie tekstowym.
+#   BPT_NO_TUI=1  – nie instaluj/nie używaj TUI (zawsze tryb tekstowy)
+PYBIN="python3"
+VENV="$REPO/.venv"
+if [ -x "$VENV/bin/python" ]; then
+	PYBIN="$VENV/bin/python"
+elif [ "${BPT_NO_TUI:-}" != "1" ]; then
+	echo "board-power-test: pierwsze uruchomienie – instaluję interfejs (venv + textual)..."
+	if python3 -m venv "$VENV" >/dev/null 2>&1 &&
+		"$VENV/bin/pip" install --quiet textual >/dev/null 2>&1; then
+		PYBIN="$VENV/bin/python"
+	else
+		echo "board-power-test: instalacja interfejsu nie powiodła się – używam trybu tekstowego." >&2
+		rm -rf "$VENV"
+	fi
+fi
+
+# `west` już dostępny (terminal nRF Connect) albo auto-start wyłączony:
+if command -v west >/dev/null 2>&1 || [ "${BPT_NO_NCS_LAUNCH:-}" = "1" ]; then
+	exec "$PYBIN" "$CLI" "$@"
+fi
+
+# Zwykły terminal: przezroczyście uruchom CLI wewnątrz środowiska NCS.
+if ! command -v nrfutil >/dev/null 2>&1; then
+	echo "board-power-test: brak 'west' i brak 'nrfutil' w PATH." >&2
+	echo "Zainstaluj nRF Util (nrfutil) albo uruchom w terminalu nRF Connect." >&2
+	exit 1
+fi
+
+NCS="${NCS_VERSION:-v3.4.0}"
+
+# nrfutil jest modułowy: subkomendę toolchain-manager trzeba raz doinstalować.
+if ! nrfutil list 2>/dev/null | grep -q "toolchain-manager"; then
+	echo "board-power-test: nrfutil nie ma zainstalowanego polecenia 'toolchain-manager'."
+	read -r -p "Zainstalować teraz? (nrfutil install toolchain-manager) [t/N]: " odp
+	[[ "$odp" =~ ^[tTyY] ]] || {
+		echo "Przerwano. Zainstaluj ręcznie:  nrfutil install toolchain-manager" >&2
+		exit 1
+	}
+	nrfutil install toolchain-manager
+fi
+
+# Sam toolchain NCS też musi być pobrany (jednorazowo, duży download).
+if ! nrfutil toolchain-manager list 2>/dev/null | grep -qF "$NCS"; then
+	echo "board-power-test: toolchain NCS $NCS nie jest zainstalowany."
+	read -r -p "Pobrać teraz? (nrfutil toolchain-manager install --ncs-version $NCS, kilka GB) [t/N]: " odp
+	[[ "$odp" =~ ^[tTyY] ]] || {
+		echo "Przerwano. Zainstaluj ręcznie:  nrfutil toolchain-manager install --ncs-version $NCS" >&2
+		exit 1
+	}
+	nrfutil toolchain-manager install --ncs-version "$NCS"
+fi
+
+echo "board-power-test: brak 'west' w PATH – startuję środowisko NCS $NCS (nrfutil toolchain-manager)..."
+exec nrfutil toolchain-manager launch --ncs-version "$NCS" -- "$PYBIN" "$CLI" "$@"

@@ -23,7 +23,7 @@
 #include <zephyr/drivers/hwinfo.h>
 #endif
 
-/* Lekki log tylko gdy jest aktywna konsola (dołączony debug.conf).
+/* Lekki log tylko gdy jest aktywna konsola (build diagnostyczny z CONFIG_CONSOLE=y).
  * W obrazie pomiarowym CONFIG_CONSOLE jest wyłączone, więc APP_LOG znika
  * do pustej instrukcji i firmware naprawdę nic nie wypisuje.
  * (Uwaga: CONFIG_PRINTK bywa wymuszone na 'y' przez jądro, dlatego
