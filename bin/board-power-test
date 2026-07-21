@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# ============================================================
+#  board-power-test – globalny launcher (jak `claude` w terminalu)
+# ============================================================
+# Wpisujesz `board-power-test` z DOWOLNEGO katalogu:
+#   bez argumentów -> menu interaktywne, z argumentami -> jak CLI
+#   (list / run / report, patrz --help).
+#
+# Gdy `west` nie jest w PATH (zwykły terminal, nie nRF Connect),
+# launcher sam startuje środowisko NCS przez nrfutil toolchain-manager.
+#   NCS_VERSION          – wersja toolchaina (domyślnie v3.4.0)
+#   BPT_NO_NCS_LAUNCH=1  – wyłącz auto-start (np. do dry-run bez NCS)
+set -euo pipefail
+
+# Rozwiąż symlinki (instalator linkuje nas do ~/.local/bin),
+# żeby znaleźć prawdziwy katalog repo.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+CLI="$REPO/tools/power-test/power_test.py"
+
+[ -f "$CLI" ] || { echo "board-power-test: nie znaleziono $CLI" >&2; exit 1; }
+
+# `west` już dostępny (terminal nRF Connect) albo auto-start wyłączony:
+if command -v west >/dev/null 2>&1 || [ "${BPT_NO_NCS_LAUNCH:-}" = "1" ]; then
+	exec python3 "$CLI" "$@"
+fi
+
+# Zwykły terminal: przezroczyście uruchom CLI wewnątrz środowiska NCS.
+if command -v nrfutil >/dev/null 2>&1; then
+	NCS="${NCS_VERSION:-v3.4.0}"
+	echo "board-power-test: brak 'west' w PATH – startuję środowisko NCS $NCS (nrfutil toolchain-manager)..."
+	exec nrfutil toolchain-manager launch --ncs-version "$NCS" -- python3 "$CLI" "$@"
+fi
+
+echo "board-power-test: brak 'west' i brak 'nrfutil' w PATH." >&2
+echo "Zainstaluj nRF Util (nrfutil) albo uruchom w terminalu nRF Connect." >&2
+exit 1

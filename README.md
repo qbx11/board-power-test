@@ -42,7 +42,7 @@ Domyślny tryb (bez podania `-DCONFIG_...`) to `SLEEP_SYSTEM_OFF_RESET_ONLY`.
 ## Struktura
 
 ```
-nrf54l15-power-test/
+board-power-test/
 ├── CMakeLists.txt
 ├── Kconfig            # choice: wybór trybu snu (build-time)
 ├── prj.conf           # baza: konsola/serial/logi/RTT WYŁĄCZONE
@@ -50,6 +50,8 @@ nrf54l15-power-test/
 ├── debug_rtt.conf     # sanity przez RTT / J-Link RTT Viewer (NIE do pomiaru!)
 ├── scenarios.toml     # manifest scenariuszy dla narzędzia power-test
 ├── scenarios/custom/  # własne conf/overlay dla scenariuszy custom
+├── bin/board-power-test   # globalny launcher (auto-start środowiska NCS)
+├── scripts/install.sh # instalacja komendy `board-power-test` (symlink ~/.local/bin)
 ├── scripts/build.sh   # buduje wybrany tryb jedną komendą (bez GUI)
 ├── tools/power-test/  # CLI: build -> flash -> pomiar -> dziennik CSV
 ├── reports/           # pomiary.csv – dziennik pomiarów (tworzony przez narzędzie)
@@ -65,18 +67,32 @@ CLI dla zespołu do szybkiego przetestowania nowej płytki we wszystkich trybach
 Power Profiler; narzędzie automatyzuje build+flash czystych obrazów, prowadzi przez
 procedurę pomiaru (w tym twarde „odłącz SWD") i zapisuje wyniki do wspólnej tabeli.
 
-Wymagania: Python ≥ 3.11 (bez `pip install` – tylko stdlib), `west` w PATH
-(terminal nRF Connect). Uruchamiaj z katalogu projektu:
+Wymagania: Python ≥ 3.11 (bez `pip install` – tylko stdlib). O `west` nie musisz
+dbać – launcher sam startuje środowisko NCS, gdy trzeba (patrz niżej).
+
+**Instalacja (raz, bez sudo):**
 
 ```sh
-python3 tools/power-test/power_test.py                      # bez argumentów: MENU (tryb prowadzony)
-python3 tools/power-test/power_test.py list                 # dostępne scenariusze
-python3 tools/power-test/power_test.py run reset_only idle  # wybrane scenariusze
-python3 tools/power-test/power_test.py run --all            # cała macierz trybów
-python3 tools/power-test/power_test.py run --all -p dk      # na płytce referencyjnej DK
-python3 tools/power-test/power_test.py run reset_only -n    # dry-run: tylko pokaż komendy
-python3 tools/power-test/power_test.py report               # tabela zebranych pomiarów
+./scripts/install.sh          # symlink w ~/.local/bin
 ```
+
+Od tej pory w **dowolnym terminalu i katalogu** wpisujesz po prostu:
+
+```sh
+board-power-test                      # bez argumentów: MENU (tryb prowadzony)
+board-power-test list                 # dostępne scenariusze
+board-power-test run reset_only idle  # wybrane scenariusze
+board-power-test run --all            # cała macierz trybów
+board-power-test run --all -p dk      # na płytce referencyjnej DK
+board-power-test run reset_only -n    # dry-run: tylko pokaż komendy
+board-power-test report               # tabela zebranych pomiarów
+```
+
+Gdy `west` nie jest w PATH (zwykły terminal), launcher **sam** uruchamia CLI
+wewnątrz środowiska NCS przez `nrfutil toolchain-manager` (domyślnie v3.4.0;
+inna wersja: `NCS_VERSION=v3.5.0 board-power-test`, wyłączenie auto-startu:
+`BPT_NO_NCS_LAUNCH=1`). Bez instalacji narzędzie działa też po staremu:
+`python3 tools/power-test/power_test.py ...` z katalogu projektu.
 
 Przebieg jednego scenariusza: `west build` (pristine, osobny `build_<scenariusz>/`)
 → `west flash --erase` (kasowanie domyślnie – stan pinów/UICR zostaje z poprzedniego
