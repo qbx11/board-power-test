@@ -21,56 +21,94 @@ Wymagania:
 - J-Link (flash) oraz PPK2 + nRF Connect Power Profiler (pomiar)
 - płytka `BTZ_EndDevice`: repo `Projekt-BLE-Mesh` (`export BOARD_ROOT=...`)
 
-## Komendy
+## Dodawanie własnego kodu
 
-| Komenda | Działanie |
+Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
+(klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).
+Firmware pochodzi z jednego z trzech źródeł.
+
+**1. Firmware z repo + flagi Kconfig.** Domyślnie budowany jest `src/main.c`;
+tryb snu i parametry wybierasz flagami. Własny `.conf`/overlay wrzuć do
+`scenarios/custom/`.
+
+```toml
+[scenarios.moj_test]
+label       = "Mój test — regulator X"     # nazwa w interfejsie (opc.)
+description = "System OFF + overlay wyłączający regulator X."
+cmake_args  = [
+  "-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y",
+  "-DEXTRA_CONF_FILE=scenarios/custom/moj_test.conf",
+  "-DDTC_OVERLAY_FILE=scenarios/custom/moj_test.overlay",
+]
+expected    = "~0.5 uA"     # tylko wyświetlane
+voltage     = "1.8"         # opc. napięcie [V]
+```
+
+Tryby snu (flaga `-DCONFIG_<...>=y`, jeden na obraz):
+
+| Kconfig | Tryb |
 | --- | --- |
-| `board-power-test` | interfejs okienkowy (TUI); bez biblioteki `textual` — menu tekstowe |
-| `board-power-test list` | lista scenariuszy |
-| `board-power-test run <scenariusz…>` | build → flash → pomiar → zapis do CSV |
-| `board-power-test run --all` | wszystkie scenariusze po kolei |
-| `board-power-test report` | tabela zebranych pomiarów |
+| `SLEEP_SYSTEM_OFF_RESET_ONLY` | System OFF, wybudzenie tylko resetem (minimum) |
+| `SLEEP_SYSTEM_ON_IDLE` | System ON idle (RAM + RTC podtrzymane) |
+| `SLEEP_SYSTEM_OFF_WAKE_GPIO` | System OFF + wybudzenie przyciskiem `sw0` |
+| `SLEEP_SYSTEM_OFF_RAM_RETAINED` | System OFF + retencja regionu RAM |
+| `SLEEP_PERIODIC_SYSTEM_ON` | Cykl: błysk aktywności + sen w System ON |
+| `SLEEP_PERIODIC_SYSTEM_OFF` | Cykl: błysk aktywności + sen w System OFF (reboot) |
 
-Flagi `run`:
+Periodyczne strojisz flagami `-DCONFIG_PERIODIC_PERIOD_MS=10000` (okres) i
+`-DCONFIG_PERIODIC_ACTIVE_MS=5` (długość błysku).
 
-| Flaga | Znaczenie |
-| --- | --- |
-| `-p, --profile <profil>` | profil płytki (dom. z `[defaults]`), np. `dk` |
-| `-s, --sample <opis>` | egzemplarz płytki, np. `BTZ #2` (pomija pytanie) |
-| `--no-erase` | flash bez `--erase` |
-| `-n, --dry-run` | tylko pokaż komendy, nic nie wykonuj |
+**2. Własna aplikacja (`source`).** Buduje CUDZY katalog Zephyr/NCS zamiast repo;
+`cmake_args` (opcjonalne) trafiają do tego builda.
 
-Zmienne środowiskowe: `BOARD_ROOT`, `NCS_VERSION` (dom. `v3.4.0`),
-`NCS_WORKSPACE`, `BPT_NO_TUI=1`.
+```toml
+[scenarios.moja_aplikacja]
+description = "Build aplikacji zespołu i pomiar jak zwykle."
+source      = "../moj-projekt/app"                # katalog z CMakeLists.txt
+cmake_args  = ["-DEXTRA_CONF_FILE=low_power.conf"] # opc., względem tej aplikacji
+```
 
-## Przebieg pomiaru
+**3. Gotowa binarka (`hex`).** Pomija budowanie — narzędzie tylko programuje
+układ (z pełnym kasowaniem). `cmake_args` zabronione.
 
-**FAZA 1 — build.** `west build` (pristine, katalog `build_<scenariusz>/`) dla
-wszystkich wybranych scenariuszy. Scenariusze z gotową binarką (`hex`) tę fazę
-pomijają.
+```toml
+[scenarios.gotowy_obraz]
+description = "Pomiar obrazu zbudowanego poza narzędziem."
+hex         = "../moj-projekt/build/zephyr/zephyr.hex"
+```
 
-**FAZA 2 — flash + pomiar, scenariusz po scenariuszu:**
-1. **Flash** — `west flash --erase`. Nieudany flash nie przerywa przebiegu:
-   ponów / pomiń / przerwij.
-2. **Pomiar** — narzędzie wypisuje instrukcję (napięcie, VOUT→VDD, czas
-   ustabilizowania, wartość oczekiwana). Ustaw Power Profiler w tryb Source
-   meter i zasil sam SoC z PPK2.
-3. **Odłącz SWD/J-Link** — podłączony debugger dodaje własny prąd (wymagane
-   potwierdzenie).
-4. **Wpis wyniku** (µA lub mA) → wiersz w `reports/pomiary.csv`.
+Pozostałe pola wpisu: `expected` (wartość wyświetlana przy pomiarze), `settle_s`
+(czas ustabilizowania [s]), `note` (uwaga w instrukcji). `source` i `hex`
+wykluczają się; ścieżki sprawdzane są **przed** budowaniem. Uruchomienie:
+`board-power-test run moj_test` (albo zaznacz w interfejsie).
 
-`reports/pomiary.csv` to wspólna historia pomiarów — **commituj ten plik.**
+## Dodawanie własnej płytki
 
-> Nowa płytka: zacznij od `run reset_only -p dk`. Znany dobry wynik DK
-> (~0,95 µA) weryfikuje procedurę i sprzęt, zanim zmierzysz nową płytkę.
+Płytkę opisuje **profil** `[boards.<nazwa>]`. Wybierasz go flagą `-p <nazwa>`
+albo w menu; domyślny ustawia `[defaults].profile`.
 
-## Konfiguracja
+```toml
+[boards.mojaplytka]
+board      = "moja_plytka/nrf54l15/cpuapp"   # target `west build -b`
+runner     = "jlink"                          # opc.: `west flash -r` (DK pomiń)
+board_root = "../moj-projekt/app"             # opc.: katalog z boards/<definicja>;
+                                              #       nadpisuje go export BOARD_ROOT
+```
 
-Scenariusze i profile płytek definiuje `scenarios.toml`. Wbudowane scenariusze:
+**Overlay płytki.** Region retencji RAM (dla scenariusza `ram_retained`) i inne
+poprawki sprzętowe wstaw w `boards/`. Nazwa pliku musi odpowiadać targetowi —
+ukośniki/myślniki zamień na podkreślenia — wtedy Zephyr aplikuje go automatycznie:
 
-- **statyczne** (prąd snu): `reset_only`, `idle`, `wake_gpio`, `ram_retained`
-- **periodyczne** (prąd średni cyklu): `periodic_on`, `periodic_off`
+```
+"moja_plytka/nrf54l15/cpuapp" → boards/moja_plytka_nrf54l15_cpuapp.overlay
+```
 
-Własny scenariusz = skopiowanie wpisu w `scenarios.toml` i podmiana flag; wzory
-są w komentarzach na końcu pliku. Opisy i wartości oczekiwane pokazuje
-`board-power-test list`.
+Wzorzec regionu retencji jest w `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`
+(dostosuj adresy do mapy RAM swojej płytki). Pomiar na nowej płytce:
+`board-power-test run reset_only -p mojaplytka`.
+
+## Testy
+
+```sh
+.venv/bin/python -m unittest discover -s tools/power-test/tests
+```
