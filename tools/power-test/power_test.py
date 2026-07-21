@@ -306,6 +306,71 @@ def add_scenario(path_str, name=None, label=None, description=None,
     return name, entry
 
 
+def remove_scenario(name):
+    """Usuń wpis [scenarios.<name>] z scenarios.toml. Operacja tekstowa
+    (a nie przepisanie sparsowanego TOML-a), żeby komentarze i
+    formatowanie reszty manifestu zostały nietknięte."""
+    if name not in load_manifest().get("scenarios", {}):
+        raise ValueError(f"scenariusz '{name}' nie istnieje w manifeście")
+    lines = MANIFEST_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
+    header = re.compile(rf"^\s*\[scenarios\.{re.escape(name)}\]\s*(#.*)?$")
+    any_section = re.compile(r"^\s*\[")
+    out, i = [], 0
+    while i < len(lines):
+        if header.match(lines[i]):
+            i += 1
+            while i < len(lines) and not any_section.match(lines[i]):
+                i += 1
+            while out and not out[-1].strip():   # puste linie nad wpisem
+                out.pop()
+            if i < len(lines):
+                out.append("\n")
+        else:
+            out.append(lines[i])
+            i += 1
+    MANIFEST_PATH.write_text("".join(out), encoding="utf-8")
+
+
+# ------------------------------------------------------------
+#  Pomijanie budowania, gdy katalog builda ma już gotowy obraz
+# ------------------------------------------------------------
+
+def _build_fingerprint(cmd):
+    """Komenda builda bez '-p <tryb>' (tryb pristine nie zmienia tego,
+    CO się buduje – tylko czy od zera)."""
+    out, skip = [], False
+    for arg in cmd:
+        if skip:
+            skip = False
+            continue
+        if arg == "-p":
+            skip = True
+            continue
+        out.append(arg)
+    return shlex.join(out)
+
+
+def build_up_to_date(build_dir, cmd):
+    """Czy build_<scenariusz>/ ma gotowy obraz zbudowany DOKŁADNIE tą
+    komendą (płytka, flagi, źródło)? Jeśli tak, build można pominąć.
+
+    Uwaga: zmiany w samych plikach źródłowych nie są śledzone – od
+    wymuszenia świeżego builda jest --pristine (CLI) / 'Wymuś pełny
+    rebuild' (TUI)."""
+    d = ROOT / build_dir
+    marker = d / ".bpt_build_cmd"
+    return ((d / "zephyr" / "zephyr.hex").is_file() and marker.is_file()
+            and marker.read_text(encoding="utf-8").strip()
+            == _build_fingerprint(cmd))
+
+
+def record_build(build_dir, cmd):
+    """Zapisz w katalogu builda, jaką komendą powstał obraz (znacznik
+    dla build_up_to_date)."""
+    (ROOT / build_dir / ".bpt_build_cmd").write_text(
+        _build_fingerprint(cmd) + "\n", encoding="utf-8")
+
+
 def resolve_profile(manifest, name):
     profiles = manifest.get("boards", {})
     name = name or manifest.get("defaults", {}).get("profile")
@@ -398,11 +463,20 @@ def cmd_run(args):
             print(f"\n--- {name}: gotowy hex ({scen['hex']}) – bez budowania")
             built[name] = None
             continue
-        print(f"\n--- build: {name} – {scen.get('description', '')}")
         cmd, build_dir = make_build_cmd(
             name, scen, prof_name, profile, defaults.get("profile"),
             pristine="always" if args.pristine else "auto")
+        # Gotowy obraz zbudowany tą samą komendą -> bez budowania
+        # (świeży build wymusza --pristine).
+        if not args.pristine and build_up_to_date(build_dir, cmd):
+            print(f"\n--- {name}: gotowy build ({build_dir}/) – pomijam "
+                  "(wymuś przebudowanie: --pristine)")
+            built[name] = build_dir
+            continue
+        print(f"\n--- build: {name} – {scen.get('description', '')}")
         run_cmd(cmd, args.dry_run, cwd=workspace)
+        if not args.dry_run:
+            record_build(build_dir, cmd)
         built[name] = build_dir
 
     # --- FAZA 2: flash + pomiar, scenariusz po scenariuszu ---

@@ -19,6 +19,7 @@
 
 import asyncio
 import csv
+import os
 import shlex
 import shutil
 import subprocess
@@ -48,17 +49,40 @@ LOGO = """\
 ╰─                                                                ─╯"""
 
 
-def _stream(cmd, cwd, on_line):
+def _stream(cmd, cwd, on_line, handle=None):
     """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku).
     env=child_env(): procesy west dostają z powrotem PYTHONHOME/PYTHONPATH
-    toolchaina, które naszemu pythonowi zdjęto przy starcie."""
+    toolchaina, które naszemu pythonowi zdjęto przy starcie.
+    `handle['proc']` pozwala wołającemu ubić proces (Esc w trakcie);
+    po zdjęciu UI wyjście jest drenowane bez raportowania, żeby nie
+    zostawić wiszącego potoku ani wyjątku w wątku."""
     with subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, errors="replace",
                           env=core.child_env()) as proc:
+        if handle is not None:
+            handle["proc"] = proc
+        ui_alive = True
         for line in proc.stdout:
-            on_line(line.rstrip())
+            if ui_alive:
+                try:
+                    on_line(line.rstrip())
+                except Exception:
+                    ui_alive = False   # widok zdjęty (Esc) – drenuj cicho
         return proc.wait()
+
+
+def _display_path(path):
+    """Ścieżka do pokazania użytkownikowi: względna do repo, jeśli
+    firmware leży w nim albo obok (jak w manifeście), inaczej z ~."""
+    try:
+        rel = os.path.relpath(path, core.ROOT)
+    except ValueError:
+        rel = None
+    if rel is not None and rel.count("..") <= 3:
+        return rel
+    s, home = str(path), str(Path.home())
+    return "~" + s[len(home):] if s.startswith(home) else s
 
 
 def _label(name, item):
@@ -81,6 +105,19 @@ class DescArrow(Static):
         shown = not desc.has_class("shown")
         desc.set_class(shown, "shown")
         self.update("▼" if shown else "▶")
+
+
+class DeleteCross(Static):
+    """✕ w wierszu scenariusza – usuwa wpis z manifestu (z osobnym
+    potwierdzeniem; zebrane pomiary w CSV zostają)."""
+
+    def __init__(self, scen_name, **kwargs):
+        super().__init__("✕", classes="scen-del", **kwargs)
+        self.scen_name = scen_name
+
+    def on_click(self, event):
+        event.stop()
+        self.app.confirm_remove(self.scen_name)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -218,16 +255,26 @@ class BrowseScreen(ModalScreen):
                 yield Button("Anuluj", id="cancel")
 
     def on_mount(self):
+        tree = self.query_one("#browse-tree", FirmwareTree)
+        # Klik w katalog ma go tylko ROZWIJAĆ (obsługa niżej) – domyślne
+        # przełączanie zwijało duże poddrzewa, a po skurczeniu zawartości
+        # widok był przycinany do samej góry listy.
+        tree.auto_expand = False
+        tree.focus()
         self._show_root()
-        self.query_one("#browse-tree", FirmwareTree).focus()
 
     def _show_root(self):
-        self.query_one("#browse-root", Static).update(f"[#888888]"
-                                                      f"{self.current}[/]")
+        self.query_one("#browse-root", Static).update(
+            f"[#888888]{_display_path(self.current)}[/]")
 
     def on_directory_tree_file_selected(self, event):
         event.stop()
         self.dismiss(event.path)
+
+    def on_directory_tree_directory_selected(self, event):
+        event.stop()
+        if not event.node.is_expanded:
+            event.node.expand()      # zwijanie: strzałka przy nazwie
 
     def on_button_pressed(self, event):
         tree = self.query_one("#browse-tree", FirmwareTree)
@@ -290,10 +337,11 @@ class AddScreen(ModalScreen):
 
     def _browsed(self, path):
         """Ścieżka z eksploratora -> pole tekstowe (można ją jeszcze
-        poprawić ręcznie przed dodaniem)."""
+        poprawić ręcznie przed dodaniem). Skracana jak w manifeście:
+        względna do repo albo z ~, żeby mieściła się w polu."""
         if path:
             field = self.query_one("#path", Input)
-            field.value = str(path)
+            field.value = _display_path(path)
             field.focus()
 
     def _add(self):
@@ -346,10 +394,11 @@ class RunScreen(Screen):
 
     BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
 
-    def __init__(self, prof_name, profile, names, sample):
+    def __init__(self, prof_name, profile, names, sample, pristine=False):
         super().__init__()
         self.prof_name, self.profile = prof_name, profile
         self.names, self.sample = names, sample
+        self.pristine = pristine
 
     def compose(self):
         yield Static("", id="status")
@@ -382,10 +431,19 @@ class RunScreen(Screen):
             section.title = f"{self.SPINNER[frame['i']]} {title}"
 
         spinner = self.set_interval(1 / 8, tick)
+        handle = {}
         try:
             rc = await asyncio.to_thread(
                 _stream, cmd, cwd,
-                lambda line: self.app.call_from_thread(out.write_line, line))
+                lambda line: self.app.call_from_thread(out.write_line, line),
+                handle)
+        except asyncio.CancelledError:
+            # Esc w trakcie: ubij proces west/nrfutil, żeby nie wisiał
+            # w tle i nie sypał wyjątkami po zamknięciu aplikacji.
+            proc = handle.get("proc")
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+            raise
         finally:
             spinner.stop()
         if rc != 0:
@@ -424,7 +482,18 @@ class RunScreen(Screen):
                     self.note(f"Workspace NCS: {workspace} (build out-of-tree)")
 
             # --- FAZA 1: wszystkie buildy z góry ---
-            built = {}
+            # Gotowe buildy (ten sam obraz, ta sama komenda) są pomijane,
+            # chyba że zaznaczono 'Wymuś pełny rebuild'.
+            built, plans = {}, {}
+            for name in to_build:
+                plans[name] = core.make_build_cmd(
+                    name, scenarios[name], self.prof_name, self.profile,
+                    defaults.get("profile"),
+                    pristine="always" if self.pristine else "auto")
+            will_build = [n for n in to_build
+                          if self.pristine
+                          or not core.build_up_to_date(plans[n][1],
+                                                       plans[n][0])]
             build_no = 0
             for name in self.names:
                 scen = scenarios[name]
@@ -433,16 +502,24 @@ class RunScreen(Screen):
                     self.note(f"{name}: gotowy hex ({scen['hex']}) – "
                               "bez budowania.")
                     continue
+                cmd, build_dir = plans[name]
+                if name not in will_build:
+                    built[name] = build_dir
+                    self.note(f"{name}: gotowy build ({build_dir}/) – "
+                              "pomijam.")
+                    continue
                 build_no += 1
-                status.update(f"FAZA 1/2 · build {build_no}/{len(to_build)}"
-                              f" · {name}")
-                cmd, build_dir = core.make_build_cmd(
-                    name, scen, self.prof_name, self.profile,
-                    defaults.get("profile"))
+                status.update(f"FAZA 1/2 · build {build_no}/"
+                              f"{len(will_build)} · {name}")
                 await self.run_west(cmd, workspace, f"build {name}")
+                core.record_build(build_dir, cmd)
                 built[name] = build_dir
-            self.note(f"Zbudowano {len(to_build)} obraz(ów)." if to_build
-                      else "Nic do budowania (same gotowe pliki hex).")
+            if will_build:
+                self.note(f"Zbudowano {len(will_build)} obraz(ów).")
+            elif to_build:
+                self.note("Wszystkie obrazy gotowe – nic do budowania.")
+            else:
+                self.note("Nic do budowania (same gotowe pliki hex).")
 
             # --- FAZA 2: flash + pomiar ---
             saved = []
@@ -533,7 +610,8 @@ class RunScreen(Screen):
                 f"({self.sample}):\n\n{summary}\n\n"
                 "Dziennik: reports/pomiary.csv (commituj do repo!)",
                 yes="OK", no=None))
-            self.app.pop_screen()
+            if self.app.screen is self:   # Esc mógł już zdjąć ekran
+                self.app.pop_screen()
         except (SystemExit, RuntimeError) as e:
             msg = str(e) or "przerwano"
             status.update(f"BŁĄD: {msg}")
@@ -575,6 +653,10 @@ class PowerTestApp(App):
     .scen-check.-on { text-style: bold; }
     .scen-arrow { width: 3; color: #888888; padding: 0 0 0 1; }
     .scen-arrow:hover { color: $text; }
+    .scen-del { width: 3; color: #666666; padding: 0 0 0 1; }
+    .scen-del:hover { color: $text; }
+    #pristine { border: none; background: transparent; padding: 0;
+                height: 1; margin-top: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
     .scen-desc.shown { display: block; }
     /* X w checkboksie: niewidoczny gdy odznaczony (kolor tła), widoczny
@@ -642,7 +724,8 @@ class PowerTestApp(App):
     #path-row #browse { margin-left: 2; min-width: 0; }
 
     /* Eksplorator plików ('Przeglądaj…'): monochromatyczne drzewo. */
-    #browse-root { color: #888888; }
+    #browse-root { color: #888888; text-wrap: nowrap;
+                   text-overflow: ellipsis; }
     #browse-tree { height: 16; border: round #555555; background: transparent;
                    padding: 0 1; margin-top: 1; }
     #browse-tree:focus { border: round #aaaaaa; }
@@ -687,6 +770,8 @@ class PowerTestApp(App):
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
+            yield Checkbox("Wymuś pełny rebuild (gotowe buildy są "
+                           "normalnie pomijane)", value=False, id="pristine")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -705,9 +790,33 @@ class PowerTestApp(App):
                 Checkbox(_label(n, s), value=value, classes="scen-check",
                          id=f"check_{n}"),
                 DescArrow(f"desc_{n}", id=f"arrow_{n}"),
+                DeleteCross(n, id=f"del_{n}"),
                 classes="scenario-head"),
             Static(body, classes="scen-desc", id=f"desc_{n}"),
-            classes="scenario-row")
+            classes="scenario-row", id=f"row_{n}")
+
+    def confirm_remove(self, name):
+        """✕ przy scenariuszu: potwierdzenie i usunięcie wpisu."""
+        def done(ok):
+            if ok:
+                self._remove_scenario(name)
+        label = _label(name, self.scenarios.get(name, {}))
+        self.push_screen(ConfirmScreen(
+            f"[b]Usunąć scenariusz „{label}”?[/b]\n\n"
+            "Wpis zniknie z scenarios.toml.\n"
+            "Zebrane pomiary w reports/pomiary.csv zostają.",
+            yes="Usuń", no="Anuluj"), callback=done)
+
+    def _remove_scenario(self, name):
+        try:
+            core.remove_scenario(name)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+        self.scenarios.pop(name, None)
+        self.query_one(f"#row_{name}").remove()
+        self._update_select_all()
+        self.notify(f"Usunięto scenariusz '{name}' z scenarios.toml.")
 
     def on_button_pressed(self, event):
         if event.button.id == "quit":
@@ -735,6 +844,9 @@ class PowerTestApp(App):
                     "w scenarios.toml).")
 
     def on_checkbox_changed(self, event):
+        self._update_select_all()
+
+    def _update_select_all(self):
         """'Zaznacz wszystkie' wygląda na wciśnięty dokładnie wtedy, gdy
         zaznaczone są wszystkie scenariusze."""
         boxes = self.query(".scen-check")
@@ -756,7 +868,9 @@ class PowerTestApp(App):
             self.query_one("#sample", Input).focus()
             return
         self.push_screen(RunScreen(prof_name, self.boards[prof_name],
-                                   names, sample))
+                                   names, sample,
+                                   pristine=self.query_one("#pristine",
+                                                           Checkbox).value))
 
 
 if __name__ == "__main__":

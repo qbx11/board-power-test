@@ -67,10 +67,17 @@ hex         = "gotowe/nie_ma.hex"
 """
 
 # Fałszywe narzędzie: loguje wywołanie, `west topdir` zwraca błąd
-# (repo testowe leży "poza workspace'em" -> szukanie SDK w HOME).
+# (repo testowe leży "poza workspace'em" -> szukanie SDK w HOME),
+# a `west build -d <dir>` tworzy <dir>/zephyr/zephyr.hex jak prawdziwy
+# west (od tego zależy pomijanie gotowych buildów).
 FAKE_TOOL = """#!/bin/bash
 echo "$(basename "$0") $*" >> "$CMD_LOG"
 [ "$1" = "topdir" ] && exit 1
+if [ "$1" = "build" ]; then
+  prev=""; d=""
+  for a in "$@"; do [ "$prev" = "-d" ] && d="$a"; prev="$a"; done
+  [ -n "$d" ] && mkdir -p "$d/zephyr" && touch "$d/zephyr/zephyr.hex"
+fi
 exit 0
 """
 

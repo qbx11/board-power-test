@@ -36,7 +36,13 @@ uruchomienia; opcje: `--name`, `--label`, `--desc`. To samo w interfejsie:
 przycisk **„Dodaj kod"** — ścieżkę wpisujesz/wklejasz albo wskazujesz
 w eksploratorze plików (przycisk „Przeglądaj…"); nowy scenariusz od razu
 pojawia się na liście (zaznaczony). Wpis można potem doszlifować ręcznie —
-szczegóły poniżej.
+szczegóły poniżej. Scenariusz usuniesz krzyżykiem **✕** przy jego nazwie
+(wpis znika z `scenarios.toml`; zebrane pomiary w CSV zostają).
+
+Gotowe buildy nie budują się ponownie: gdy `build_<scenariusz>/` zawiera już
+obraz zbudowany tą samą komendą, faza builda go pomija. Zmiany w samych
+źródłach nie są śledzone — świeży build wymusza `--pristine` (CLI) albo
+„Wymuś pełny rebuild" (interfejs).
 
 Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
 (klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).

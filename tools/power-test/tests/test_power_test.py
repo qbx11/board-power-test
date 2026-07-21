@@ -207,6 +207,97 @@ class AddScenarioTests(unittest.TestCase):
         self.assertIn("firmware", core.load_manifest()["scenarios"])
 
 
+class RemoveScenarioTests(unittest.TestCase):
+
+    def setUp(self):
+        self.env = FakeEnv()
+        self.addCleanup(self.env.cleanup)
+
+    def test_usuwa_wpis_nie_ruszajac_reszty(self):
+        before = set(core.load_manifest()["scenarios"])
+        core.remove_scenario("zrodlowy")
+        after = core.load_manifest()["scenarios"]   # plik dalej się parsuje
+        self.assertEqual(set(after), before - {"zrodlowy"})
+        self.assertNotIn("[scenarios.zrodlowy]",
+                         core.MANIFEST_PATH.read_text())
+        # sąsiednie wpisy nietknięte
+        self.assertEqual(after["zwykly"]["cmake_args"],
+                         ["-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y"])
+
+    def test_usuwa_wpis_dodany_przez_add(self):
+        name, _ = core.add_scenario("gotowe/firmware.hex", base=core.ROOT)
+        core.remove_scenario(name)
+        self.assertNotIn(name, core.load_manifest()["scenarios"])
+
+    def test_blad_gdy_nie_istnieje(self):
+        with self.assertRaises(ValueError) as ctx:
+            core.remove_scenario("nie_ma")
+        self.assertIn("nie istnieje", str(ctx.exception))
+
+
+class BuildSkipTests(unittest.TestCase):
+    """Pomijanie budowania, gdy build_<scenariusz>/ ma gotowy obraz."""
+
+    def setUp(self):
+        self.env = FakeEnv()
+        self.addCleanup(self.env.cleanup)
+        manifest = core.load_manifest()
+        self.scen = manifest["scenarios"]["zwykly"]
+        self.profile = manifest["boards"]["btz"]
+        self.cmd, self.build_dir = core.make_build_cmd(
+            "zwykly", self.scen, "btz", self.profile, "btz")
+
+    def _przygotuj_gotowy_build(self):
+        d = core.ROOT / self.build_dir / "zephyr"
+        d.mkdir(parents=True)
+        (d / "zephyr.hex").write_text(":00000001FF\n")
+        core.record_build(self.build_dir, self.cmd)
+
+    def test_swiezy_katalog_wymaga_builda(self):
+        self.assertFalse(core.build_up_to_date(self.build_dir, self.cmd))
+
+    def test_gotowy_build_jest_wykrywany(self):
+        self._przygotuj_gotowy_build()
+        self.assertTrue(core.build_up_to_date(self.build_dir, self.cmd))
+        # tryb pristine (-p) nie wpływa na odcisk komendy
+        cmd_pristine, _ = core.make_build_cmd(
+            "zwykly", self.scen, "btz", self.profile, "btz",
+            pristine="always")
+        self.assertTrue(core.build_up_to_date(self.build_dir, cmd_pristine))
+
+    def test_inna_komenda_uniewaznia_build(self):
+        self._przygotuj_gotowy_build()
+        inne = self.cmd + ["-DEXTRA_CONF_FILE=inny.conf"]
+        self.assertFalse(core.build_up_to_date(self.build_dir, inne))
+
+    def test_cli_drugi_przebieg_bez_budowania(self):
+        def przebieg(**kw):
+            answers = iter(["", "tak", "pomin"])
+            out = io.StringIO()
+            with patch("builtins.input", lambda p="": next(answers)), \
+                 contextlib.redirect_stdout(out):
+                core.cmd_run(run_args(["zwykly"], dry_run=False,
+                                      sample="T#1", **kw))
+            return out.getvalue()
+
+        przebieg()
+        builds = [c for c in self.env.commands()
+                  if c.startswith("west build")]
+        self.assertEqual(len(builds), 1)          # pierwszy raz: build
+
+        self.env.log.write_text("")               # wyczyść log
+        out = przebieg()
+        cmds = self.env.commands()
+        self.assertFalse(any(c.startswith("west build") for c in cmds))
+        self.assertTrue(any(c.startswith("west flash") for c in cmds))
+        self.assertIn("gotowy build", out)
+
+        self.env.log.write_text("")
+        przebieg(pristine=True)                   # --pristine wymusza build
+        self.assertTrue(any(c.startswith("west build") and "-p always" in c
+                            for c in self.env.commands()))
+
+
 class CliTests(unittest.TestCase):
 
     def setUp(self):

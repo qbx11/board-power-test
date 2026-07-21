@@ -227,9 +227,10 @@ class TuiBrowseTests(TuiHarness):
                                   lambda a: isinstance(a.screen,
                                                        tui.AddScreen),
                                   msg="powrót do dialogu")
+            # ścieżka w polu skrócona do postaci względnej (jak w manifeście)
             self.assertEqual(
                 app.screen.query_one("#path", Input).value,
-                str(self.env.hex_path))
+                "gotowe/firmware.hex")
 
     async def test_wybor_katalogu_przyciskiem(self):
         app = tui.PowerTestApp()
@@ -248,8 +249,24 @@ class TuiBrowseTests(TuiHarness):
                                                        tui.AddScreen),
                                   msg="powrót do dialogu")
             self.assertEqual(
-                app.screen.query_one("#path", Input).value,
-                str(self.env.source_dir))
+                app.screen.query_one("#path", Input).value, "app_zespolu")
+
+    async def test_klik_w_katalog_tylko_rozwija(self):
+        # Regresja: ponowny klik w katalog (nawyk podwójnego kliku z GUI)
+        # zwijał poddrzewo i widok skakał na górę listy.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            tree = await self.open_browser(pilot)
+            await self.wait_until(pilot,
+                                  lambda a: len(tree.root.children) > 0,
+                                  msg="wczytanie katalogu startowego")
+            repo = next(n for n in tree.root.children
+                        if Path(str(n.data.path)).name == "repo")
+            for _ in range(2):        # dwa "kliki" w ten sam katalog
+                tree.move_cursor(repo)
+                tree.action_select_cursor()
+                await pilot.pause(0.2)
+            self.assertTrue(repo.is_expanded)   # dalej rozwinięty
 
     async def test_anuluj_nie_zmienia_pola(self):
         app = tui.PowerTestApp()
@@ -271,6 +288,39 @@ class TuiBrowseTests(TuiHarness):
         # widżetu poza aplikacją
         got = tui.FirmwareTree.filter_paths(None, paths)
         self.assertEqual(got, [self.env.repo / "gotowe", self.env.hex_path])
+
+
+class TuiRemoveTests(TuiHarness):
+
+    async def test_usuniecie_scenariusza_krzyzykiem(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#del_zrodlowy")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.ConfirmScreen),
+                                  msg="potwierdzenie usunięcia")
+            await pilot.click("#yes")
+            await self.wait_until(
+                pilot,
+                lambda a: not a.query(f"#row_zrodlowy"),
+                msg="zniknięcie wiersza")
+            self.assertNotIn("zrodlowy", app.scenarios)
+            self.assertNotIn("zrodlowy",
+                             tui.core.load_manifest()["scenarios"])
+
+    async def test_anulowanie_nie_usuwa(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#del_zrodlowy")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.ConfirmScreen),
+                                  msg="potwierdzenie usunięcia")
+            await pilot.click("#no")
+            await pilot.pause()
+            self.assertIn("zrodlowy", tui.core.load_manifest()["scenarios"])
+            self.assertTrue(app.query("#row_zrodlowy"))
 
 
 class TuiRunTests(TuiHarness):
@@ -314,6 +364,54 @@ class TuiRunTests(TuiHarness):
                                   if c.startswith("nrfutil device program")]),
                              1)
             self.assertTrue(any("Nic do budowania" in n for n in notes))
+
+    async def test_gotowy_build_pomijany_w_tui(self):
+        # przygotuj gotowy build zwykly (obraz + znacznik komendy)
+        manifest = tui.core.load_manifest()
+        cmd, build_dir = tui.core.make_build_cmd(
+            "zwykly", manifest["scenarios"]["zwykly"],
+            "btz", manifest["boards"]["btz"], "btz")
+        d = tui.core.ROOT / build_dir / "zephyr"
+        d.mkdir(parents=True)
+        (d / "zephyr.hex").write_text(":00000001FF\n")
+        tui.core.record_build(build_dir, cmd)
+
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly"])
+            notes = await self.click_through_run(pilot)
+            cmds = self.env.commands()
+            self.assertFalse(any(c.startswith("west build") for c in cmds))
+            self.assertTrue(any(c.startswith("west flash") for c in cmds))
+            self.assertTrue(any("gotowy build" in n for n in notes))
+
+    async def test_esc_w_trakcie_builda_wraca_do_menu(self):
+        # wolny west: build trwa, Esc przerywa przebieg bez wywrotki
+        west = self.env.log.parent / "bin" / "west"
+        west.write_text('#!/bin/bash\n'
+                        'echo "$(basename "$0") $*" >> "$CMD_LOG"\n'
+                        '[ "$1" = "topdir" ] && exit 1\n'
+                        '[ "$1" = "build" ] && sleep 5\nexit 0\n')
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly"])
+            await self.wait_until(
+                pilot,
+                lambda a: any(c.startswith("west build")
+                              for c in self.env.commands()),
+                msg="start builda")
+            await pilot.press("escape")
+            await self.wait_until(
+                pilot,
+                lambda a: not isinstance(a.screen, tui.RunScreen),
+                msg="powrót do menu po Esc")
+            await pilot.pause(0.3)
+            # aplikacja dalej działa: da się otworzyć np. dialog dodawania
+            await pilot.click("#add_fw")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="aplikacja żyje po Esc")
 
     async def test_walidacja_source_i_hex_zatrzymuje_przed_faza_1(self):
         app = tui.PowerTestApp()
