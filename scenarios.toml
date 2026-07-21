@@ -9,7 +9,7 @@
 #
 # Dodanie własnego scenariusza = skopiowanie wpisu (wzór na dole)
 # albo szybciej: `board-power-test add <katalog-aplikacji | plik.hex>`
-# (też przycisk "Dodaj firmware" w interfejsie) – wpis dopisze się sam.
+# (też przycisk "Dodaj kod" w interfejsie) – wpis dopisze się sam.
 
 [defaults]
 profile  = "btz"   # domyślny profil płytki (patrz [boards.*])

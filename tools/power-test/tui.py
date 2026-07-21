@@ -519,8 +519,10 @@ class PowerTestApp(App):
     Button.-active { background: transparent; border: round #aaaaaa; }
     Button.pressed, Button.pressed:hover, Button.pressed:focus {
         background: #333333; border: round #aaaaaa; }
+    /* Rząd akcji mieści się dokładnie w obrysie ramek (72 kolumny):
+       bez sztucznego min-width przycisków. */
     #actions { margin-top: 1; height: auto; }
-    #actions Button { margin-right: 2; }
+    #actions Button { margin-right: 2; min-width: 0; }
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
@@ -588,7 +590,7 @@ class PowerTestApp(App):
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
-                yield Button("Dodaj firmware", id="add_fw")
+                yield Button("Dodaj kod", id="add_fw")
                 yield Button("Wyniki", id="results")
                 yield Button("Wyjście", id="quit")
 
