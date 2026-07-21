@@ -19,11 +19,18 @@ prądu i niczego nie ocenia** — pomiar robisz w nRF Connect **Power Profiler**
 git clone https://github.com/qbx11/board-power-test.git
 cd board-power-test
 ./scripts/install.sh        # symlink w ~/.local/bin, bez sudo
-board-power-test            # menu: profil płytki -> scenariusze -> jedziemy
+board-power-test            # interfejs okienkowy: profil -> scenariusze -> Start
 ```
 
+`board-power-test` bez argumentów otwiera **interfejs okienkowy w terminalu**
+(TUI): klikalne listy scenariuszy, wybór profilu, pola tekstowe, dialogi
+krok-po-kroku i log builda na żywo. Przy pierwszym uruchomieniu launcher sam
+tworzy `.venv` z biblioteką `textual`; bez sieci (albo z `BPT_NO_TUI=1`)
+narzędzie działa w klasycznym trybie tekstowym — funkcje są te same.
+
 Wymagania:
-- **Python ≥ 3.11** (tylko stdlib, zero `pip install`),
+- **Python ≥ 3.11** (rdzeń: tylko stdlib; interfejs okienkowy instaluje się
+  sam do `.venv` repo),
 - **nrfutil** — o środowisko NCS nie musisz dbać: gdy `west` nie jest w PATH,
   launcher sam je uruchomi, a brakujące elementy (`toolchain-manager`, toolchain
   NCS v3.4.0) zaproponuje doinstalować; alternatywnie pracuj w terminalu nRF Connect,
@@ -38,9 +45,9 @@ Wymagania:
 ## Codzienne użycie
 
 ```sh
-board-power-test                      # bez argumentów: MENU (tryb prowadzony)
+board-power-test                      # bez argumentów: interfejs okienkowy (TUI)
 board-power-test list                 # dostępne scenariusze
-board-power-test run reset_only idle  # wybrane scenariusze
+board-power-test run reset_only idle  # wybrane scenariusze (tryb CLI)
 board-power-test run --all            # cała macierz trybów
 board-power-test run --all -p dk      # na płytce referencyjnej DK
 board-power-test run reset_only -n    # dry-run: tylko pokaż komendy
@@ -51,22 +58,27 @@ Przydatne flagi `run`: `-s "BTZ #2"` (egzemplarz płytki bez pytania),
 `--no-erase` (flash bez kasowania), `-n` (dry-run). Zmienne środowiskowe:
 `BOARD_ROOT`, `NCS_VERSION` (dom. v3.4.0), `NCS_WORKSPACE` (workspace/SDK, gdy
 nie w `~/ncs/<wersja>`), `BPT_NO_NCS_LAUNCH=1` (nie startuj środowiska NCS
-automatycznie).
+automatycznie), `BPT_NO_TUI=1` (tryb tekstowy zamiast interfejsu okienkowego).
 
 Repo nie musi leżeć w workspace west — narzędzie buduje „out-of-tree": znajduje
 SDK (`~/ncs/<wersja>` albo `NCS_WORKSPACE`), woła westa stamtąd, a katalogi
 `build_*` i tak lądują w tym repo.
 
-### Przebieg jednego scenariusza
+### Przebieg (dwie fazy)
 
-1. **Build** — `west build` (pristine, osobny katalog `build_<scenariusz>/`).
-2. **Flash** — `west flash --erase`; kasowanie jest domyślne, bo stan pinów
+**FAZA 1 — buduj wszystko z góry:** `west build` (pristine, osobny katalog
+`build_<scenariusz>/`) dla **wszystkich** wybranych scenariuszy na raz — buildy
+trwają, więc lecą jednym ciągiem, zanim usiądziesz przy płytce i PPK2.
+
+**FAZA 2 — flash + pomiar, scenariusz po scenariuszu:**
+1. **Flash** — `west flash --erase`; kasowanie jest domyślne, bo stan pinów
    i UICR potrafi zostać z poprzedniego obrazu i zafałszować pomiar.
-3. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana
+2. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana
    wg datasheetu (tylko do porównania na oko — narzędzie nie ocenia).
-4. **Twarde potwierdzenie odłączenia SWD** — trzeba wpisać `tak`; podłączony
-   debugger dodaje własny prąd i unieważnia pomiar minimum.
-5. **Wpis wyniku** z Power Profilera → wiersz w `reports/pomiary.csv`
+3. **Twarde potwierdzenie odłączenia SWD** — w TUI osobny dialog z jednym
+   przyciskiem, w CLI trzeba wpisać `tak`; podłączony debugger dodaje własny
+   prąd i unieważnia pomiar minimum.
+4. **Wpis wyniku** z Power Profilera → wiersz w `reports/pomiary.csv`
    (egzemplarz płytki, napięcie, flagi builda, uwagi). **Commituj ten plik** —
    to wspólna historia pomiarów zespołu.
 

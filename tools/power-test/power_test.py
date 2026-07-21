@@ -189,62 +189,73 @@ def cmd_run(args):
         while not sample:
             sample = ask("Egzemplarz płytki (np. 'BTZ #2'): ")
 
+    # --- FAZA 1: zbuduj WSZYSTKIE obrazy z góry (buildy trwają;
+    #     przy płytce i PPK2 nie ma potem na co czekać) ---
+    print(f"\n=== FAZA 1/2: budowanie {len(names)} obraz(ów) ===")
+    built = {}
     for name in names:
-        run_scenario(name, scenarios[name], prof_name, profile,
-                     defaults, sample, args, workspace)
+        scen = scenarios[name]
+        if not scen.get("cmake_args"):
+            die(f"scenariusz '{name}' nie ma cmake_args w manifeście")
+        print(f"\n--- build: {name} – {scen.get('description', '')}")
+        cmd, build_dir = make_build_cmd(name, scen, prof_name, profile)
+        run_cmd(cmd, args.dry_run, cwd=workspace)
+        built[name] = build_dir
+
+    # --- FAZA 2: flash + pomiar, scenariusz po scenariuszu ---
+    print(f"\n=== FAZA 2/2: flash + pomiar ({len(names)} scenariusz(y)) ===")
+    for name in names:
+        measure_scenario(name, scenarios[name], built[name], profile,
+                         defaults, sample, args, workspace)
 
     if not args.dry_run:
         print(f"\nGotowe. Podgląd zebranych pomiarów: "
               f"python3 tools/power-test/{Path(__file__).name} report")
 
 
-def run_scenario(name, scen, prof_name, profile, defaults, sample, args,
-                 workspace=ROOT):
-    cmake_args = scen.get("cmake_args")
-    if not cmake_args:
-        die(f"scenariusz '{name}' nie ma cmake_args w manifeście")
+def make_build_cmd(name, scen, prof_name, profile):
+    """Komenda `west build` + katalog builda dla scenariusza.
+
+    Ścieżki absolutne, bo west może być wołany z katalogu SDK
+    (build out-of-tree, gdy repo leży poza workspace'em)."""
+    build_dir = f"build_{name}" if prof_name == "btz" else f"build_{prof_name}_{name}"
+    cmd = ["west", "build", "-b", profile["board"], "-p", "always",
+           "-d", str(ROOT / build_dir), str(ROOT)]
+    root_arg = board_root_arg(profile)
+    extra = [root_arg] if root_arg else []
+    return cmd + ["--"] + extra + list(scen["cmake_args"]), build_dir
+
+
+def make_flash_cmd(build_dir, profile, erase=True):
+    """Komenda `west flash`; --erase domyślnie (stan pinów/UICR potrafi
+    zostać z poprzedniego obrazu i zafałszować pomiar)."""
+    cmd = ["west", "flash", "-d", str(ROOT / build_dir)]
+    if profile.get("runner"):
+        cmd += ["-r", profile["runner"]]
+    if erase:
+        cmd += ["--erase"]
+    return cmd
+
+
+def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
+                     workspace=ROOT):
     voltage = str(scen.get("voltage", defaults.get("voltage", "3.0")))
     settle_s = scen.get("settle_s", defaults.get("settle_s", 5))
-    build_dir = f"build_{name}" if prof_name == "btz" else f"build_{prof_name}_{name}"
 
     print("\n" + "=" * 60)
     print(f"  Scenariusz: {name}  [{profile['board']}]")
     print(f"  {scen.get('description', '')}")
     print("=" * 60)
 
-    # --- 1. Build: czysty obraz, pristine, osobny katalog na tryb.
-    #        Ścieżki absolutne, bo west może być wołany z katalogu SDK
-    #        (build out-of-tree, gdy repo leży poza workspace'em). ---
-    build = ["west", "build", "-b", profile["board"], "-p", "always",
-             "-d", str(ROOT / build_dir), str(ROOT)]
-    root_arg = board_root_arg(profile)
-    extra = [root_arg] if root_arg else []
-    run_cmd(build + ["--"] + extra + list(cmake_args), args.dry_run,
-            cwd=workspace)
-
-    # --- 2. Flash: domyślnie z --erase (stan pinów/UICR potrafi
-    #        zostać z poprzedniego obrazu i zafałszować pomiar) ---
     if not args.dry_run:
         ask("Programator podłączony i płytka ZASILONA (np. VOUT z PPK2)? "
             "[Enter = wgrywam] ")
-    flash = ["west", "flash", "-d", str(ROOT / build_dir)]
-    if profile.get("runner"):
-        flash += ["-r", profile["runner"]]
-    if not args.no_erase:
-        flash += ["--erase"]
-    run_cmd(flash, args.dry_run, cwd=workspace)
+    run_cmd(make_flash_cmd(build_dir, profile, erase=not args.no_erase),
+            args.dry_run, cwd=workspace)
 
-    # --- 3. Instrukcja pomiaru (Power Profiler robi resztę) ---
-    print(f"""
---- POMIAR ({name}) ---------------------------------------
- 1. ODŁĄCZ przewód SWD/J-Link (podłączony debugger dodaje prąd!).
- 2. nRF Connect Power Profiler: tryb Source meter, {voltage} V,
-    VOUT -> VDD samego SoC, GND <-> GND (nic innego nie zasilaj).
- 3. Odczekaj ~{settle_s} s na ustabilizowanie, potem odczytaj średni prąd.""")
-    if scen.get("expected"):
-        print(f"    Oczekiwane wg datasheet: {scen['expected']}")
-    if scen.get("note"):
-        print(f"    Uwaga: {scen['note']}")
+    # --- Instrukcja pomiaru (Power Profiler robi resztę) ---
+    print(f"\n--- POMIAR ({name}) ---------------------------------------")
+    print(measure_instructions(scen, voltage, settle_s))
     print("-" * 59)
 
     if args.dry_run:
@@ -268,20 +279,39 @@ def run_scenario(name, scen, prof_name, profile, defaults, sample, args,
             print("Podaj liczbę w uA, np. 0.95 albo 7,3.")
 
     uwagi = ask("Uwagi (Enter = brak): ")
-    append_row({
+    append_row(make_row(name, scen, profile, sample, voltage, current, uwagi))
+
+
+def measure_instructions(scen, voltage, settle_s):
+    """Tekst instrukcji pomiaru – wspólny dla CLI i TUI."""
+    text = (" 1. ODŁĄCZ przewód SWD/J-Link (podłączony debugger dodaje prąd!).\n"
+            f" 2. nRF Connect Power Profiler: tryb Source meter, {voltage} V,\n"
+            "    VOUT -> VDD samego SoC, GND <-> GND (nic innego nie zasilaj).\n"
+            f" 3. Odczekaj ~{settle_s} s na ustabilizowanie, potem odczytaj "
+            "średni prąd.")
+    if scen.get("expected"):
+        text += f"\n    Oczekiwane wg datasheet: {scen['expected']}"
+    if scen.get("note"):
+        text += f"\n    Uwaga: {scen['note']}"
+    return text
+
+
+def make_row(name, scen, profile, sample, voltage, current, uwagi):
+    """Wiersz dziennika CSV – wspólny dla CLI i TUI."""
+    return {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "plytka": profile["board"],
         "egzemplarz": sample,
         "scenariusz": name,
-        "flagi": " ".join(cmake_args),
+        "flagi": " ".join(scen["cmake_args"]),
         "napiecie_V": voltage,
         "prad_uA": current,
         "oczekiwane": scen.get("expected", ""),
         "uwagi": uwagi,
-    })
+    }
 
 
-def append_row(row):
+def append_row(row, verbose=True):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     new_file = not CSV_PATH.exists()
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
@@ -289,7 +319,8 @@ def append_row(row):
         if new_file:
             writer.writeheader()
         writer.writerow(row)
-    print(f"Zapisano: {CSV_PATH.relative_to(ROOT)}")
+    if verbose:
+        print(f"Zapisano: {CSV_PATH.relative_to(ROOT)}")
 
 
 def cmd_report(args):
@@ -362,8 +393,17 @@ def cmd_interactive():
 
 
 def main():
-    # Bez argumentów: tryb prowadzony (menu) – zero komend do pamiętania.
+    # Bez argumentów: interfejs okienkowy (TUI, Textual); gdy biblioteki
+    # nie ma (offline / BPT_NO_TUI=1) – klasyczne menu tekstowe.
     if len(sys.argv) == 1:
+        if os.environ.get("BPT_NO_TUI") != "1":
+            try:
+                from tui import PowerTestApp
+                PowerTestApp().run()
+                return
+            except ImportError:
+                print("(interfejs TUI niedostępny – brak biblioteki 'textual'; "
+                      "używam menu tekstowego)")
         cmd_interactive()
         return
 
