@@ -396,9 +396,10 @@ class PowerTestApp(App):
                  padding: 0 1; }
     .scenario-row { height: auto; }
     .scen-check { border: none; background: transparent; padding: 0;
-                  height: 1; min-width: 4; }
+                  height: 1; }
     .scen-check:focus { text-style: bold; }
-    .scen-main { width: 1fr; height: auto; }
+    .scen-more { margin-left: 4; width: 1fr; height: auto; }
+    .scen-more CollapsibleTitle { color: #888888; }
     .scen-desc { color: #888888; }
     ToggleButton > .toggle--button { background: transparent; color: $text; }
     Input { background: transparent; border: round #555555; }
@@ -463,18 +464,23 @@ class PowerTestApp(App):
                          value=default_prof, allow_blank=False, id="profile")
             yield Label("Scenariusze", classes="h")
             with Vertical(id="scenarios"):
+                # Wybór i opis to OSOBNE cele kliknięcia: checkbox z pełną
+                # nazwą zaznacza scenariusz, a zwijane "opis" pod spodem
+                # tylko rozwija szczegóły (wcześniej nazwa była tytułem
+                # Collapsible i klik w nią rozwijał opis zamiast wybierać).
                 for n, s in self.scenarios.items():
                     body = s.get("description", "")
                     if s.get("expected"):
                         body += f"\nOczekiwane: {s['expected']}"
                     if s.get("note"):
                         body += f"\nUwaga: {s['note']}"
-                    with Horizontal(classes="scenario-row"):
-                        yield Checkbox("", value=False, classes="scen-check",
-                                       id=f"check_{n}")
+                    with Vertical(classes="scenario-row"):
+                        yield Checkbox(_label(n, s), value=False,
+                                       classes="scen-check", id=f"check_{n}")
                         yield Collapsible(Static(body, classes="scen-desc"),
-                                          title=_label(n, s), collapsed=True,
-                                          classes="scen-main")
+                                          title="opis", collapsed=True,
+                                          classes="scen-more",
+                                          id=f"more_{n}")
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")

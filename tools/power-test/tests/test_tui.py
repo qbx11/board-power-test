@@ -13,7 +13,7 @@ import unittest
 from common import FakeEnv, core  # noqa: F401  (core: patchowane stałe)
 
 import tui
-from textual.widgets import Checkbox, Input, Static
+from textual.widgets import Checkbox, Collapsible, Input, Static
 
 
 class TuiHarness(unittest.IsolatedAsyncioTestCase):
@@ -69,6 +69,29 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             await self.wait_until(pilot, lambda a: a.screen is not screen,
                                   msg="zamknięcie dialogu")
         self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
+
+
+class TuiSetupTests(TuiHarness):
+
+    async def test_klik_w_nazwe_zaznacza_a_opis_tylko_rozwija(self):
+        # Regresja: wybór scenariusza i rozwijanie opisu to osobne cele
+        # kliknięcia – klik w nazwę NIE może otwierać opisu zamiast
+        # zaznaczać.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            checkbox = app.query_one("#check_zwykly", Checkbox)
+            more = app.query_one("#more_zwykly", Collapsible)
+            self.assertFalse(checkbox.value)
+
+            await pilot.click("#check_zwykly")
+            await pilot.pause()
+            self.assertTrue(checkbox.value)      # klik w nazwę = wybór
+            self.assertTrue(more.collapsed)      # ...bez rozwijania opisu
+
+            await pilot.click("#more_zwykly CollapsibleTitle")
+            await pilot.pause()
+            self.assertFalse(more.collapsed)     # "opis" rozwija szczegóły
+            self.assertTrue(checkbox.value)      # ...nie ruszając wyboru
 
 
 class TuiRunTests(TuiHarness):
