@@ -68,14 +68,43 @@ def load_manifest():
         die(f"scenarios.toml nie parsuje się: {e}")
 
 
-def run_cmd(cmd, dry):
-    """Wypisz i (poza --dry-run) wykonaj komendę w katalogu projektu."""
+def run_cmd(cmd, dry, cwd=ROOT):
+    """Wypisz i (poza --dry-run) wykonaj komendę."""
     print(f"\n>>> {shlex.join(cmd)}")
     if dry:
         return
-    rc = subprocess.run(cmd, cwd=ROOT).returncode
+    rc = subprocess.run(cmd, cwd=cwd).returncode
     if rc != 0:
         die(f"komenda zakończyła się kodem {rc} – przerywam scenariusz")
+
+
+def find_west_workspace():
+    """Katalog, z którego wołamy westa.
+
+    `west build` działa tylko wewnątrz workspace'u west. To repo zwykle
+    leży POZA workspace'em NCS – wtedy budujemy "out-of-tree": west
+    uruchamiany z katalogu SDK, a ścieżki aplikacji/builda są absolutne.
+    Kolejność: workspace obejmujący to repo > env NCS_WORKSPACE >
+    ~/ncs/<NCS_VERSION> (domyślna lokalizacja instalacji SDK)."""
+    r = subprocess.run(["west", "topdir"], cwd=ROOT,
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return ROOT
+
+    ver = os.environ.get("NCS_VERSION", "v3.4.0")
+    candidates = []
+    if os.environ.get("NCS_WORKSPACE"):
+        candidates.append(Path(os.environ["NCS_WORKSPACE"]))
+    candidates.append(Path.home() / "ncs" / ver)
+    for c in candidates:
+        if (c / ".west").is_dir():
+            return c
+
+    die(f"repo nie leży w workspace west, a nie znalazłem SDK NCS ({ver}).\n"
+        f"  - zainstaluj SDK {ver} (nRF Connect for VS Code -> 'Install SDK'; "
+        f"trafi do ~/ncs/{ver}), albo\n"
+        "  - wskaż istniejący workspace: export NCS_WORKSPACE=/ścieżka/do/ncs/"
+        f"{ver}")
 
 
 def board_root_arg(profile):
@@ -143,9 +172,15 @@ def cmd_run(args):
         die(f"nieznane scenariusze: {', '.join(unknown)}. "
             f"Dostępne: {', '.join(scenarios)}")
 
-    if not args.dry_run and shutil.which("west") is None:
-        die("brak 'west' w PATH. Otwórz terminal nRF Connect lub uruchom:\n"
-            "  nrfutil toolchain-manager launch --ncs-version v3.4.0 --shell")
+    workspace = ROOT
+    if not args.dry_run:
+        if shutil.which("west") is None:
+            die("brak 'west' w PATH. Otwórz terminal nRF Connect lub uruchom:\n"
+                "  nrfutil toolchain-manager launch --ncs-version v3.4.0 --shell")
+        workspace = find_west_workspace()
+        if workspace != ROOT:
+            print(f"Workspace NCS: {workspace} (repo poza workspace'em – "
+                  "build out-of-tree)")
 
     # Identyfikacja egzemplarza – obowiązkowa, żeby wyniki różnych
     # sztuk płytki się nie pomieszały.
@@ -156,14 +191,15 @@ def cmd_run(args):
 
     for name in names:
         run_scenario(name, scenarios[name], prof_name, profile,
-                     defaults, sample, args)
+                     defaults, sample, args, workspace)
 
     if not args.dry_run:
         print(f"\nGotowe. Podgląd zebranych pomiarów: "
               f"python3 tools/power-test/{Path(__file__).name} report")
 
 
-def run_scenario(name, scen, prof_name, profile, defaults, sample, args):
+def run_scenario(name, scen, prof_name, profile, defaults, sample, args,
+                 workspace=ROOT):
     cmake_args = scen.get("cmake_args")
     if not cmake_args:
         die(f"scenariusz '{name}' nie ma cmake_args w manifeście")
@@ -176,24 +212,27 @@ def run_scenario(name, scen, prof_name, profile, defaults, sample, args):
     print(f"  {scen.get('description', '')}")
     print("=" * 60)
 
-    # --- 1. Build: czysty obraz, pristine, osobny katalog na tryb ---
+    # --- 1. Build: czysty obraz, pristine, osobny katalog na tryb.
+    #        Ścieżki absolutne, bo west może być wołany z katalogu SDK
+    #        (build out-of-tree, gdy repo leży poza workspace'em). ---
     build = ["west", "build", "-b", profile["board"], "-p", "always",
-             "-d", build_dir, "."]
+             "-d", str(ROOT / build_dir), str(ROOT)]
     root_arg = board_root_arg(profile)
     extra = [root_arg] if root_arg else []
-    run_cmd(build + ["--"] + extra + list(cmake_args), args.dry_run)
+    run_cmd(build + ["--"] + extra + list(cmake_args), args.dry_run,
+            cwd=workspace)
 
     # --- 2. Flash: domyślnie z --erase (stan pinów/UICR potrafi
     #        zostać z poprzedniego obrazu i zafałszować pomiar) ---
     if not args.dry_run:
         ask("Programator podłączony i płytka ZASILONA (np. VOUT z PPK2)? "
             "[Enter = wgrywam] ")
-    flash = ["west", "flash", "-d", build_dir]
+    flash = ["west", "flash", "-d", str(ROOT / build_dir)]
     if profile.get("runner"):
         flash += ["-r", profile["runner"]]
     if not args.no_erase:
         flash += ["--erase"]
-    run_cmd(flash, args.dry_run)
+    run_cmd(flash, args.dry_run, cwd=workspace)
 
     # --- 3. Instrukcja pomiaru (Power Profiler robi resztę) ---
     print(f"""

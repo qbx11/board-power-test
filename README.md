@@ -27,6 +27,9 @@ Wymagania:
 - **nrfutil** — o środowisko NCS nie musisz dbać: gdy `west` nie jest w PATH,
   launcher sam je uruchomi, a brakujące elementy (`toolchain-manager`, toolchain
   NCS v3.4.0) zaproponuje doinstalować; alternatywnie pracuj w terminalu nRF Connect,
+- **SDK NCS v3.4.0** (źródła, nie tylko toolchain) — np. przez nRF Connect for
+  VS Code → „Install SDK" (trafia do `~/ncs/v3.4.0`, narzędzie samo je znajdzie;
+  inna lokalizacja: `export NCS_WORKSPACE=/ścieżka/do/workspace`),
 - **J-Link** (flash) i **PPK2 + nRF Connect Power Profiler** (pomiar),
 - dla `BTZ_EndDevice`: repo z definicją płytki (`Projekt-BLE-Mesh`) — domyślnie
   szukane w `../NCS-Projects/Projekt-BLE-Mesh/app`, inny układ katalogów:
@@ -46,8 +49,13 @@ board-power-test report               # tabela zebranych pomiarów
 
 Przydatne flagi `run`: `-s "BTZ #2"` (egzemplarz płytki bez pytania),
 `--no-erase` (flash bez kasowania), `-n` (dry-run). Zmienne środowiskowe:
-`BOARD_ROOT`, `NCS_VERSION` (dom. v3.4.0), `BPT_NO_NCS_LAUNCH=1` (nie startuj
-środowiska NCS automatycznie).
+`BOARD_ROOT`, `NCS_VERSION` (dom. v3.4.0), `NCS_WORKSPACE` (workspace/SDK, gdy
+nie w `~/ncs/<wersja>`), `BPT_NO_NCS_LAUNCH=1` (nie startuj środowiska NCS
+automatycznie).
+
+Repo nie musi leżeć w workspace west — narzędzie buduje „out-of-tree": znajduje
+SDK (`~/ncs/<wersja>` albo `NCS_WORKSPACE`), woła westa stamtąd, a katalogi
+`build_*` i tak lądują w tym repo.
 
 ### Przebieg jednego scenariusza
 
@@ -208,6 +216,10 @@ włącz auto-reconnect — co T jest reboot i nowy banner), `periodic_on` wypisu
 - **`nrfutil command 'toolchain-manager' not found`** — launcher sam zaproponuje
   instalację; ręcznie: `nrfutil install toolchain-manager`, potem (jeśli trzeba)
   `nrfutil toolchain-manager install --ncs-version v3.4.0`.
+- **`west: unknown command "build"; do you need to run this inside a workspace?`** —
+  masz toolchain, ale brak źródeł SDK NCS: zainstaluj SDK v3.4.0 (nRF Connect for
+  VS Code → „Install SDK") albo wskaż istniejący workspace przez `NCS_WORKSPACE`.
+  Narzędzie od wersji z tym wpisem samo woła westa z katalogu SDK.
 - **Prąd wyraźnie wyższy niż w datasheecie** — sprawdź: SWD odłączony? PPK2 w
   Source meter i zasila *tylko* SoC? DC/DC (nie LDO)? build bez
   `debug.conf`/`debug_rtt.conf`? Porównaj z przebiegiem kontrolnym na DK; jeśli DK
