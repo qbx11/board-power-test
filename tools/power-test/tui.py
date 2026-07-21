@@ -4,23 +4,44 @@
 # Uruchamiany przez power_test.py, gdy nie podano argumentów i biblioteka
 # `textual` jest dostępna (launcher instaluje ją w .venv repo). Cała
 # logika (manifest, komendy west, dziennik CSV) jest w power_test.py –
-# ten plik to wyłącznie warstwa prezentacji: klikalne listy, pola
-# tekstowe, dialogi i podgląd logu builda na żywo.
+# ten plik to wyłącznie warstwa prezentacji.
+#
+# Zasady designu: minimalistycznie, monochromatycznie (jeden kolor,
+# bez kolorowych wypełnień – tylko ramki i typografia). Wyjścia komend
+# są zwinięte (tytuł = preview); rozwijają się po kliknięciu albo
+# automatycznie przy błędzie.
+#
+# Uwaga implementacyjna: procesy west uruchamiamy przez subprocess.Popen
+# w wątku (asyncio.to_thread), NIE przez asyncio.create_subprocess_exec –
+# transporty asyncio-subprocess wywracały pętlę zdarzeń na Linuksie
+# ("Event loop is closed", ContextVar token errors). stdin=DEVNULL, żeby
+# dziecko (J-Link itp.) nie dotykało terminala, który trzyma Textual.
 
 import asyncio
 import csv
 import shlex
 import shutil
+import subprocess
 
 from textual import work
 from textual.app import App
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
-                             RichLog, Select, SelectionList, Static)
+from textual.widgets import (Button, Collapsible, DataTable, Footer, Header,
+                             Input, Label, Log, Select, SelectionList, Static)
 from textual.widgets.selection_list import Selection
 
 import power_test as core
+
+
+def _stream(cmd, cwd, on_line):
+    """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku)."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    for line in proc.stdout:
+        on_line(line.rstrip())
+    return proc.wait()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -34,9 +55,9 @@ class ConfirmScreen(ModalScreen[bool]):
         with Vertical(classes="dialog"):
             yield Static(self.text, classes="dialog-text")
             with Horizontal(classes="dialog-buttons"):
-                yield Button(self.yes, variant="success", id="yes")
+                yield Button(self.yes, id="yes")
                 if self.no is not None:
-                    yield Button(self.no, variant="default", id="no")
+                    yield Button(self.no, id="no")
 
     def on_button_pressed(self, event):
         self.dismiss(event.button.id == "yes")
@@ -63,8 +84,8 @@ class MeasureScreen(ModalScreen):
             yield Label("Uwagi (opcjonalnie):")
             yield Input(placeholder="np. 'przed poprawką HW'", id="notes")
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Zapisz", variant="success", id="save")
-                yield Button("Pomiń (bez zapisu)", variant="warning", id="skip")
+                yield Button("Zapisz", id="save")
+                yield Button("Pomiń (bez zapisu)", id="skip")
 
     def on_mount(self):
         self.query_one("#current", Input).focus()
@@ -115,8 +136,9 @@ class ResultsScreen(ModalScreen):
 
 
 class RunScreen(Screen):
-    """Przebieg: FAZA 1 buduje wszystkie obrazy (log na żywo),
-    FAZA 2 – flash + pomiar scenariusz po scenariuszu."""
+    """Przebieg: FAZA 1 buduje wszystkie obrazy, FAZA 2 – flash + pomiar.
+    Każda komenda to zwijana sekcja: tytuł = preview, rozwija się
+    klikiem albo automatycznie przy błędzie."""
 
     BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
 
@@ -128,31 +150,35 @@ class RunScreen(Screen):
     def compose(self):
         yield Header()
         yield Static("", id="status")
-        yield RichLog(id="log", highlight=False, markup=False, wrap=True)
+        yield VerticalScroll(id="cmds")
         yield Footer()
 
     def on_mount(self):
         self.flow()
 
-    async def run_west(self, cmd, cwd):
-        log = self.query_one("#log", RichLog)
-        log.write(f"$ {shlex.join(cmd)}")
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            log.write(line.decode(errors="replace").rstrip())
-        if await proc.wait() != 0:
-            raise RuntimeError(f"'{cmd[0]} {cmd[1]}' zakończył się błędem "
-                               "(szczegóły w logu wyżej)")
+    def note(self, text):
+        self.query_one("#cmds").mount(Static(text, classes="note"))
+
+    async def run_west(self, cmd, cwd, title):
+        """Komenda w zwijanej sekcji; pełne wyjście po kliknięciu/błędzie."""
+        out = Log(classes="cmd-log")
+        section = Collapsible(out, title=f"⠿ {title}", collapsed=True)
+        cmds = self.query_one("#cmds")
+        await cmds.mount(section)
+        cmds.scroll_end(animate=False)
+        out.write_line(f"$ {shlex.join(cmd)}")
+        rc = await asyncio.to_thread(
+            _stream, cmd, cwd,
+            lambda line: self.app.call_from_thread(out.write_line, line))
+        if rc != 0:
+            section.title = f"✗ {title} — kod {rc}"
+            section.collapsed = False
+            raise RuntimeError(f"'{title}' zakończone błędem (kod {rc}, "
+                               "szczegóły w rozwiniętym logu)")
+        section.title = f"✓ {title}"
 
     @work
     async def flow(self):
-        log = self.query_one("#log", RichLog)
         status = self.query_one("#status", Static)
         scenarios = self.app.scenarios
         defaults = self.app.defaults
@@ -165,17 +191,17 @@ class RunScreen(Screen):
                     "nRF Connect")
             workspace = await asyncio.to_thread(core.find_west_workspace)
             if workspace != core.ROOT:
-                log.write(f"Workspace NCS: {workspace} (build out-of-tree)")
+                self.note(f"Workspace NCS: {workspace} (build out-of-tree)")
 
             # --- FAZA 1: wszystkie buildy z góry ---
             built = {}
             for i, name in enumerate(self.names, 1):
-                status.update(f"FAZA 1/2 – buduję obraz {i}/{total}: [b]{name}[/b]")
+                status.update(f"FAZA 1/2 · build {i}/{total} · {name}")
                 cmd, build_dir = core.make_build_cmd(
                     name, scenarios[name], self.prof_name, self.profile)
-                await self.run_west(cmd, workspace)
+                await self.run_west(cmd, workspace, f"build {name}")
                 built[name] = build_dir
-            log.write(f"--- zbudowano {total} obraz(ów) ---")
+            self.note(f"Zbudowano {total} obraz(ów).")
 
             # --- FAZA 2: flash + pomiar ---
             saved = []
@@ -184,7 +210,7 @@ class RunScreen(Screen):
                 voltage = str(scen.get("voltage",
                                        defaults.get("voltage", "3.0")))
                 settle_s = scen.get("settle_s", defaults.get("settle_s", 5))
-                status.update(f"FAZA 2/2 – scenariusz {i}/{total}: [b]{name}[/b]")
+                status.update(f"FAZA 2/2 · scenariusz {i}/{total} · {name}")
 
                 ok = await self.app.push_screen_wait(ConfirmScreen(
                     f"[b]{name}[/b] – {scen.get('description', '')}\n\n"
@@ -192,11 +218,11 @@ class RunScreen(Screen):
                     "(np. VOUT z PPK2)?",
                     yes="Wgraj (flash --erase)", no="Pomiń scenariusz"))
                 if not ok:
-                    log.write(f"Pominięto {name}.")
+                    self.note(f"Pominięto {name}.")
                     continue
                 await self.run_west(core.make_flash_cmd(built[name],
                                                         self.profile),
-                                    workspace)
+                                    workspace, f"flash {name}")
 
                 # Twarde potwierdzenie SWD – jedyny przycisk, bez obejścia.
                 await self.app.push_screen_wait(ConfirmScreen(
@@ -208,14 +234,14 @@ class RunScreen(Screen):
                 result = await self.app.push_screen_wait(
                     MeasureScreen(name, scen, voltage, settle_s))
                 if result is None:
-                    log.write(f"Pominięto zapis scenariusza {name}.")
+                    self.note(f"Pominięto zapis scenariusza {name}.")
                     continue
                 current, notes = result
                 core.append_row(core.make_row(name, scen, self.profile,
                                               self.sample, voltage, current,
                                               notes), verbose=False)
                 saved.append(f"{name}: {current} µA")
-                log.write(f"Zapisano: {name} = {current} µA")
+                self.note(f"Zapisano: {name} = {current} µA")
 
             status.update("Gotowe.")
             summary = ("\n".join(saved) if saved
@@ -228,33 +254,56 @@ class RunScreen(Screen):
             self.app.pop_screen()
         except (SystemExit, RuntimeError) as e:
             msg = str(e) or "przerwano"
-            status.update(f"[red]BŁĄD:[/red] {msg}")
-            log.write(f"BŁĄD: {msg}")
-            log.write("(Esc = powrót do ustawień)")
+            status.update(f"BŁĄD: {msg}")
+            self.note("(Esc = powrót do ustawień)")
 
 
 class PowerTestApp(App):
     TITLE = "board-power-test"
     SUB_TITLE = "pomiar poboru prądu płytek (PPK2)"
     BINDINGS = [("ctrl+q", "quit", "Wyjście")]
+
+    # Monochromatycznie: jeden kolor (odcienie szarości), zero kolorowych
+    # wypełnień – tylko ramki, focus jaśniejszą ramką, akcenty typografią.
     CSS = """
+    Header { background: transparent; color: $text; }
+    Footer { background: transparent; }
+    Footer > .footer--key, FooterKey { background: transparent; }
+
     #setup { padding: 1 2; }
-    .h { margin-top: 1; text-style: bold; color: $accent; }
-    #profile, #sample { width: 70; }
-    #scenarios { border: round $accent; max-height: 12; width: 70; }
+    .h { margin-top: 1; text-style: bold; }
+    #profile, #sample, #scenarios { width: 72; max-width: 100%; }
+    #scenarios { border: round #555555; background: transparent;
+                 max-height: 12; }
+    #scenarios:focus { border: round #aaaaaa; }
+    Input { background: transparent; border: round #555555; }
+    Input:focus { border: round #aaaaaa; }
+    SelectCurrent { background: transparent; border: round #555555; }
+    Select:focus SelectCurrent { border: round #aaaaaa; }
+    Button { background: transparent; border: round #555555;
+             color: $text; min-width: 10; }
+    Button:hover { border: round #aaaaaa; }
+    Button:focus { border: round #aaaaaa; text-style: bold; }
     #actions { margin-top: 1; height: auto; }
     #actions Button { margin-right: 2; }
 
-    #status { padding: 0 1; background: $boost; height: 1; }
-    #log { border: round $primary; }
+    #status { background: transparent; padding: 0 1; height: 1;
+              text-style: bold; }
+    #cmds { padding: 0 1; }
+    .note { color: $text; padding: 0 1; }
+    Collapsible { background: transparent; border: none; padding: 0; }
+    CollapsibleTitle { color: $text; }
+    CollapsibleTitle:hover { background: transparent; text-style: bold; }
+    .cmd-log { height: 14; border: round #555555; background: transparent;
+               margin: 0 1 1 2; }
 
     ModalScreen { align: center middle; }
-    .dialog { background: $surface; border: thick $accent;
+    .dialog { background: $surface; border: round #aaaaaa;
               padding: 1 2; width: 90; max-width: 100%; height: auto; }
     .dialog-text { margin-bottom: 1; }
     .dialog-buttons { margin-top: 1; height: auto; }
     .dialog-buttons Button { margin-right: 2; }
-    .results DataTable { height: 18; }
+    .results DataTable { height: 18; background: transparent; }
     """
 
     def __init__(self):
@@ -271,7 +320,8 @@ class PowerTestApp(App):
         if default_prof not in self.boards:
             default_prof = next(iter(self.boards))
         yield Header()
-        with Vertical(id="setup"):
+        # VerticalScroll: przy małym oknie menu się przewija zamiast ucinać.
+        with VerticalScroll(id="setup"):
             yield Label("Profil płytki", classes="h")
             yield Select(((f"{n} – {b['board']}", n)
                           for n, b in self.boards.items()),
@@ -284,10 +334,10 @@ class PowerTestApp(App):
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
             with Horizontal(id="actions"):
-                yield Button("▶ Start", variant="success", id="start")
+                yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
                 yield Button("Wyniki", id="results")
-                yield Button("Wyjście", variant="error", id="quit")
+                yield Button("Wyjście", id="quit")
         yield Footer()
 
     def on_button_pressed(self, event):

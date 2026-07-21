@@ -1,0 +1,2 @@
+data,plytka,egzemplarz,scenariusz,flagi,napiecie_V,prad_uA,oczekiwane,uwagi
+2026-07-21 10:24,nrf54l15dk/nrf54l15/cpuapp,BTZ #1,reset_only,-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y,3.0,0.88,~0.3-0.5 uA (System OFF bez retencji; DK zmierzone ~0.95 uA),
