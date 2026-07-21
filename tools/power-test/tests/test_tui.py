@@ -9,6 +9,7 @@
 #   .venv/bin/python -m unittest discover -s tools/power-test/tests -v
 
 import unittest
+from pathlib import Path
 
 from common import FakeEnv, core  # noqa: F401  (core: patchowane stałe)
 
@@ -182,6 +183,94 @@ class TuiAddTests(TuiHarness):
             await pilot.pause()
             self.assertNotIn("nie_ma_takiego",
                              (tui.core.MANIFEST_PATH).read_text())
+
+
+class TuiBrowseTests(TuiHarness):
+    """Eksplorator plików w 'Dodaj kod' (przycisk 'Przeglądaj…')."""
+
+    async def open_browser(self, pilot):
+        app = pilot.app
+        await pilot.click("#add_fw")
+        await self.wait_until(pilot,
+                              lambda a: isinstance(a.screen, tui.AddScreen),
+                              msg="dialog Dodaj kod")
+        await pilot.click("#browse")
+        await self.wait_until(pilot,
+                              lambda a: isinstance(a.screen,
+                                                   tui.BrowseScreen),
+                              msg="eksplorator plików")
+        return app.screen.query_one("#browse-tree", tui.FirmwareTree)
+
+    async def expand_child(self, pilot, node, name):
+        """Rozwiń węzeł-katalog o danej nazwie i poczekaj na zawartość."""
+        child = next(n for n in node.children
+                     if Path(str(n.data.path)).name == name)
+        child.expand()
+        await self.wait_until(pilot, lambda a: len(child.children) > 0,
+                              msg=f"zawartość katalogu {name}")
+        return child
+
+    async def test_wybor_pliku_hex_z_drzewa(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            tree = await self.open_browser(pilot)
+            # start = katalog nad repo; schodzimy repo -> gotowe -> *.hex
+            await self.wait_until(pilot,
+                                  lambda a: len(tree.root.children) > 0,
+                                  msg="wczytanie katalogu startowego")
+            repo = await self.expand_child(pilot, tree.root, "repo")
+            gotowe = await self.expand_child(pilot, repo, "gotowe")
+            hex_node = gotowe.children[0]
+            tree.move_cursor(hex_node)
+            tree.action_select_cursor()   # jak Enter/klik na pliku
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="powrót do dialogu")
+            self.assertEqual(
+                app.screen.query_one("#path", Input).value,
+                str(self.env.hex_path))
+
+    async def test_wybor_katalogu_przyciskiem(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            tree = await self.open_browser(pilot)
+            await self.wait_until(pilot,
+                                  lambda a: len(tree.root.children) > 0,
+                                  msg="wczytanie katalogu startowego")
+            repo = await self.expand_child(pilot, tree.root, "repo")
+            app_dir = next(n for n in repo.children
+                           if Path(str(n.data.path)).name == "app_zespolu")
+            tree.move_cursor(app_dir)
+            await pilot.click("#choose")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="powrót do dialogu")
+            self.assertEqual(
+                app.screen.query_one("#path", Input).value,
+                str(self.env.source_dir))
+
+    async def test_anuluj_nie_zmienia_pola(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.open_browser(pilot)
+            await pilot.click("#cancel")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="powrót do dialogu")
+            self.assertEqual(app.screen.query_one("#path", Input).value, "")
+
+    def test_filtr_drzewa_katalogi_i_hex(self):
+        paths = [self.env.repo / "gotowe",           # katalog -> zostaje
+                 self.env.hex_path,                  # .hex    -> zostaje
+                 self.env.repo / "scenarios.toml",   # inny plik -> odpada
+                 self.env.repo / ".ukryty"]          # ukryty -> odpada
+        # filter_paths nie używa self – wołamy przez klasę, bez budowania
+        # widżetu poza aplikacją
+        got = tui.FirmwareTree.filter_paths(None, paths)
+        self.assertEqual(got, [self.env.repo / "gotowe", self.env.hex_path])
 
 
 class TuiRunTests(TuiHarness):

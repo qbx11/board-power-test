@@ -33,8 +33,10 @@ board-power-test add ../moj-projekt/build/zephyr/zephyr.hex  # gotowa binarka ->
 Narzędzie samo rozpoznaje rodzaj (katalog z `CMakeLists.txt` = `source`,
 plik `.hex` = `hex`), dopisuje wpis do `scenarios.toml` i podaje komendę
 uruchomienia; opcje: `--name`, `--label`, `--desc`. To samo w interfejsie:
-przycisk **„Dodaj kod"** — nowy scenariusz od razu pojawia się na liście
-(zaznaczony). Wpis można potem doszlifować ręcznie — szczegóły poniżej.
+przycisk **„Dodaj kod"** — ścieżkę wpisujesz/wklejasz albo wskazujesz
+w eksploratorze plików (przycisk „Przeglądaj…"); nowy scenariusz od razu
+pojawia się na liście (zaznaczony). Wpis można potem doszlifować ręcznie —
+szczegóły poniżej.
 
 Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
 (klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).

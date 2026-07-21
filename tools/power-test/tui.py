@@ -23,12 +23,14 @@ import shlex
 import shutil
 import subprocess
 
+from pathlib import Path
+
 from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Input,
-                             Label, Log, Select, Static)
+from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
+                             DirectoryTree, Input, Label, Log, Select, Static)
 
 import power_test as core
 
@@ -176,6 +178,72 @@ class MeasureScreen(ModalScreen):
         self.dismiss((current, self.query_one("#notes", Input).value.strip()))
 
 
+class FirmwareTree(DirectoryTree):
+    """Drzewo plików eksploratora: tylko katalogi i pliki .hex (reszta
+    to szum przy wskazywaniu firmware'u), bez plików ukrytych.
+    Ikony znakowe zamiast emoji – spójnie z monochromatycznym UI."""
+
+    ICON_NODE = "▸ "
+    ICON_NODE_EXPANDED = "▾ "
+    ICON_FILE = "· "
+
+    def filter_paths(self, paths):
+        return [p for p in paths
+                if not p.name.startswith(".")
+                and (p.is_dir() or p.suffix.lower() == ".hex")]
+
+
+class BrowseScreen(ModalScreen):
+    """Eksplorator plików do 'Dodaj kod': wskaż katalog aplikacji albo
+    plik .hex zamiast wpisywać ścieżkę ręcznie (wpisywanie dalej działa).
+    Klik/Enter na pliku .hex wybiera go od razu; katalog wybiera przycisk
+    'Wybierz ten katalog'. Zwraca Path albo None."""
+
+    def __init__(self, start=None):
+        super().__init__()
+        # Start: katalog nad repo – tam zwykle leżą projekty zespołu.
+        self.current = Path(start or core.ROOT.parent).resolve()
+
+    def compose(self):
+        with Vertical(classes="dialog browse"):
+            yield Static("[b]Wskaż firmware[/b]\n"
+                         "Katalog aplikacji Zephyr/NCS albo plik .hex "
+                         "(klik w plik wybiera go od razu).",
+                         classes="dialog-text")
+            yield Static("", id="browse-root")
+            yield FirmwareTree(self.current, id="browse-tree")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Wybierz ten katalog", id="choose")
+                yield Button("W górę", id="up")
+                yield Button("Anuluj", id="cancel")
+
+    def on_mount(self):
+        self._show_root()
+        self.query_one("#browse-tree", FirmwareTree).focus()
+
+    def _show_root(self):
+        self.query_one("#browse-root", Static).update(f"[#888888]"
+                                                      f"{self.current}[/]")
+
+    def on_directory_tree_file_selected(self, event):
+        event.stop()
+        self.dismiss(event.path)
+
+    def on_button_pressed(self, event):
+        tree = self.query_one("#browse-tree", FirmwareTree)
+        if event.button.id == "choose":
+            node = tree.cursor_node or tree.root
+            self.dismiss(Path(node.data.path))
+        elif event.button.id == "up":
+            parent = self.current.parent
+            if parent != self.current:
+                self.current = parent
+                tree.path = parent      # reaktywne: przeładowuje drzewo
+                self._show_root()
+        else:
+            self.dismiss(None)
+
+
 class AddScreen(ModalScreen):
     """Dodanie scenariusza z własnym firmware jedną ścieżką: katalog
     aplikacji Zephyr/NCS -> wariant `source` (build przez west), plik
@@ -191,9 +259,12 @@ class AddScreen(ModalScreen):
                          "Ścieżka względna = od katalogu repo.",
                          classes="dialog-text")
             yield Label("Ścieżka (katalog aplikacji albo plik .hex):")
-            yield Input(placeholder="np. ../moj-projekt/app  albo  "
-                                    "../moj-projekt/build/zephyr/zephyr.hex",
-                        id="path")
+            with Horizontal(id="path-row"):
+                yield Input(placeholder="np. ../moj-projekt/app  albo  "
+                                        "../moj-projekt/build/zephyr/"
+                                        "zephyr.hex",
+                            id="path")
+                yield Button("Przeglądaj…", id="browse")
             yield Label("Nazwa w interfejsie (opcjonalnie):")
             yield Input(placeholder="np. Moja aplikacja — sen", id="label")
             yield Label("Opis (opcjonalnie):")
@@ -212,8 +283,18 @@ class AddScreen(ModalScreen):
     def on_button_pressed(self, event):
         if event.button.id == "add":
             self._add()
+        elif event.button.id == "browse":
+            self.app.push_screen(BrowseScreen(), callback=self._browsed)
         else:
             self.dismiss(None)
+
+    def _browsed(self, path):
+        """Ścieżka z eksploratora -> pole tekstowe (można ją jeszcze
+        poprawić ręcznie przed dodaniem)."""
+        if path:
+            field = self.query_one("#path", Input)
+            field.value = str(path)
+            field.focus()
 
     def _add(self):
         path = self.query_one("#path", Input).value.strip()
@@ -555,6 +636,25 @@ class PowerTestApp(App):
     #current-row { height: auto; }
     #current-row #current { width: 32; }
     #current-row #unit { width: 12; margin-left: 2; }
+
+    #path-row { height: auto; }
+    #path-row #path { width: 1fr; }
+    #path-row #browse { margin-left: 2; min-width: 0; }
+
+    /* Eksplorator plików ('Przeglądaj…'): monochromatyczne drzewo. */
+    #browse-root { color: #888888; }
+    #browse-tree { height: 16; border: round #555555; background: transparent;
+                   padding: 0 1; margin-top: 1; }
+    #browse-tree:focus { border: round #aaaaaa; }
+    #browse-tree > .directory-tree--folder { color: $text; text-style: bold; }
+    #browse-tree > .directory-tree--file { color: $text; }
+    #browse-tree > .directory-tree--extension { color: #888888; }
+    #browse-tree > .tree--guides,
+    #browse-tree > .tree--guides-hover,
+    #browse-tree > .tree--guides-selected { color: #444444; }
+    #browse-tree > .tree--cursor { background: #333333; text-style: none; }
+    #browse-tree > .tree--highlight { text-style: none; }
+    #browse-tree > .tree--highlight-line { background: transparent; }
     """
 
     def __init__(self):
