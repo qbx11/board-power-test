@@ -1,0 +1,38 @@
+/*
+ * Overlay płytki referencyjnej nRF54L15 DK.
+ *
+ * Definiuje region RAM utrzymywany w System OFF (compatible =
+ * "zephyr,retained-ram"). Warstwa SoC przywraca jego retencję podczas
+ * sys_poweroff() TYLKO w obrazie z wariantem SLEEP_SYSTEM_OFF_RAM_RETAINED
+ * (który włącza CONFIG_RETAINED_MEM). W pozostałych obrazach ten region jest
+ * bezczynny (sterownik retencji nie jest budowany) – nie wpływa na pomiar.
+ *
+ * Adresy są specyficzne dla nRF54L15 (te same co w próbce Zephyr system_off).
+ * Aby zbliżyć się do katalogowej wartości "pełnej retencji RAM", ZWIĘKSZ
+ * rozmiar regionu retained (DT_SIZE_K) i odpowiednio zmniejsz cpuapp_sram.
+ * Na WŁASNEJ płytce dostosuj adresy do jej mapy RAM.
+ */
+
+/ {
+	cpuapp_sram@2002e000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2002e000 DT_SIZE_K(4)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+
+		retainedmem0: retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+		};
+	};
+
+	aliases {
+		retainedmemdevice = &retainedmem0;
+	};
+};
+
+&cpuapp_sram {
+	/* Zmniejsz główny SRAM, aby nie nachodził na region retained (184 KB). */
+	reg = <0x20000000 DT_SIZE_K(184)>;
+	ranges = <0x0 0x20000000 0x2e000>;
+};

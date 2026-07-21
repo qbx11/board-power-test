@@ -1,0 +1,51 @@
+/*
+ * Overlay dla własnej płytki BTZ_EndDevice (nrf54l15/cpuapp).
+ *
+ * Region RAM utrzymywany w System OFF (compatible = "zephyr,retained-ram").
+ * Warstwa SoC przywraca jego retencję w sys_poweroff() tylko w obrazie z
+ * wariantem SLEEP_SYSTEM_OFF_RAM_RETAINED (który włącza CONFIG_RETAINED_MEM).
+ * W innych obrazach region jest bezczynny – nie wpływa na pomiar.
+ *
+ * BTZ_EndDevice używa pełnego cpuapp_sram = 256 KB @ 0x20000000. Wycinamy 4 KB
+ * u góry (0x2003f000) i zmniejszamy główny SRAM do 252 KB. Aby zbliżyć się do
+ * katalogowej "pełnej retencji", zwiększ region retained i zmniejsz cpuapp_sram.
+ */
+
+/ {
+	cpuapp_sram@2003f000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2003f000 DT_SIZE_K(4)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+
+		retainedmem0: retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+		};
+	};
+
+	aliases {
+		retainedmemdevice = &retainedmem0;
+	};
+};
+
+&cpuapp_sram {
+	/* Zmniejsz główny SRAM, aby nie nachodził na region retained (252 KB). */
+	reg = <0x20000000 DT_SIZE_K(252)>;
+	ranges = <0x0 0x20000000 0x3f000>;
+};
+
+/*
+ * TEST poboru: przełącz piny NFC (P1.02/P1.03) z trybu NFC na GPIO.
+ * Na nRF54L15 piny NFC są domyślnie w trybie NFC od resetu; ten wpis zapisuje
+ * UICR (NRF_CONFIG_NFCT_PINS_AS_GPIOS), co usuwa bias/ochronę pól NFC. Cel:
+ * sprawdzić, czy tryb NFC dokłada prąd w System OFF (niepotwierdzone w
+ * datasheet nRF54L15). UWAGA:
+ *   - działa dopiero po `west flash --erase` (zapis UICR),
+ *   - jest TRWAŁE do czasu erase UICR,
+ *   - wyłącza funkcję NFC i ochronę pinów NFC.
+ * Jeśli NFC ma być używane w produkcie – usuń ten blok.
+ */
+&uicr {
+	nfct-pins-as-gpios;
+};

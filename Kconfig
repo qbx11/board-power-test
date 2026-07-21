@@ -1,0 +1,92 @@
+# nRF54L15 – pomiar poboru energii (PPK2)
+#
+# Wybór głębokości snu odbywa się na etapie budowania (build-time): każdy tryb
+# to osobny obraz/hex, dzięki czemu w obrazie pomiarowym nie ma nic zbędnego.
+# Tryb wybierasz przez -DCONFIG_SLEEP_<...>=y przy west build.
+
+mainmenu "nRF54L15 power measurement"
+
+choice
+	prompt "Głębokość snu do pomiaru (Sleep depth)"
+	default SLEEP_SYSTEM_OFF_RESET_ONLY
+	help
+	  Jeden tryb na obraz. Przełączasz tryb przez rekompilację
+	  z innym -DCONFIG_SLEEP_...=y.
+
+config SLEEP_SYSTEM_ON_IDLE
+	bool "System ON idle (RTOS śpi; RAM + RTC utrzymane)"
+	help
+	  main() wywołuje k_sleep(K_FOREVER); wątek idle wchodzi w WFI.
+	  RAM i LFCLK/RTC (GRTC) pozostają aktywne. Referencyjny prąd
+	  "śpiącego" systemu RTOS.
+
+config SLEEP_SYSTEM_OFF_WAKE_GPIO
+	bool "System OFF; wybudzenie przyciskiem sw0 (bez retencji RAM)"
+	select GPIO
+	select POWEROFF
+	help
+	  sys_poweroff() z przyciskiem sw0 skonfigurowanym jako źródło
+	  wybudzenia (SENSE). RAM nieutrzymywany. Wymaga aliasu 'sw0'
+	  w devicetree.
+
+config SLEEP_SYSTEM_OFF_RESET_ONLY
+	bool "System OFF; wybudzenie tylko reset (absolutne minimum)"
+	select POWEROFF
+	help
+	  Samo sys_poweroff(). Brak jakiegokolwiek źródła wybudzenia
+	  poza resetem/pinem reset. Absolutne minimum katalogowe.
+
+config SLEEP_SYSTEM_OFF_RAM_RETAINED
+	bool "System OFF; z retencją RAM (koszt retencji)"
+	select POWEROFF
+	select RETAINED_MEM
+	select RETAINED_MEM_ZEPHYR_RAM
+	help
+	  sys_poweroff() z utrzymaniem regionu RAM zdefiniowanego w
+	  devicetree (compatible = "zephyr,retained-ram"). Pokazuje ile
+	  prądu kosztuje utrzymanie pamięci względem czystego minimum.
+	  Ilość utrzymywanego RAM = rozmiar regionu w overlay płytki.
+
+config SLEEP_PERIODIC_SYSTEM_ON
+	bool "Periodyk: System ON idle + k_sleep(T) (zostajemy 'ciepli')"
+	help
+	  Pętla: krótki błysk aktywności (symulacja pracy/TX) co okres T,
+	  a między nimi k_sleep(T) -> System ON idle (RAM + RTC żyją,
+	  program KONTYNUUJE). Wzorzec dla częstych wysyłek. Zmierz PPK2
+	  średni prąd przez pełny cykl i porównaj z wariantem OFF.
+
+config SLEEP_PERIODIC_SYSTEM_OFF
+	bool "Periodyk: System OFF + wybudzenie GRTC po T (reboot co cykl)"
+	select POWEROFF
+	help
+	  Błysk aktywności -> uzbrojenie GRTC na T -> sys_poweroff().
+	  Wybudzenie po T = restart od main() (RAM znika, pełny reboot).
+	  Niższy prąd snu, ale narzut rebootu na każdy cykl. Wzorzec dla
+	  rzadkich wysyłek. Zmierz PPK2 średni prąd i znajdź punkt
+	  przecięcia względem wariantu SYSTEM_ON.
+
+endchoice
+
+# --- Parametry wariantów periodycznych ---
+
+config PERIODIC_PERIOD_MS
+	int "Okres T między wybudzeniami [ms]"
+	default 10000
+	range 10 86400000
+	depends on SLEEP_PERIODIC_SYSTEM_ON || SLEEP_PERIODIC_SYSTEM_OFF
+	help
+	  Odstęp między kolejnymi wybudzeniami (błyskami aktywności).
+	  Zmieniaj, żeby zdjąć krzywą prądu średniego w funkcji okresu
+	  i znaleźć punkt przecięcia SYSTEM_ON vs SYSTEM_OFF.
+
+config PERIODIC_ACTIVE_MS
+	int "Czas aktywnego błysku – symulacja pracy/TX [ms]"
+	default 5
+	range 0 10000
+	depends on SLEEP_PERIODIC_SYSTEM_ON || SLEEP_PERIODIC_SYSTEM_OFF
+	help
+	  Jak długo CPU jest zajęty (k_busy_wait) na jedno wybudzenie –
+	  zamiennik realnej pracy/nadawania. 0 = brak błysku (sam sen).
+	  W realnym produkcie zastąp to swoim kodem (odczyt + TX).
+
+source "Kconfig.zephyr"

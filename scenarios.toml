@@ -1,0 +1,82 @@
+# ============================================================
+#  Manifest scenariuszy pomiarowych (narzędzie tools/power-test)
+# ============================================================
+# Jeden wpis = jeden CZYSTY obraz firmware (build-time, jak dotąd)
+# + notatki potrzebne przy pomiarze. Narzędzie NIE mierzy prądu
+# (pomiar robisz w nRF Connect Power Profiler) i NICZEGO nie ocenia –
+# pole "expected" jest tylko wyświetlane obok, do porównania
+# z datasheetem na oko.
+#
+# Dodanie własnego scenariusza = skopiowanie wpisu (wzór na dole).
+
+[defaults]
+profile  = "btz"   # domyślny profil płytki (patrz [boards.*])
+voltage  = "3.0"   # napięcie źródła PPK2 [V] – wyświetlane i zapisywane do CSV
+settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
+
+# --- Profile płytek -----------------------------------------
+[boards.btz]
+board      = "BTZ_EndDevice/nrf54l15/cpuapp"
+runner     = "jlink"                                # west flash -r jlink (J-Link mini EDU)
+board_root = "../NCS-Projects/Projekt-BLE-Mesh/app" # względem katalogu projektu; nadpisze env BOARD_ROOT
+
+[boards.dk]
+board = "nrf54l15dk/nrf54l15/cpuapp"
+# DK: definicja płytki jest w SDK (bez board_root), debugger wbudowany (bez runnera).
+
+# --- Scenariusze statyczne (pomiar samego prądu snu) --------
+[scenarios.reset_only]
+description = "System OFF; wybudzenie tylko reset (absolutne minimum)"
+cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y"]
+expected    = "~0.3-0.5 uA (System OFF bez retencji; DK zmierzone ~0.95 uA)"
+
+[scenarios.idle]
+description = "System ON idle (RTOS śpi; RAM + RTC utrzymane)"
+cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_ON_IDLE=y"]
+expected    = "~1-2 uA (System ON IDLE, kolumna LFXO)"
+
+[scenarios.wake_gpio]
+description = "System OFF; wybudzenie przyciskiem sw0 (SENSE), bez retencji RAM"
+cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_WAKE_GPIO=y"]
+expected    = "jak reset_only + koszt SENSE"
+note        = "Po pomiarze snu naciśnij sw0 – powinien być skok prądu (wybudzenie) i powrót do snu."
+
+[scenarios.ram_retained]
+description = "System OFF z retencją RAM (region z devicetree, dom. 4 KB)"
+cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_RAM_RETAINED=y"]
+expected    = "wyżej niż reset_only; rośnie z ilością utrzymywanego RAM"
+
+# --- Scenariusze periodyczne (pomiar prądu ŚREDNIEGO) -------
+[scenarios.periodic_on]
+description = "Periodyk System ON: błysk co T, między nimi k_sleep(T)"
+cmake_args  = [
+  "-DCONFIG_SLEEP_PERIODIC_SYSTEM_ON=y",
+  "-DCONFIG_PERIODIC_PERIOD_MS=10000",
+  "-DCONFIG_PERIODIC_ACTIVE_MS=5",
+]
+expected    = "prąd ŚREDNI przez pełny cykl"
+note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
+
+[scenarios.periodic_off]
+description = "Periodyk System OFF: błysk -> GRTC(T) -> sys_poweroff (reboot co cykl)"
+cmake_args  = [
+  "-DCONFIG_SLEEP_PERIODIC_SYSTEM_OFF=y",
+  "-DCONFIG_PERIODIC_PERIOD_MS=10000",
+  "-DCONFIG_PERIODIC_ACTIVE_MS=5",
+]
+expected    = "prąd ŚREDNI przez pełny cykl"
+note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
+
+# --- Własne scenariusze (custom) ----------------------------
+# Skopiuj wpis i zmień flagi; własny conf/overlay wrzuć do
+# scenarios/custom/. Napięcie można nadpisać per scenariusz.
+#
+# [scenarios.moj_test]
+# description = "System OFF + własny overlay z wyłączonym regulatorem X"
+# cmake_args  = [
+#   "-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y",
+#   "-DEXTRA_CONF_FILE=scenarios/custom/moj_test.conf",
+#   "-DDTC_OVERLAY_FILE=scenarios/custom/moj_test.overlay",
+# ]
+# expected    = "..."
+# voltage     = "1.8"
