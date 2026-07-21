@@ -32,6 +32,19 @@ from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Input,
 
 import power_test as core
 
+# Logo GoodByte (pixelart półblokami, wygenerowane z logo firmowego) –
+# nagłówek ekranu głównego. Monochromatyczne jak reszta interfejsu.
+LOGO = """\
+╭─                                                                ─╮
+        ▄▄▄▄▄                  ▄  ▄▄▄▄
+       █▀▀  ▀                  █  █▀ ▀█▄      ██
+      ▄█   ▄  ▄█▀▀█  █▀▀█▄ ▄█▀██  █▄▄▄█ █▄  █▀██▀ ▄▀▀█▄
+      ▀█  ▀▀█ █   ████   ███   █  █▀  ▀█ █▄██ ██ ██▄▄██
+       ▀█▄▄▄█ ▀█▄▄█▀ █▄▄██ █▄▄▄█  █▄▄▄█▀  ██  ██▄ █▄▄▄
+         ▀▀▀    ▀▀    ▀▀    ▀▀▀▀  ▀▀▀▀    █    ▀▀  ▀▀▀
+[#888888]               e m b e d d e d   s y s t e m s[/]
+╰─                                                                ─╯"""
+
 
 def _stream(cmd, cwd, on_line):
     """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku).
@@ -48,6 +61,23 @@ def _stream(cmd, cwd, on_line):
 def _label(name, item):
     """Nazwa do wyświetlenia: `label` z manifestu, inaczej klucz."""
     return item.get("label", name)
+
+
+class DescArrow(Static):
+    """Strzałka w linii tytułu scenariusza – rozwija/zwija opis pod
+    spodem (osobny Static pełnej szerokości, więc tekst opisu ma stałe,
+    małe wcięcie zamiast zaczynać się dopiero za nazwą)."""
+
+    def __init__(self, desc_id, **kwargs):
+        super().__init__("▶", classes="scen-arrow", **kwargs)
+        self.desc_id = desc_id
+
+    def on_click(self, event):
+        event.stop()
+        desc = self.screen.query_one(f"#{self.desc_id}", Static)
+        shown = not desc.has_class("shown")
+        desc.set_class(shown, "shown")
+        self.update("▼" if shown else "▶")
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -388,19 +418,23 @@ class PowerTestApp(App):
         scrollbar-size-horizontal: 1; }
 
     #setup { padding: 1 2; }
+    #logo { color: $text; width: 72; max-width: 100%; height: auto;
+            margin-bottom: 1; text-wrap: nowrap; text-overflow: clip; }
     .h { margin-top: 1; text-style: bold; }
     #profile, #sample, #scenarios { width: 72; max-width: 100%; }
     #scenarios { border: round #555555; background: transparent;
                  height: auto; max-height: 18; overflow-y: auto;
                  padding: 0 1; }
     .scenario-row { height: auto; }
+    .scenario-head { height: 1; }
     .scen-check { border: none; background: transparent; padding: 0;
                   height: 1; width: auto; }
     .scen-check:focus { text-style: bold; }
     .scen-check.-on { text-style: bold; }
-    .scen-more { width: 1fr; height: auto; }
-    .scen-more CollapsibleTitle { color: #888888; }
-    .scen-desc { color: #888888; }
+    .scen-arrow { width: 3; color: #888888; padding: 0 0 0 1; }
+    .scen-arrow:hover { color: $text; }
+    .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
+    .scen-desc.shown { display: block; }
     /* X w checkboksie: niewidoczny gdy odznaczony (kolor tła), widoczny
        po zaznaczeniu – inaczej nie widać, co jest wybrane. */
     ToggleButton > .toggle--button { background: transparent;
@@ -439,6 +473,15 @@ class PowerTestApp(App):
     .cmd-log { height: 14; border: round #555555; background: transparent;
                margin: 0 1 1 2; }
 
+    /* Dymki (notify): monochromatycznie jak dialogi i bez sztywnej
+       szerokości 60 – przy małym oknie dymek się dopasowuje zamiast
+       łamać tekst w wąskiej kolumnie. */
+    Toast { width: auto; min-width: 24; max-width: 90%; padding: 0 1;
+            background: $surface; border: round #aaaaaa; }
+    Toast.-information, Toast.-warning, Toast.-error {
+        border: round #aaaaaa; }
+    Toast .toast--title { color: $text; text-style: bold; }
+
     ModalScreen { align: center middle; }
     .dialog { background: $surface; border: round #aaaaaa;
               padding: 1 2; width: 90; max-width: 100%; height: auto; }
@@ -466,26 +509,28 @@ class PowerTestApp(App):
             default_prof = next(iter(self.boards))
         # VerticalScroll: przy małym oknie menu się przewija zamiast ucinać.
         with VerticalScroll(id="setup"):
+            yield Static(LOGO, id="logo")
             yield Label("Płytka", classes="h")
             yield Select(((b["board"], n) for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
             yield Label("Scenariusze", classes="h")
             with Vertical(id="scenarios"):
                 # Wybór i opis to OSOBNE cele kliknięcia: checkbox z pełną
-                # nazwą zaznacza scenariusz, a strzałka za nazwą (Collapsible
-                # z pustym tytułem) rozwija opis. Bez wartości oczekiwanych –
-                # te pokazuje dopiero instrukcja pomiaru.
+                # nazwą zaznacza scenariusz, a strzałka za nazwą rozwija
+                # opis (pełną szerokością, z małym wcięciem). Bez wartości
+                # oczekiwanych – te pokazuje dopiero instrukcja pomiaru.
                 for n, s in self.scenarios.items():
                     body = s.get("description", "")
                     if s.get("note"):
                         body += f"\nUwaga: {s['note']}"
-                    with Horizontal(classes="scenario-row"):
-                        yield Checkbox(_label(n, s), value=False,
-                                       classes="scen-check", id=f"check_{n}")
-                        yield Collapsible(Static(body, classes="scen-desc"),
-                                          title="", collapsed=True,
-                                          classes="scen-more",
-                                          id=f"more_{n}")
+                    with Vertical(classes="scenario-row"):
+                        with Horizontal(classes="scenario-head"):
+                            yield Checkbox(_label(n, s), value=False,
+                                           classes="scen-check",
+                                           id=f"check_{n}")
+                            yield DescArrow(f"desc_{n}", id=f"arrow_{n}")
+                        yield Static(body, classes="scen-desc",
+                                     id=f"desc_{n}")
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")

@@ -13,7 +13,7 @@ import unittest
 from common import FakeEnv, core  # noqa: F401  (core: patchowane stałe)
 
 import tui
-from textual.widgets import Checkbox, Collapsible, Input, Static
+from textual.widgets import Checkbox, Input, Static
 
 
 class TuiHarness(unittest.IsolatedAsyncioTestCase):
@@ -80,26 +80,29 @@ class TuiSetupTests(TuiHarness):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
             checkbox = app.query_one("#check_zwykly", Checkbox)
-            more = app.query_one("#more_zwykly", Collapsible)
+            desc = app.query_one("#desc_zwykly", Static)
             self.assertFalse(checkbox.value)
 
             await pilot.click("#check_zwykly")
             await pilot.pause()
-            self.assertTrue(checkbox.value)      # klik w nazwę = wybór
-            self.assertTrue(more.collapsed)      # ...bez rozwijania opisu
+            self.assertTrue(checkbox.value)               # klik w nazwę = wybór
+            self.assertFalse(desc.has_class("shown"))     # ...bez opisu
 
-            await pilot.click("#more_zwykly CollapsibleTitle")
+            await pilot.click("#arrow_zwykly")
             await pilot.pause()
-            self.assertFalse(more.collapsed)     # strzałka rozwija szczegóły
-            self.assertTrue(checkbox.value)      # ...nie ruszając wyboru
+            self.assertTrue(desc.has_class("shown"))      # strzałka rozwija
+            self.assertTrue(checkbox.value)               # ...nie rusza wyboru
+
+            await pilot.click("#arrow_zwykly")
+            await pilot.pause()
+            self.assertFalse(desc.has_class("shown"))     # i zwija z powrotem
 
     async def test_opis_bez_wartosci_oczekiwanych(self):
         # W polu Scenariusze opis nie pokazuje oczekiwanych/zmierzonych
         # zużyć (pole `expected`) – te widać dopiero w instrukcji pomiaru.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
-            body = str(app.query_one("#more_zwykly .scen-desc",
-                                     Static).render())
+            body = str(app.query_one("#desc_zwykly", Static).render())
             self.assertIn("Firmware z tego repo", body)
             self.assertNotIn("Oczekiwane", body)
             self.assertNotIn("0.95", body)
