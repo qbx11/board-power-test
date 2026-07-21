@@ -299,7 +299,8 @@ def cmd_run(args):
             built[name] = None
             continue
         print(f"\n--- build: {name} – {scen.get('description', '')}")
-        cmd, build_dir = make_build_cmd(name, scen, prof_name, profile)
+        cmd, build_dir = make_build_cmd(name, scen, prof_name, profile,
+                                        defaults.get("profile"))
         run_cmd(cmd, args.dry_run, cwd=workspace)
         built[name] = build_dir
 
@@ -314,14 +315,20 @@ def cmd_run(args):
               f"python3 tools/power-test/{Path(__file__).name} report")
 
 
-def make_build_cmd(name, scen, prof_name, profile):
+def make_build_cmd(name, scen, prof_name, profile, default_prof=None):
     """Komenda `west build` + katalog builda dla scenariusza.
 
     Źródłem jest to repo, chyba że wpis ma `source` – wtedy budujemy
     wskazaną aplikację zespołu, ale katalog builda i tak zostaje tutaj
     (build_<scenariusz>/). Ścieżki absolutne, bo west może być wołany
-    z katalogu SDK (build out-of-tree, gdy repo leży poza workspace'em)."""
-    build_dir = f"build_{name}" if prof_name == "btz" else f"build_{prof_name}_{name}"
+    z katalogu SDK (build out-of-tree, gdy repo leży poza workspace'em).
+
+    Profil domyślny (`default_prof` z [defaults]) buduje do
+    build_<scenariusz>/ – jak scripts/build.sh i README; pozostałe
+    profile dostają prefiks (build_<profil>_<scenariusz>/), żeby ich
+    obrazy się nie nadpisywały."""
+    prefix = "" if prof_name == default_prof else f"{prof_name}_"
+    build_dir = f"build_{prefix}{name}"
     src = resolve_path(scen["source"]) if scen.get("source") else ROOT
     cmd = ["west", "build", "-b", profile["board"], "-p", "always",
            "-d", str(ROOT / build_dir), str(src)]
@@ -411,15 +418,17 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
     append_row(make_row(name, scen, profile, sample, voltage, current, uwagi))
 
 
-def parse_current(raw):
-    """Wartość prądu -> µA. Przyjmuje '0.95', '7,3' (µA domyślnie),
-    '2.5 mA', '950 uA' / '950 µA'."""
+def parse_current(raw, default_unit="uA"):
+    """Wartość prądu -> µA. Przyjmuje '0.95', '7,3', '2.5 mA',
+    '950 uA' / '950 µA'. Bez jawnej jednostki liczy wg `default_unit`
+    ('uA' albo 'mA') – TUI podaje tu jednostkę z Selecta, CLI zostaje
+    przy domyślnych µA."""
     s = raw.strip().lower().replace(",", ".").replace("µ", "u")
-    factor = 1.0
+    factor = 1000.0 if default_unit.lower() == "ma" else 1.0
     if s.endswith("ma"):
         factor, s = 1000.0, s[:-2]
     elif s.endswith("ua"):
-        s = s[:-2]
+        factor, s = 1.0, s[:-2]
     return round(float(s.strip()) * factor, 6)
 
 

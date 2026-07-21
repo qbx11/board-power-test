@@ -50,12 +50,13 @@ def _stream(cmd, cwd, on_line):
     """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku).
     env=child_env(): procesy west dostają z powrotem PYTHONHOME/PYTHONPATH
     toolchaina, które naszemu pythonowi zdjęto przy starcie."""
-    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, errors="replace", env=core.child_env())
-    for line in proc.stdout:
-        on_line(line.rstrip())
-    return proc.wait()
+    with subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace",
+                          env=core.child_env()) as proc:
+        for line in proc.stdout:
+            on_line(line.rstrip())
+        return proc.wait()
 
 
 def _label(name, item):
@@ -161,16 +162,17 @@ class MeasureScreen(ModalScreen):
             self._save()
 
     def _save(self):
-        raw = self.query_one("#current", Input).value.strip().replace(",", ".")
+        # Jedno źródło parsowania (core.parse_current): Select daje jednostkę
+        # domyślną, ale jawny sufiks w polu (np. '2.5 mA') ma pierwszeństwo.
+        raw = self.query_one("#current", Input).value
+        unit = self.query_one("#unit", Select).value
         try:
-            current = float(raw)
+            current = core.parse_current(raw, default_unit=unit)  # -> µA
         except ValueError:
             self.app.notify("Podaj liczbę, np. 0.95 albo 7,3.",
                             severity="error")
             self.query_one("#current", Input).focus()
             return
-        if self.query_one("#unit", Select).value == "mA":
-            current = round(current * 1000, 6)  # dziennik CSV trzyma µA
         self.dismiss((current, self.query_one("#notes", Input).value.strip()))
 
 
@@ -296,7 +298,8 @@ class RunScreen(Screen):
                 status.update(f"FAZA 1/2 · build {build_no}/{len(to_build)}"
                               f" · {name}")
                 cmd, build_dir = core.make_build_cmd(
-                    name, scen, self.prof_name, self.profile)
+                    name, scen, self.prof_name, self.profile,
+                    defaults.get("profile"))
                 await self.run_west(cmd, workspace, f"build {name}")
                 built[name] = build_dir
             self.note(f"Zbudowano {len(to_build)} obraz(ów)." if to_build

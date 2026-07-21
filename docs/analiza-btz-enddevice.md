@@ -48,4 +48,4 @@ zawiera `&uicr { nfct-pins-as-gpios; }`. Zbuduj i **wgraj z `--erase`** (zapis U
 trwały; narzędzie robi to domyślnie), potem zmierz — jeśli prąd spadnie, tryb NFC był
 (częścią) winowajcy. Jeśli NFC ma być funkcją produktu — usuń blok `&uicr` z overlaya.
 
-Zobacz też: `docs/raport-pobor-pradu-2026-07-20.md` i surowe dane `pomiary-ppk2/pomiary.csv`.
+Zobacz też: `docs/raport-pobor-pradu-2026-07-20.md`.

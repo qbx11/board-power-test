@@ -32,7 +32,7 @@ class CoreTests(unittest.TestCase):
 
     def test_build_cmd_source_buduje_z_katalogu_zespolu(self):
         cmd, build_dir = core.make_build_cmd(
-            "zrodlowy", self.scenarios["zrodlowy"], "btz", self.profile)
+            "zrodlowy", self.scenarios["zrodlowy"], "btz", self.profile, "btz")
         self.assertEqual(build_dir, "build_zrodlowy")
         # źródłem jest katalog z manifestu, nie repo narzędzia
         self.assertIn(str(self.env.source_dir), cmd)
@@ -46,10 +46,24 @@ class CoreTests(unittest.TestCase):
 
     def test_build_cmd_zwykly_regresja(self):
         cmd, build_dir = core.make_build_cmd(
-            "zwykly", self.scenarios["zwykly"], "btz", self.profile)
+            "zwykly", self.scenarios["zwykly"], "btz", self.profile, "btz")
         self.assertEqual(build_dir, "build_zwykly")
         self.assertEqual(cmd[cmd.index("--") - 1], str(self.env.repo))
         self.assertIn("-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y", cmd)
+
+    def test_build_cmd_profil_nienbedomyslny_ma_prefiks(self):
+        # Profil inny niż domyślny buduje do build_<profil>_<scenariusz>/,
+        # żeby obrazy różnych płytek się nie nadpisywały.
+        _, build_dir = core.make_build_cmd(
+            "zwykly", self.scenarios["zwykly"], "dk",
+            self.manifest["boards"]["dk"], "btz")
+        self.assertEqual(build_dir, "build_dk_zwykly")
+
+    def test_parse_current_jednostka_domyslna(self):
+        # Bez sufiksu liczy wg jednostki domyślnej; jawny sufiks wygrywa.
+        self.assertEqual(core.parse_current("2.5", default_unit="mA"), 2500.0)
+        self.assertEqual(core.parse_current("0,95", default_unit="uA"), 0.95)
+        self.assertEqual(core.parse_current("2.5 mA", default_unit="uA"), 2500.0)
 
     def test_flash_cmd_hex_nrfutil(self):
         cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,
