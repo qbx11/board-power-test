@@ -23,14 +23,12 @@ import shlex
 import shutil
 import subprocess
 
-from rich.text import Text
 from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Collapsible, DataTable, Input,
-                             Label, Log, Select, SelectionList, Static)
-from textual.widgets.selection_list import Selection
+from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Input,
+                             Label, Log, Select, Static)
 
 import power_test as core
 
@@ -90,8 +88,9 @@ class ChoiceScreen(ModalScreen[str]):
 
 
 class MeasureScreen(ModalScreen):
-    """Instrukcja pomiaru + pola: średni prąd i uwagi. Zwraca
-    (prąd, uwagi) albo None przy pominięciu."""
+    """Instrukcja pomiaru + pola: średni prąd (µA/mA) i uwagi. Zwraca
+    (prąd_w_µA, uwagi), "reflash" (wgraj płytkę ponownie) albo None
+    przy pominięciu."""
 
     def __init__(self, scen_name, scen, voltage, settle_s):
         super().__init__()
@@ -114,6 +113,7 @@ class MeasureScreen(ModalScreen):
             yield Input(placeholder="np. 'przed poprawką HW'", id="notes")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Zapisz", id="save")
+                yield Button("Wgraj ponownie", id="reflash")
                 yield Button("Pomiń (bez zapisu)", id="skip")
 
     def on_mount(self):
@@ -125,6 +125,8 @@ class MeasureScreen(ModalScreen):
     def on_button_pressed(self, event):
         if event.button.id == "skip":
             self.dismiss(None)
+        elif event.button.id == "reflash":
+            self.dismiss("reflash")
         else:
             self._save()
 
@@ -257,61 +259,76 @@ class RunScreen(Screen):
                 settle_s = scen.get("settle_s", defaults.get("settle_s", 5))
                 status.update(f"FAZA 2/2 · scenariusz {i}/{total} · {name}")
 
-                ok = await self.app.push_screen_wait(ConfirmScreen(
-                    f"[b]{_label(name, scen)}[/b]\n"
-                    f"{scen.get('description', '')}\n\n"
-                    "Programator podłączony i płytka ZASILONA\n"
-                    "(np. VOUT z PPK2)?",
-                    yes="Wgraj (flash --erase)", no="Pomiń scenariusz"))
-                if not ok:
-                    self.note(f"Pominięto {name}.")
-                    continue
-
-                # Flash z ponawianiem: zły kabel/programator nie cofa
-                # całego przebiegu – można poprawić i spróbować jeszcze raz.
-                skipped = False
+                # Pętla scenariusza: flash (z ponawianiem po błędzie),
+                # pomiar – a z okna pomiaru można wrócić do flasha
+                # ("Wgraj ponownie") bez cofania całego przebiegu.
+                attempt = 1
                 while True:
-                    try:
-                        await self.run_west(core.make_flash_cmd(
-                            built[name], self.profile),
-                            workspace, f"flash {name}")
+                    ok = await self.app.push_screen_wait(ConfirmScreen(
+                        f"[b]{_label(name, scen)}[/b]\n"
+                        f"{scen.get('description', '')}\n\n"
+                        "Programator podłączony i płytka ZASILONA\n"
+                        "(np. VOUT z PPK2)?",
+                        yes=("Wgraj (flash --erase)" if attempt == 1
+                             else "Wgraj ponownie"),
+                        no="Pomiń scenariusz"))
+                    if not ok:
+                        self.note(f"Pominięto {name}.")
                         break
-                    except RuntimeError as err:
-                        choice = await self.app.push_screen_wait(ChoiceScreen(
-                            f"[b]Flash nie powiódł się[/b]\n{err}\n\n"
-                            "Sprawdź: kabel SWD wpięty? programator widzi\n"
-                            "płytkę? płytka zasilona (VOUT z PPK2)?",
-                            [("Ponów flash", "retry"),
-                             ("Pomiń scenariusz", "skip"),
-                             ("Przerwij wszystko", "abort")]))
-                        if choice == "retry":
-                            continue
-                        if choice == "skip":
-                            skipped = True
+
+                    # Flash z ponawianiem: zły kabel/programator nie cofa
+                    # przebiegu – popraw i spróbuj jeszcze raz.
+                    flashed = False
+                    while True:
+                        try:
+                            await self.run_west(core.make_flash_cmd(
+                                built[name], self.profile),
+                                workspace, f"flash {name}")
+                            flashed = True
                             break
-                        raise
-                if skipped:
-                    self.note(f"Pominięto {name} (flash nieudany).")
-                    continue
+                        except RuntimeError as err:
+                            choice = await self.app.push_screen_wait(
+                                ChoiceScreen(
+                                    f"[b]Flash nie powiódł się[/b]\n{err}\n\n"
+                                    "Sprawdź: kabel SWD wpięty? programator\n"
+                                    "widzi płytkę? płytka zasilona\n"
+                                    "(VOUT z PPK2)?",
+                                    [("Ponów flash", "retry"),
+                                     ("Pomiń scenariusz", "skip"),
+                                     ("Przerwij wszystko", "abort")]))
+                            if choice == "retry":
+                                continue
+                            if choice == "skip":
+                                break
+                            raise
+                    if not flashed:
+                        self.note(f"Pominięto {name} (flash nieudany).")
+                        break
 
-                # Twarde potwierdzenie SWD – jedyny przycisk, bez obejścia.
-                await self.app.push_screen_wait(ConfirmScreen(
-                    "[b]ODŁĄCZ przewód SWD/J-Link![/b]\n\n"
-                    "Podłączony debugger dodaje własny prąd\n"
-                    "i unieważnia pomiar minimum.",
-                    yes="SWD ODŁĄCZONY – przejdź do pomiaru", no=None))
+                    # Twarde potwierdzenie SWD – jedyny przycisk.
+                    await self.app.push_screen_wait(ConfirmScreen(
+                        "[b]ODŁĄCZ przewód SWD/J-Link![/b]\n\n"
+                        "Podłączony debugger dodaje własny prąd\n"
+                        "i unieważnia pomiar minimum.",
+                        yes="SWD ODŁĄCZONY – przejdź do pomiaru", no=None))
 
-                result = await self.app.push_screen_wait(
-                    MeasureScreen(name, scen, voltage, settle_s))
-                if result is None:
-                    self.note(f"Pominięto zapis scenariusza {name}.")
-                    continue
-                current, notes = result
-                core.append_row(core.make_row(name, scen, self.profile,
-                                              self.sample, voltage, current,
-                                              notes), verbose=False)
-                saved.append(f"{name}: {current} µA")
-                self.note(f"Zapisano: {name} = {current} µA")
+                    result = await self.app.push_screen_wait(
+                        MeasureScreen(name, scen, voltage, settle_s))
+                    if result == "reflash":
+                        attempt += 1
+                        self.note(f"{name}: ponowne wgranie na życzenie.")
+                        continue
+                    if result is None:
+                        self.note(f"Pominięto zapis scenariusza {name}.")
+                        break
+                    current, notes = result
+                    core.append_row(core.make_row(name, scen, self.profile,
+                                                  self.sample, voltage,
+                                                  current, notes),
+                                    verbose=False)
+                    saved.append(f"{name}: {current} µA")
+                    self.note(f"Zapisano: {name} = {current} µA")
+                    break
 
             status.update("Gotowe.")
             summary = ("\n".join(saved) if saved
@@ -338,16 +355,36 @@ class PowerTestApp(App):
     # przyciski nie zmieniają tła w żadnym stanie (nic nie wygląda na
     # "wciśnięte" na stałe).
     CSS = """
+    * { scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
+        scrollbar-color: #444444;
+        scrollbar-color-hover: #777777;
+        scrollbar-color-active: #777777;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1; }
+
     #setup { padding: 1 2; }
     .h { margin-top: 1; text-style: bold; }
     #profile, #sample, #scenarios { width: 72; max-width: 100%; }
     #scenarios { border: round #555555; background: transparent;
-                 max-height: 16; }
-    #scenarios:focus { border: round #aaaaaa; }
+                 height: auto; max-height: 18; overflow-y: auto;
+                 padding: 0 1; }
+    .scenario-row { height: auto; }
+    .scen-check { border: none; background: transparent; padding: 0;
+                  height: 1; min-width: 4; }
+    .scen-check:focus { text-style: bold; }
+    .scen-main { width: 1fr; height: auto; }
+    .scen-desc { color: #888888; }
+    ToggleButton > .toggle--button { background: transparent; color: $text; }
     Input { background: transparent; border: round #555555; }
     Input:focus { border: round #aaaaaa; }
     SelectCurrent { background: transparent; border: round #555555; }
     Select:focus SelectCurrent { border: round #aaaaaa; }
+    SelectOverlay { background: $surface; border: round #555555; }
+    SelectOverlay OptionList { background: transparent; }
+    OptionList > .option-list--option-highlighted { background: #333333;
+                                                    text-style: none; }
 
     Button { background: transparent; border: round #555555;
              color: $text; min-width: 10; text-style: none; }
@@ -401,10 +438,19 @@ class PowerTestApp(App):
             yield Select(((b["board"], n) for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
             yield Label("Scenariusze", classes="h")
-            yield SelectionList(*(Selection(
-                Text.from_markup(f"[b]{_label(n, s)}[/b]\n"
-                                 f"[dim]{s.get('description', '')}[/dim]"), n)
-                for n, s in self.scenarios.items()), id="scenarios")
+            with Vertical(id="scenarios"):
+                for n, s in self.scenarios.items():
+                    body = s.get("description", "")
+                    if s.get("expected"):
+                        body += f"\nOczekiwane: {s['expected']}"
+                    if s.get("note"):
+                        body += f"\nUwaga: {s['note']}"
+                    with Horizontal(classes="scenario-row"):
+                        yield Checkbox("", value=False, classes="scen-check",
+                                       id=f"check_{n}")
+                        yield Collapsible(Static(body, classes="scen-desc"),
+                                          title=_label(n, s), collapsed=True,
+                                          classes="scen-main")
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
@@ -418,15 +464,16 @@ class PowerTestApp(App):
         if event.button.id == "quit":
             self.exit()
         elif event.button.id == "select_all":
-            self.query_one("#scenarios", SelectionList).select_all()
+            for box in self.query(".scen-check"):
+                box.value = True
         elif event.button.id == "results":
             self.push_screen(ResultsScreen())
         elif event.button.id == "start":
             self._start()
 
     def _start(self):
-        selected = self.query_one("#scenarios", SelectionList).selected
-        names = [n for n in self.scenarios if n in selected]  # kolejność manifestu
+        names = [n for n in self.scenarios
+                 if self.query_one(f"#check_{n}", Checkbox).value]
         sample = self.query_one("#sample", Input).value.strip()
         prof_name = self.query_one("#profile", Select).value
         if not names:
