@@ -31,12 +31,35 @@ if command -v west >/dev/null 2>&1 || [ "${BPT_NO_NCS_LAUNCH:-}" = "1" ]; then
 fi
 
 # Zwykły terminal: przezroczyście uruchom CLI wewnątrz środowiska NCS.
-if command -v nrfutil >/dev/null 2>&1; then
-	NCS="${NCS_VERSION:-v3.4.0}"
-	echo "board-power-test: brak 'west' w PATH – startuję środowisko NCS $NCS (nrfutil toolchain-manager)..."
-	exec nrfutil toolchain-manager launch --ncs-version "$NCS" -- python3 "$CLI" "$@"
+if ! command -v nrfutil >/dev/null 2>&1; then
+	echo "board-power-test: brak 'west' i brak 'nrfutil' w PATH." >&2
+	echo "Zainstaluj nRF Util (nrfutil) albo uruchom w terminalu nRF Connect." >&2
+	exit 1
 fi
 
-echo "board-power-test: brak 'west' i brak 'nrfutil' w PATH." >&2
-echo "Zainstaluj nRF Util (nrfutil) albo uruchom w terminalu nRF Connect." >&2
-exit 1
+NCS="${NCS_VERSION:-v3.4.0}"
+
+# nrfutil jest modułowy: subkomendę toolchain-manager trzeba raz doinstalować.
+if ! nrfutil list 2>/dev/null | grep -q "toolchain-manager"; then
+	echo "board-power-test: nrfutil nie ma zainstalowanego polecenia 'toolchain-manager'."
+	read -r -p "Zainstalować teraz? (nrfutil install toolchain-manager) [t/N]: " odp
+	[[ "$odp" =~ ^[tTyY] ]] || {
+		echo "Przerwano. Zainstaluj ręcznie:  nrfutil install toolchain-manager" >&2
+		exit 1
+	}
+	nrfutil install toolchain-manager
+fi
+
+# Sam toolchain NCS też musi być pobrany (jednorazowo, duży download).
+if ! nrfutil toolchain-manager list 2>/dev/null | grep -qF "$NCS"; then
+	echo "board-power-test: toolchain NCS $NCS nie jest zainstalowany."
+	read -r -p "Pobrać teraz? (nrfutil toolchain-manager install --ncs-version $NCS, kilka GB) [t/N]: " odp
+	[[ "$odp" =~ ^[tTyY] ]] || {
+		echo "Przerwano. Zainstaluj ręcznie:  nrfutil toolchain-manager install --ncs-version $NCS" >&2
+		exit 1
+	}
+	nrfutil toolchain-manager install --ncs-version "$NCS"
+fi
+
+echo "board-power-test: brak 'west' w PATH – startuję środowisko NCS $NCS (nrfutil toolchain-manager)..."
+exec nrfutil toolchain-manager launch --ncs-version "$NCS" -- python3 "$CLI" "$@"
