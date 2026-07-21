@@ -65,9 +65,21 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 return notes  # RunScreen zdjęty – jesteśmy na ekranie głównym
             button = ("#skip" if isinstance(screen, tui.MeasureScreen)
                       else "#yes")
-            await pilot.click(button)
-            await self.wait_until(pilot, lambda a: a.screen is not screen,
-                                  msg="zamknięcie dialogu")
+            # Klik z ponowieniem: pod obciążeniem zdarza się trafić w
+            # dialog, zanim się w pełni ułoży – wtedy klik idzie w pustkę.
+            for _ in range(5):
+                await pilot.pause()
+                await pilot.click(button)
+                try:
+                    await self.wait_until(pilot,
+                                          lambda a: a.screen is not screen,
+                                          timeout=3.0,
+                                          msg="zamknięcie dialogu")
+                    break
+                except AssertionError:
+                    continue
+            else:
+                self.fail("dialog nie zamknął się mimo ponawianych kliknięć")
         self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
 
 
@@ -126,6 +138,50 @@ class TuiSetupTests(TuiHarness):
             app.query_one("#check_zwykly", Checkbox).value = True
             await pilot.pause()
             self.assertTrue(button.has_class("pressed"))
+
+
+class TuiAddTests(TuiHarness):
+
+    async def test_dodaj_firmware_hex_przez_dialog(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#add_fw")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="dialog Dodaj firmware")
+            app.screen.query_one("#path", Input).value = "gotowe/firmware.hex"
+            app.screen.query_one("#label", Input).value = "Gotowy obraz"
+            await pilot.click("#add")
+            await self.wait_until(pilot,
+                                  lambda a: not isinstance(a.screen,
+                                                           tui.AddScreen),
+                                  msg="zamknięcie dialogu")
+            # nowy scenariusz od razu na liście i zaznaczony...
+            checkbox = app.query_one("#check_firmware", Checkbox)
+            self.assertTrue(checkbox.value)
+            self.assertIn("firmware", app.scenarios)
+            # ...i trwale zapisany w manifeście
+            scen = tui.core.load_manifest()["scenarios"]["firmware"]
+            self.assertEqual(scen["hex"], "gotowe/firmware.hex")
+            self.assertEqual(scen["label"], "Gotowy obraz")
+
+    async def test_dodaj_firmware_zla_sciezka_nie_zamyka_dialogu(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#add_fw")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen),
+                                  msg="dialog Dodaj firmware")
+            app.screen.query_one("#path", Input).value = "nie_ma_takiego"
+            await pilot.click("#add")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.AddScreen)  # dialog trwa
+            await pilot.click("#cancel")
+            await pilot.pause()
+            self.assertNotIn("nie_ma_takiego",
+                             (tui.core.MANIFEST_PATH).read_text())
 
 
 class TuiRunTests(TuiHarness):

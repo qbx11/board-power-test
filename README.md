@@ -23,6 +23,19 @@ Wymagania:
 
 ## Dodawanie własnego kodu
 
+Najszybsza droga — jedna komenda albo przycisk:
+
+```sh
+board-power-test add ../moj-projekt/app                      # katalog aplikacji -> build west-em
+board-power-test add ../moj-projekt/build/zephyr/zephyr.hex  # gotowa binarka -> bez budowania
+```
+
+Narzędzie samo rozpoznaje rodzaj (katalog z `CMakeLists.txt` = `source`,
+plik `.hex` = `hex`), dopisuje wpis do `scenarios.toml` i podaje komendę
+uruchomienia; opcje: `--name`, `--label`, `--desc`. To samo w interfejsie:
+przycisk **„Dodaj firmware"** — nowy scenariusz od razu pojawia się na liście
+(zaznaczony). Wpis można potem doszlifować ręcznie — szczegóły poniżej.
+
 Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
 (klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).
 Firmware pochodzi z jednego z trzech źródeł.

@@ -19,6 +19,7 @@
 #   python3 tools/power-test/power_test.py run reset_only idle
 #   python3 tools/power-test/power_test.py run --all --profile dk
 #   python3 tools/power-test/power_test.py run reset_only --dry-run
+#   python3 tools/power-test/power_test.py add ../moj-projekt/app
 #   python3 tools/power-test/power_test.py report
 
 import os
@@ -43,9 +44,12 @@ if ((os.environ.get("PYTHONHOME") or os.environ.get("PYTHONPATH"))
 
 import argparse
 import csv
+import json
+import re
 import shlex
 import shutil
 import subprocess
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -204,6 +208,102 @@ def scenario_flags(scen):
     if scen.get("hex"):
         parts.append(f"hex={scen['hex']}")
     return " ".join(parts)
+
+
+# ------------------------------------------------------------
+#  Dodawanie własnego firmware jedną ścieżką (CLI `add` i TUI)
+# ------------------------------------------------------------
+
+def detect_firmware(path_str, base=None):
+    """Co wskazuje ścieżka: katalog aplikacji Zephyr/NCS -> 'source',
+    plik .hex -> 'hex'. Zwraca (rodzaj, ścieżka absolutna); przy złej
+    ścieżce ValueError z czytelnym opisem. `base` – katalog, od którego
+    liczyć ścieżki względne (CLI: bieżący katalog, TUI/manifest: repo)."""
+    p = Path(path_str).expanduser()
+    if not p.is_absolute():
+        p = Path(base or ROOT) / p
+    p = p.resolve()
+    if p.is_file():
+        if p.suffix.lower() != ".hex":
+            raise ValueError(f"'{path_str}' to plik, ale nie .hex – "
+                             "gotowa binarka musi być plikiem .hex")
+        return "hex", p
+    if p.is_dir():
+        if not (p / "CMakeLists.txt").is_file():
+            raise ValueError(f"katalog '{p}' nie wygląda na aplikację "
+                             "Zephyr/NCS (brak CMakeLists.txt)")
+        return "source", p
+    raise ValueError(f"ścieżka '{path_str}' nie istnieje ({p})")
+
+
+def _slug(text):
+    """Tekst -> klucz scenariusza (ascii, [a-z0-9_-], nie od cyfry)."""
+    text = unicodedata.normalize("NFKD", text).encode("ascii",
+                                                      "ignore").decode()
+    s = re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_-").lower()
+    if not s:
+        s = "firmware"
+    if not re.match(r"[a-z_]", s):
+        s = "fw_" + s
+    return s
+
+
+def _toml_str(value):
+    """Wartość -> łańcuch TOML w cudzysłowach (escapowanie jak w JSON,
+    które jest poprawnym podzbiorem basic string TOML-a)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def add_scenario(path_str, name=None, label=None, description=None,
+                 base=None):
+    """Dopisz do scenarios.toml scenariusz z własnym firmware na
+    podstawie SAMEJ ŚCIEŻKI (łatwa droga zamiast ręcznej edycji TOML):
+    katalog aplikacji -> wariant `source`, plik .hex -> wariant `hex`.
+
+    Ścieżka w manifeście: względna do repo, jeśli firmware leży w nim
+    lub obok (czytelniej i przenośnie między maszynami zespołu),
+    inaczej absolutna. Zwraca (nazwa, wpis)."""
+    kind, p = detect_firmware(path_str, base=base)
+    try:
+        stored = os.path.relpath(p, ROOT)
+    except ValueError:          # Windows: inny dysk
+        stored = str(p)
+    if stored.count("..") > 3:  # daleko poza repo – absolutna czytelniejsza
+        stored = str(p)
+
+    manifest = load_manifest()
+    scenarios = manifest.get("scenarios", {})
+    if name:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
+            raise ValueError(f"nazwa '{name}' – dozwolone litery, cyfry, "
+                             "'_' i '-', nie może zaczynać się cyfrą")
+        if name in scenarios:
+            raise ValueError(f"scenariusz '{name}' już istnieje – "
+                             "podaj inną nazwę")
+    else:
+        name = base_name = _slug(p.stem if kind == "hex" else p.name)
+        i = 2
+        while name in scenarios:      # auto-numerowanie przy powtórce
+            name = f"{base_name}_{i}"
+            i += 1
+
+    entry = {}
+    if label:
+        entry["label"] = label
+    entry["description"] = description or (
+        f"Gotowy obraz {stored} (bez budowania)." if kind == "hex"
+        else f"Aplikacja z {stored} (build przez west).")
+    entry[kind] = stored
+
+    block = [f"\n[scenarios.{name}]"]
+    for key, value in entry.items():
+        block.append(f"{key:<11} = {_toml_str(value)}")
+    text = MANIFEST_PATH.read_text(encoding="utf-8")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    MANIFEST_PATH.write_text(text + "\n".join(block) + "\n",
+                             encoding="utf-8")
+    return name, entry
 
 
 def resolve_profile(manifest, name):
@@ -479,6 +579,28 @@ def append_row(row, verbose=True):
         print(f"Zapisano: {CSV_PATH.relative_to(ROOT)}")
 
 
+def cmd_add(args):
+    """`add <ścieżka>` – najprostsza droga dodania cudzego kodu:
+    narzędzie samo rozpoznaje katalog aplikacji (source) vs plik .hex
+    i dopisuje gotowy wpis do scenarios.toml."""
+    try:
+        name, entry = add_scenario(args.path, name=args.name,
+                                   label=args.label, description=args.desc,
+                                   base=Path.cwd())
+    except ValueError as e:
+        die(str(e))
+    kind = "hex" if "hex" in entry else "source"
+    what = ("gotowy obraz, bez budowania" if kind == "hex"
+            else "aplikacja budowana przez west")
+    print(f"Dodano scenariusz '{name}' ({what}) do "
+          f"{MANIFEST_PATH.relative_to(ROOT)}:")
+    for key, value in entry.items():
+        print(f"  {key:<11} = {_toml_str(value)}")
+    print(f"\nUruchomienie:  board-power-test run {name}\n"
+          "Wpis można doszlifować ręcznie w scenarios.toml "
+          "(label, expected, voltage, cmake_args...).")
+
+
 def cmd_report(args):
     if not CSV_PATH.is_file():
         die(f"brak pomiarów ({CSV_PATH.relative_to(ROOT)} nie istnieje). "
@@ -589,6 +711,17 @@ def main():
     run.add_argument("--dry-run", "-n", action="store_true",
                      help="tylko pokaż komendy i instrukcję, nic nie wykonuj")
     run.set_defaults(func=cmd_run)
+
+    add = sub.add_parser(
+        "add", help="dodaj scenariusz z własnym firmware (katalog aplikacji "
+                    "Zephyr/NCS albo gotowy plik .hex)")
+    add.add_argument("path", help="katalog aplikacji (source) albo plik .hex; "
+                                  "rodzaj wykrywany automatycznie")
+    add.add_argument("--name", help="klucz scenariusza (dom. z nazwy "
+                                    "katalogu/pliku)")
+    add.add_argument("--label", help="nazwa wyświetlana w interfejsie")
+    add.add_argument("--desc", help="opis scenariusza")
+    add.set_defaults(func=cmd_add)
 
     sub.add_parser("report", help="tabela zebranych pomiarów (reports/pomiary.csv)") \
        .set_defaults(func=cmd_report)

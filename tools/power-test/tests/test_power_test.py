@@ -143,6 +143,70 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(row["flagi"], "hex=gotowe/firmware.hex")
 
 
+class AddScenarioTests(unittest.TestCase):
+    """`add_scenario` – dodawanie cudzego kodu jedną ścieżką."""
+
+    def setUp(self):
+        self.env = FakeEnv()
+        self.addCleanup(self.env.cleanup)
+
+    def test_dodanie_hex_z_pliku(self):
+        name, entry = core.add_scenario("gotowe/firmware.hex", base=core.ROOT)
+        self.assertEqual(name, "firmware")
+        self.assertEqual(entry["hex"], "gotowe/firmware.hex")  # względna
+        # wpis naprawdę jest w manifeście, parsuje się i przechodzi walidację
+        scenarios = core.load_manifest()["scenarios"]
+        self.assertEqual(scenarios["firmware"]["hex"], "gotowe/firmware.hex")
+        self.assertEqual(core.validate_scenarios(["firmware"], scenarios), [])
+
+    def test_dodanie_source_z_katalogu(self):
+        name, entry = core.add_scenario(str(self.env.source_dir))
+        self.assertEqual(name, "app_zespolu")
+        self.assertEqual(entry["source"], "app_zespolu")
+        scenarios = core.load_manifest()["scenarios"]
+        self.assertEqual(core.validate_scenarios([name], scenarios), [])
+
+    def test_label_i_opis_z_polskimi_znakami_i_cudzyslowem(self):
+        label = 'Moja "apka" — żółć'
+        name, _ = core.add_scenario("app_zespolu", label=label,
+                                    description="opis z ą i \"cytatem\"",
+                                    base=core.ROOT)
+        scen = core.load_manifest()["scenarios"][name]
+        self.assertEqual(scen["label"], label)
+        self.assertEqual(scen["description"], 'opis z ą i "cytatem"')
+
+    def test_auto_numerowanie_przy_powtorce(self):
+        first, _ = core.add_scenario("gotowe/firmware.hex", base=core.ROOT)
+        second, _ = core.add_scenario("gotowe/firmware.hex", base=core.ROOT)
+        self.assertEqual((first, second), ("firmware", "firmware_2"))
+
+    def test_bledy_wykrywania(self):
+        (self.env.repo / "notatki.txt").write_text("x")
+        (self.env.repo / "pusty_katalog").mkdir()
+        for path, blad in (("nie_ma_takiego", "nie istnieje"),
+                           ("notatki.txt", "nie .hex"),
+                           ("pusty_katalog", "CMakeLists.txt")):
+            with self.assertRaises(ValueError) as ctx:
+                core.add_scenario(path, base=core.ROOT)
+            self.assertIn(blad, str(ctx.exception))
+
+    def test_jawna_nazwa_zajeta_lub_zla(self):
+        with self.assertRaises(ValueError) as ctx:
+            core.add_scenario("app_zespolu", name="zwykly", base=core.ROOT)
+        self.assertIn("już istnieje", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            core.add_scenario("app_zespolu", name="1zly", base=core.ROOT)
+        self.assertIn("nie może zaczynać się cyfrą", str(ctx.exception))
+
+    def test_cli_add(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            core.cmd_add(argparse.Namespace(path=str(self.env.hex_path),
+                                            name=None, label=None, desc=None))
+        self.assertIn("Dodano scenariusz 'firmware'", out.getvalue())
+        self.assertIn("firmware", core.load_manifest()["scenarios"])
+
+
 class CliTests(unittest.TestCase):
 
     def setUp(self):

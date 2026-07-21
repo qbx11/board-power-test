@@ -176,6 +176,64 @@ class MeasureScreen(ModalScreen):
         self.dismiss((current, self.query_one("#notes", Input).value.strip()))
 
 
+class AddScreen(ModalScreen):
+    """Dodanie scenariusza z własnym firmware jedną ścieżką: katalog
+    aplikacji Zephyr/NCS -> wariant `source` (build przez west), plik
+    .hex -> wariant `hex` (bez budowania). Wpis dopisuje
+    core.add_scenario do scenarios.toml; zwraca (nazwa, wpis) albo None."""
+
+    def compose(self):
+        with Vertical(classes="dialog"):
+            yield Static("[b]Dodaj własny firmware[/b]\n"
+                         "Podaj katalog aplikacji Zephyr/NCS (będzie "
+                         "budowana west-em) albo gotowy plik .hex (bez "
+                         "budowania) – rodzaj wykrywany automatycznie.\n"
+                         "Ścieżka względna = od katalogu repo.",
+                         classes="dialog-text")
+            yield Label("Ścieżka (katalog aplikacji albo plik .hex):")
+            yield Input(placeholder="np. ../moj-projekt/app  albo  "
+                                    "../moj-projekt/build/zephyr/zephyr.hex",
+                        id="path")
+            yield Label("Nazwa w interfejsie (opcjonalnie):")
+            yield Input(placeholder="np. Moja aplikacja — sen", id="label")
+            yield Label("Opis (opcjonalnie):")
+            yield Input(placeholder="np. firmware sprzedażowe v1.2",
+                        id="desc")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Dodaj", id="add")
+                yield Button("Anuluj", id="cancel")
+
+    def on_mount(self):
+        self.query_one("#path", Input).focus()
+
+    def on_input_submitted(self, event):
+        self._add()
+
+    def on_button_pressed(self, event):
+        if event.button.id == "add":
+            self._add()
+        else:
+            self.dismiss(None)
+
+    def _add(self):
+        path = self.query_one("#path", Input).value.strip()
+        if not path:
+            self.app.notify("Podaj ścieżkę do firmware.", severity="error")
+            self.query_one("#path", Input).focus()
+            return
+        try:
+            name, entry = core.add_scenario(
+                path,
+                label=self.query_one("#label", Input).value.strip() or None,
+                description=self.query_one("#desc",
+                                           Input).value.strip() or None,
+                base=core.ROOT)
+        except ValueError as e:
+            self.app.notify(str(e), severity="error")
+            return
+        self.dismiss((name, entry))
+
+
 class ResultsScreen(ModalScreen):
     """Podgląd dziennika pomiarów (reports/pomiary.csv)."""
 
@@ -523,25 +581,31 @@ class PowerTestApp(App):
                 # opis (pełną szerokością, z małym wcięciem). Bez wartości
                 # oczekiwanych – te pokazuje dopiero instrukcja pomiaru.
                 for n, s in self.scenarios.items():
-                    body = s.get("description", "")
-                    if s.get("note"):
-                        body += f"\nUwaga: {s['note']}"
-                    with Vertical(classes="scenario-row"):
-                        with Horizontal(classes="scenario-head"):
-                            yield Checkbox(_label(n, s), value=False,
-                                           classes="scen-check",
-                                           id=f"check_{n}")
-                            yield DescArrow(f"desc_{n}", id=f"arrow_{n}")
-                        yield Static(body, classes="scen-desc",
-                                     id=f"desc_{n}")
+                    yield self._scenario_row(n, s)
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
+                yield Button("Dodaj firmware", id="add_fw")
                 yield Button("Wyniki", id="results")
                 yield Button("Wyjście", id="quit")
+
+    def _scenario_row(self, n, s, value=False):
+        """Wiersz listy scenariuszy – wspólny dla compose() i dodawania
+        scenariusza w locie ('Dodaj firmware')."""
+        body = s.get("description", "")
+        if s.get("note"):
+            body += f"\nUwaga: {s['note']}"
+        return Vertical(
+            Horizontal(
+                Checkbox(_label(n, s), value=value, classes="scen-check",
+                         id=f"check_{n}"),
+                DescArrow(f"desc_{n}", id=f"arrow_{n}"),
+                classes="scenario-head"),
+            Static(body, classes="scen-desc", id=f"desc_{n}"),
+            classes="scenario-row")
 
     def on_button_pressed(self, event):
         if event.button.id == "quit":
@@ -549,10 +613,24 @@ class PowerTestApp(App):
         elif event.button.id == "select_all":
             for box in self.query(".scen-check"):
                 box.value = True
+        elif event.button.id == "add_fw":
+            self.push_screen(AddScreen(), callback=self._scenario_added)
         elif event.button.id == "results":
             self.push_screen(ResultsScreen())
         elif event.button.id == "start":
             self._start()
+
+    def _scenario_added(self, result):
+        """Po 'Dodaj firmware': nowy scenariusz od razu na liście
+        (i zaznaczony), bez restartu aplikacji."""
+        if not result:
+            return
+        name, entry = result
+        self.scenarios[name] = entry
+        self.query_one("#scenarios").mount(
+            self._scenario_row(name, entry, value=True))
+        self.notify(f"Dodano scenariusz '{name}' (zapisany "
+                    "w scenarios.toml).")
 
     def on_checkbox_changed(self, event):
         """'Zaznacz wszystkie' wygląda na wciśnięty dokładnie wtedy, gdy
