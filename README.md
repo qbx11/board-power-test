@@ -1,19 +1,12 @@
 # board-power-test
 
-Narzędzie zespołowe do sprawdzania, czy **customowa płytka z nRF54L15 jest dobrze
-zaprojektowana pod kątem poboru prądu**. Jedna komenda w terminalu prowadzi przez
-cały proces: build czystego obrazu pomiarowego → flash → pomiar PPK2 → wspólny
-dziennik wyników. Porównanie tej samej macierzy trybów na płytce referencyjnej (DK)
-i na nowej płytce szybko ujawnia błędy designu (upływy, wiszące piny, zasilane
-peryferia), które inaczej łatwo przeoczyć.
+Narzędzie zespołowe do pomiaru poboru prądu płytek z nRF54L15 (PPK2). Jedna
+komenda prowadzi przez cały proces: build czystego obrazu pomiarowego → flash →
+pomiar w nRF Connect Power Profiler → wspólny dziennik wyników
+(`reports/pomiary.csv`). Narzędzie samo **nie mierzy i niczego nie ocenia** —
+pomiar robisz w Power Profilerze, a wynik wpisujesz do dziennika.
 
-Zasada działania: firmware wprowadza układ w **jeden, wybrany na etapie budowania
-tryb uśpienia i nie robi nic więcej** (osobny obraz na tryb — w obrazie pomiarowym
-nie ma konsoli, logów ani RTT, więc pomiar jest czysty). Narzędzie **nie mierzy
-prądu i niczego nie ocenia** — pomiar robisz w nRF Connect **Power Profiler**
-(PPK2), a wynik wpisujesz do prowadzonego przez narzędzie dziennika.
-
-## Szybki start
+## Uruchomienie
 
 ```sh
 git clone https://github.com/qbx11/board-power-test.git
@@ -22,25 +15,19 @@ cd board-power-test
 board-power-test            # interfejs okienkowy: profil -> scenariusze -> Start
 ```
 
-`board-power-test` bez argumentów otwiera **interfejs okienkowy w terminalu**
-(TUI): klikalne listy scenariuszy, wybór profilu, pola tekstowe, dialogi
-krok-po-kroku i log builda na żywo. Przy pierwszym uruchomieniu launcher sam
-tworzy `.venv` z biblioteką `textual`; bez sieci (albo z `BPT_NO_TUI=1`)
-narzędzie działa w klasycznym trybie tekstowym — funkcje są te same.
+Bez argumentów otwiera się **interfejs okienkowy w terminalu** (TUI); przy
+pierwszym starcie launcher sam tworzy `.venv` z biblioteką `textual`. Bez sieci
+(albo z `BPT_NO_TUI=1`) działa klasyczny tryb tekstowy — funkcje te same.
 
 Wymagania:
-- **Python ≥ 3.11** (rdzeń: tylko stdlib; interfejs okienkowy instaluje się
-  sam do `.venv` repo),
-- **nrfutil** — o środowisko NCS nie musisz dbać: gdy `west` nie jest w PATH,
-  launcher sam je uruchomi, a brakujące elementy (`toolchain-manager`, toolchain
-  NCS v3.4.0) zaproponuje doinstalować; alternatywnie pracuj w terminalu nRF Connect,
-- **SDK NCS v3.4.0** (źródła, nie tylko toolchain) — np. przez nRF Connect for
-  VS Code → „Install SDK" (trafia do `~/ncs/v3.4.0`, narzędzie samo je znajdzie;
-  inna lokalizacja: `export NCS_WORKSPACE=/ścieżka/do/workspace`),
+- **Python ≥ 3.11**,
+- **nrfutil** — gdy `west` nie jest w PATH, launcher sam uruchomi środowisko
+  NCS, a braki zaproponuje doinstalować,
+- **SDK NCS v3.4.0** (źródła, np. nRF Connect for VS Code → „Install SDK";
+  inna lokalizacja: `export NCS_WORKSPACE=/ścieżka`),
 - **J-Link** (flash) i **PPK2 + nRF Connect Power Profiler** (pomiar),
-- dla `BTZ_EndDevice`: repo z definicją płytki (`Projekt-BLE-Mesh`) — domyślnie
-  szukane w `../NCS-Projects/Projekt-BLE-Mesh/app`, inny układ katalogów:
-  `export BOARD_ROOT=/ścieżka/do/Projekt-BLE-Mesh/app`.
+- dla `BTZ_EndDevice`: repo `Projekt-BLE-Mesh` (domyślnie szukane w
+  `../NCS-Projects/Projekt-BLE-Mesh/app`; inaczej: `export BOARD_ROOT=...`).
 
 ## Codzienne użycie
 
@@ -56,105 +43,52 @@ board-power-test report               # tabela zebranych pomiarów
 
 Przydatne flagi `run`: `-s "BTZ #2"` (egzemplarz płytki bez pytania),
 `--no-erase` (flash bez kasowania), `-n` (dry-run). Zmienne środowiskowe:
-`BOARD_ROOT`, `NCS_VERSION` (dom. v3.4.0), `NCS_WORKSPACE` (workspace/SDK, gdy
-nie w `~/ncs/<wersja>`), `BPT_NO_NCS_LAUNCH=1` (nie startuj środowiska NCS
-automatycznie), `BPT_NO_TUI=1` (tryb tekstowy zamiast interfejsu okienkowego).
+`BOARD_ROOT`, `NCS_VERSION` (dom. v3.4.0), `NCS_WORKSPACE`, `BPT_NO_TUI=1`.
 
-Repo nie musi leżeć w workspace west — narzędzie buduje „out-of-tree": znajduje
-SDK (`~/ncs/<wersja>` albo `NCS_WORKSPACE`), woła westa stamtąd, a katalogi
-`build_*` i tak lądują w tym repo.
+Przy nowej płytce zacznij od `run reset_only -p dk` — znany dobry wynik DK
+(~0,95 µA) weryfikuje procedurę i sprzęt pomiarowy, zanim zmierzysz nową płytkę.
 
 ### Przebieg (dwie fazy)
 
-**FAZA 1 — buduj wszystko z góry:** `west build` (pristine, osobny katalog
-`build_<scenariusz>/`) dla **wszystkich** wybranych scenariuszy na raz — buildy
-trwają, więc lecą jednym ciągiem, zanim usiądziesz przy płytce i PPK2.
-Scenariusze z gotową binarką (pole `hex` w manifeście) tę fazę pomijają —
-liczniki i statusy pokazują tylko to, co faktycznie się buduje.
+**FAZA 1 — build:** `west build` (pristine, katalog `build_<scenariusz>/`) dla
+wszystkich wybranych scenariuszy z góry. Scenariusze z gotową binarką (pole
+`hex`) tę fazę pomijają.
 
 **FAZA 2 — flash + pomiar, scenariusz po scenariuszu:**
-1. **Flash** — `west flash --erase` (przy scenariuszu `hex`: bezpośrednio
-   `nrfutil device program` z pełnym kasowaniem); kasowanie jest domyślne,
-   bo stan pinów i UICR potrafi zostać z poprzedniego obrazu i zafałszować
-   pomiar. Nieudany
-   flash (zły kabel, brak zasilania, programator nie widzi płytki) nie cofa
-   przebiegu — dialog daje wybór: ponów / pomiń scenariusz / przerwij.
-2. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana
-   wg datasheetu (tylko do porównania na oko — narzędzie nie ocenia).
-3. **Twarde potwierdzenie odłączenia SWD** — w TUI osobny dialog z jednym
-   przyciskiem, w CLI trzeba wpisać `tak`; podłączony debugger dodaje własny
-   prąd i unieważnia pomiar minimum.
-4. **Wpis wyniku** z Power Profilera — w µA albo mA (w TUI wybór jednostki,
-   w CLI wpisz np. `2.5 mA`; dziennik zawsze trzyma µA) → wiersz w
-   `reports/pomiary.csv` (egzemplarz płytki, napięcie, flagi builda, uwagi).
-   **Commituj ten plik** — to wspólna historia pomiarów zespołu.
+1. **Flash** — `west flash --erase` (scenariusz `hex`: `nrfutil device
+   program` z pełnym kasowaniem); nieudany flash nie cofa przebiegu — dialog
+   daje wybór: ponów / pomiń / przerwij.
+2. **Instrukcja pomiaru** — napięcie, czas ustabilizowania, wartość oczekiwana.
+3. **Potwierdzenie odłączenia SWD** — podłączony debugger dodaje własny prąd.
+4. **Wpis wyniku** z Power Profilera (µA albo mA) → wiersz w
+   `reports/pomiary.csv`. **Commituj ten plik** — to wspólna historia pomiarów.
 
-### Metodyka: najpierw DK, potem nowa płytka
+## Pomiar PPK2 (tryb Source meter)
 
-Przy każdej nowej płytce zacznij od jednego przebiegu `reset_only` na DK
-(`run reset_only -p dk`). DK ma znany dobry wynik (~0,95 µA), więc ten przebieg
-weryfikuje **procedurę i sprzęt pomiarowy** — dopiero potem mierz nową płytkę.
-Inaczej nie wiesz, czy dziwny wynik to płytka, czy błąd pomiaru.
+1. W Power Profilerze ustaw **Source meter** i napięcie ze scenariusza
+   (np. 3,0 V).
+2. Zasil **wyłącznie SoC** z PPK2: `VOUT → VDD`, `GND ↔ GND`; odłącz inne
+   zasilanie (na DK odetnij zworkę zasilania SoC — patrz User Guide).
+3. Flash idzie przez debugger (płytka wtedy zasilona!), na czas pomiaru
+   **odłącz przewód SWD**.
+4. Odczytaj **średni prąd** (periodyki: uśredniaj przez kilka pełnych okresów)
+   i wpisz go w narzędziu.
 
 ## Scenariusze
 
-**Statyczne** (chip zasypia i nie robi nic — pomiar samego prądu snu):
-
-| Scenariusz | Co robi firmware | Odpowiednik w datasheet |
-|---|---|---|
-| `reset_only` *(dom.)* | `sys_poweroff()`; wybudzenie tylko reset/pin | **System OFF — absolutne minimum** |
-| `idle` | `k_sleep(K_FOREVER)`; wątek idle → WFI, RAM + LFCLK/RTC aktywne | System ON, IDLE (RAM+RTC) |
-| `wake_gpio` | `sys_poweroff()`; wybudzenie przyciskiem `sw0` (SENSE) | System OFF + wybudzenie GPIO |
-| `ram_retained` | `sys_poweroff()` + retencja regionu RAM z devicetree | System OFF z retencją RAM |
-
-**Periodyczne** (symulacja „budzę się co T, wysyłam, śpię" — pomiar prądu
-**średniego** przez pełny cykl):
-
-| Scenariusz | Co robi firmware | Wzorzec dla |
-|---|---|---|
-| `periodic_on` | pętla: błysk aktywności → `k_sleep(T)` (System ON, program kontynuuje) | częstych wysyłek |
-| `periodic_off` | błysk → uzbrojenie **GRTC** na T → `sys_poweroff()` (reboot co cykl) | rzadkich wysyłek |
-
-Parametry periodyków (w `scenarios.toml`, flagi `-DCONFIG_PERIODIC_PERIOD_MS` /
-`-DCONFIG_PERIODIC_ACTIVE_MS`): okres T (dom. 10 s) i długość błysku CPU (dom. 5 ms).
-Błysk to tylko zastępcza praca (`k_busy_wait`) — dla miarodajnego wyniku zastąp
-`activity_burst()` w `src/main.c` swoim realnym kodem (odczyt czujnika + TX).
-
-**Który periodyk wygrywa?** Liczy się prąd średni: System ON nie płaci za reboot
-(wygrywa przy częstych wysyłkach), System OFF ma niższy prąd snu, ale każde
-wybudzenie to pełny reboot (wygrywa przy rzadkich). Zmierz oba dla kilku T
-(1 s / 10 s / 60 s / 300 s) i znajdź punkt przecięcia dla swojego sprzętu.
-
-## Pomiar PPK2 (tryb Source meter — zasilanie samego SoC)
-
-> Cel: zasilić **wyłącznie** nRF54L15, żeby prąd interfejsu debug i regulatorów
-> płytki nie zaburzał odczytów rzędu sub-µA.
-
-1. W nRF Connect **Power Profiler** ustaw PPK2 w tryb **Source meter** i napięcie
-   docelowe (np. 3,0 V — narzędzie wypisze wartość ze scenariusza).
-2. Zasil SoC **tylko** z PPK2: `VOUT → VDD`, `GND ↔ GND`. Odłącz inne zasilanie
-   płytki/USB; na DK odetnij odpowiednią zworkę zasilania SoC (patrz User Guide,
-   „Measuring current").
-3. Flash idzie przez debugger (płytka musi być wtedy zasilona!), a na czas pomiaru
-   **odłącz przewód SWD** — narzędzie wymusza potwierdzenie tego kroku.
-4. Odczytaj **średni prąd** (przy periodykach: uśredniaj przez kilka pełnych
-   okresów T) i wpisz go w narzędziu. Dla `wake_gpio` sprawdź dodatkowo, że
-   `sw0` wybudza układ (chwilowy skok prądu) i sen wraca.
-
-### Oczekiwane rzędy wielkości (weryfikuj z datasheetem nRF54L15)
-
-- `reset_only`: **~0,3–0,5 µA** (DK zmierzone: ~0,95 µA),
-- `idle`: **~1–2 µA** (zależnie od LFXO/LFRC),
-- `ram_retained`: wyraźnie wyżej — rośnie z ilością utrzymywanego RAM (dom. region 4 KB).
-
-Dokładne liczby zależą od napięcia, temperatury, DC/DC vs LDO i źródła LFCLK — to
-te warunki z datasheetu są punktem odniesienia. Przykład realnego dochodzenia
-(BTZ_EndDevice: 7,3 µA zamiast ~1 µA i dlaczego): `docs/analiza-btz-enddevice.md`.
+Statyczne (prąd snu): `reset_only` (System OFF, minimum), `idle` (System ON,
+RAM+RTC), `wake_gpio` (System OFF + wybudzenie `sw0`), `ram_retained`
+(System OFF + retencja RAM). Periodyczne (prąd średni cyklu „obudź się –
+wyślij – śpij"): `periodic_on` (sen w System ON) i `periodic_off` (System OFF,
+reboot co cykl); okres i długość błysku ustawisz flagami
+`-DCONFIG_PERIODIC_PERIOD_MS` / `-DCONFIG_PERIODIC_ACTIVE_MS` w
+`scenarios.toml`. Opisy i wartości oczekiwane pokazuje `board-power-test list`
+oraz TUI.
 
 ## Własne scenariusze
 
-Scenariusze definiuje **`scenarios.toml`** — dodanie własnego to skopiowanie wpisu
-i podmiana flag (żadnych zmian w narzędziu):
+Scenariusze definiuje **`scenarios.toml`** — dodanie własnego to skopiowanie
+wpisu i podmiana flag (wzory na dole pliku):
 
 ```toml
 [scenarios.moj_test]
@@ -168,14 +102,12 @@ expected    = "..."     # tylko do wyświetlenia obok wyniku
 voltage     = "1.8"     # opcjonalne nadpisanie napięcia pomiaru
 ```
 
-Własne pliki conf/overlay wrzucaj do `scenarios/custom/`. Zupełnie nowy wariant
-firmware = nowa pozycja w `Kconfig` (choice) + gałąź w `src/main.c` — utrzymuj
-zasadę „jeden czysty obraz na scenariusz".
+Własne pliki conf/overlay wrzucaj do `scenarios/custom/`.
 
 ### Własny firmware zespołu (source / hex)
 
-Scenariusz może mierzyć też **cudzy firmware**, nie tylko obrazy z tego repo —
-dwa dodatkowe, wzajemnie wykluczające się pola wpisu:
+Scenariusz może mierzyć też **cudzy firmware** — dwa dodatkowe, wzajemnie
+wykluczające się pola wpisu:
 
 ```toml
 # wariant A: zbuduj własną aplikację Zephyr/NCS zespołu
@@ -191,92 +123,20 @@ hex         = "../moj-projekt/build/zephyr/zephyr.hex"
 ```
 
 - `source` — ścieżka względna (od katalogu repo) albo absolutna; build idzie
-  zwykłym `west build` (out-of-tree, katalog builda nadal `build_<scenariusz>/`
-  w tym repo), z profilem płytki i `BOARD_ROOT` jak dotąd.
+  zwykłym `west build` (katalog builda nadal `build_<scenariusz>/` w tym repo).
 - `hex` — narzędzie tylko wgrywa wskazany plik (`nrfutil device program`,
-  z pełnym kasowaniem; `--no-erase` działa jak dotąd) i prowadzi przez pomiar;
-  `cmake_args` są tu zabronione.
-- Ścieżki są sprawdzane przed startem FAZY 1 — błędny wpis to czytelny błąd,
-  a nie wywrotka w połowie przebiegu. W dzienniku CSV kolumna `flagi` zawiera
-  odpowiednio flagi builda + `source=...` albo `hex=...`, żeby było wiadomo,
-  co dokładnie zmierzono.
+  z pełnym kasowaniem; `--no-erase` działa jak dotąd); `cmake_args` zabronione.
+- Ścieżki są sprawdzane przed startem FAZY 1; w dzienniku CSV kolumna `flagi`
+  zawiera flagi builda + `source=...` albo `hex=...`.
 
-## Profile płytek i dodanie własnej
+## Profile płytek
 
-Profile są w `scenarios.toml`: `[boards.btz]` (BTZ_EndDevice, runner `jlink`,
-board_root z repo `Projekt-BLE-Mesh`) i `[boards.dk]` (DK referencyjny, definicja
-w SDK). Wybór: menu albo `-p <profil>`; `BOARD_ROOT` z env nadpisuje manifest.
+Profile są w `scenarios.toml`: `[boards.btz]` (BTZ_EndDevice) i `[boards.dk]`
+(DK referencyjny). Wybór: menu albo `-p <profil>`. Nowa płytka = overlay w
+`boards/` + sekcja `[boards.<nazwa>]` (board, runner, ew. board_root).
 
-Nowa własna płytka nRF54L15:
-1. W jej devicetree zadbaj o: alias `sw0` (dla `wake_gpio`), DC/DC na `&vregmain`,
-   źródło LFCLK, region `compatible = "zephyr,retained-ram"` (dla `ram_retained`).
-2. Dodaj `boards/<twoja_płytka>_nrf54l15_cpuapp.overlay` (wzór: pliki w `boards/`).
-3. Dopisz `[boards.<nazwa>]` w `scenarios.toml` (board, runner, ew. board_root).
-
-## Struktura repo
-
-```
-board-power-test/
-├── bin/board-power-test   # globalny launcher (auto-start środowiska NCS)
-├── scripts/install.sh     # instalacja komendy (symlink ~/.local/bin)
-├── scripts/build.sh       # ręczny build jednego trybu (bez narzędzia)
-├── tools/power-test/      # CLI: build -> flash -> pomiar -> dziennik CSV
-├── scenarios.toml         # manifest scenariuszy i profili płytek
-├── scenarios/custom/      # własne conf/overlay dla scenariuszy custom
-├── reports/               # pomiary.csv – dziennik pomiarów (commituj!)
-├── src/main.c             # firmware pomiarowe (jeden tryb na obraz)
-├── Kconfig                # choice: wybór trybu snu (build-time)
-├── prj.conf               # baza: konsola/serial/logi/RTT WYŁĄCZONE
-├── debug.conf / debug_rtt.conf   # buildy diagnostyczne (NIE do pomiaru!)
-├── boards/                # overlaye płytek (retencja RAM itd.)
-└── docs/                  # analizy i raporty pomiarów
-```
-
-## Budowanie ręczne (bez narzędzia)
-
-Narzędzie woła dokładnie to samo, co zrobiłbyś ręcznie — w razie potrzeby:
+## Testy narzędzia
 
 ```sh
-./scripts/build.sh reset_only          # tryby: idle|wake_gpio|reset_only|ram_retained|periodic_on|periodic_off
-west flash -d build_reset_only -r jlink
-
-# albo w pełni ręcznie:
-west build -b BTZ_EndDevice/nrf54l15/cpuapp -p always -d build_reset_only \
-  -- -DBOARD_ROOT=$BOARD_ROOT -DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y
+.venv/bin/python -m unittest discover -s tools/power-test/tests -v
 ```
-
-## Sanity-check firmware (RTT, J-Link)
-
-Żeby zobaczyć, że firmware żyje (NIE do pomiaru — RTT wymaga podłączonego J-Linka):
-
-```sh
-./scripts/build.sh wake_gpio --rtt
-west flash -d build_wake_gpio -r jlink
-```
-
-W **J-Link RTT Viewer**: Connect → nRF54L15 (Cortex-M33), SWD. Zobaczysz banner
-i `Tryb: ...`; w trybach System OFF chip milknie po zaśnięciu (przy `periodic_off`
-włącz auto-reconnect — co T jest reboot i nowy banner), `periodic_on` wypisuje
-`wybudzenie #N`, `idle` — jeden komunikat i cisza.
-
-## Rozwiązywanie problemów
-
-- **`nrfutil command 'toolchain-manager' not found`** — launcher sam zaproponuje
-  instalację; ręcznie: `nrfutil install toolchain-manager`, potem (jeśli trzeba)
-  `nrfutil toolchain-manager install --ncs-version v3.4.0`.
-- **`west: unknown command "build"; do you need to run this inside a workspace?`** —
-  masz toolchain, ale brak źródeł SDK NCS: zainstaluj SDK v3.4.0 (nRF Connect for
-  VS Code → „Install SDK") albo wskaż istniejący workspace przez `NCS_WORKSPACE`.
-  Narzędzie od wersji z tym wpisem samo woła westa z katalogu SDK.
-- **Prąd wyraźnie wyższy niż w datasheecie** — sprawdź: SWD odłączony? PPK2 w
-  Source meter i zasila *tylko* SoC? DC/DC (nie LDO)? build bez
-  `debug.conf`/`debug_rtt.conf`? Porównaj z przebiegiem kontrolnym na DK; jeśli DK
-  trafia w datasheet, a Twoja płytka nie — problem jest w sprzęcie płytki
-  (przykład dochodzenia: `docs/analiza-btz-enddevice.md`).
-- **Ostrzeżenie o `board_root`** — ustaw `export BOARD_ROOT=/ścieżka/do/Projekt-BLE-Mesh/app`
-  albo popraw ścieżkę w `scenarios.toml`.
-- **`WAKE_GPIO` nie kompiluje się (`#error sw0`)** — płytka nie ma aliasu `sw0`
-  w devicetree.
-- **RTT Viewer nic nie pokazuje** — to build pomiarowy (bez konsoli); przebuduj
-  z `--rtt`. Przy System OFF włącz auto-reconnect.
-- **Testowane na NCS v3.4.0 (LTS)** — inna wersja: `NCS_VERSION=... board-power-test`.
