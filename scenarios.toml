@@ -15,40 +15,51 @@ voltage  = "3.0"   # napięcie źródła PPK2 [V] – wyświetlane i zapisywane 
 settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
 
 # --- Profile płytek -----------------------------------------
+# `label` to pełna nazwa pokazywana w interfejsie (klucz sekcji, np.
+# "btz", służy tylko do -p/--profile w CLI).
 [boards.btz]
+label      = "BTZ EndDevice (płytka docelowa)"
 board      = "BTZ_EndDevice/nrf54l15/cpuapp"
 runner     = "jlink"                                # west flash -r jlink (J-Link mini EDU)
 board_root = "../NCS-Projects/Projekt-BLE-Mesh/app" # względem katalogu projektu; nadpisze env BOARD_ROOT
 
 [boards.dk]
+label = "nRF54L15 DK (płytka referencyjna)"
 board = "nrf54l15dk/nrf54l15/cpuapp"
 # DK: definicja płytki jest w SDK (bez board_root), debugger wbudowany (bez runnera).
 
 # --- Scenariusze statyczne (pomiar samego prądu snu) --------
+# `label` – nazwa w interfejsie; klucz sekcji identyfikuje scenariusz
+# w CSV i CLI, więc nie zmieniaj go bez potrzeby.
 [scenarios.reset_only]
-description = "System OFF; wybudzenie tylko reset (absolutne minimum)"
+label       = "Sen głęboki — minimum"
+description = "System OFF, wybudzenie tylko resetem. Absolutne minimum poboru płytki."
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y"]
 expected    = "~0.3-0.5 uA (System OFF bez retencji; DK zmierzone ~0.95 uA)"
 
 [scenarios.idle]
-description = "System ON idle (RTOS śpi; RAM + RTC utrzymane)"
+label       = "Sen płytki — System ON"
+description = "RTOS uśpiony, RAM i zegar RTC podtrzymane. Natychmiastowe wybudzenie."
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_ON_IDLE=y"]
 expected    = "~1-2 uA (System ON IDLE, kolumna LFXO)"
 
 [scenarios.wake_gpio]
-description = "System OFF; wybudzenie przyciskiem sw0 (SENSE), bez retencji RAM"
+label       = "Sen głęboki — wybudzanie przyciskiem"
+description = "System OFF z wybudzeniem przyciskiem sw0 (SENSE), bez retencji RAM."
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_WAKE_GPIO=y"]
-expected    = "jak reset_only + koszt SENSE"
+expected    = "jak 'Sen głęboki — minimum' + koszt SENSE"
 note        = "Po pomiarze snu naciśnij sw0 – powinien być skok prądu (wybudzenie) i powrót do snu."
 
 [scenarios.ram_retained]
-description = "System OFF z retencją RAM (region z devicetree, dom. 4 KB)"
+label       = "Sen głęboki — z retencją RAM"
+description = "System OFF z podtrzymaniem regionu RAM (devicetree, dom. 4 KB). Koszt utrzymania pamięci."
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_OFF_RAM_RETAINED=y"]
-expected    = "wyżej niż reset_only; rośnie z ilością utrzymywanego RAM"
+expected    = "wyżej niż minimum; rośnie z ilością utrzymywanego RAM"
 
 # --- Scenariusze periodyczne (pomiar prądu ŚREDNIEGO) -------
 [scenarios.periodic_on]
-description = "Periodyk System ON: błysk co T, między nimi k_sleep(T)"
+label       = "Praca cykliczna — ciepły start"
+description = "Błysk aktywności co 10 s, między nimi sen w System ON (program kontynuuje)."
 cmake_args  = [
   "-DCONFIG_SLEEP_PERIODIC_SYSTEM_ON=y",
   "-DCONFIG_PERIODIC_PERIOD_MS=10000",
@@ -58,7 +69,8 @@ expected    = "prąd ŚREDNI przez pełny cykl"
 note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 
 [scenarios.periodic_off]
-description = "Periodyk System OFF: błysk -> GRTC(T) -> sys_poweroff (reboot co cykl)"
+label       = "Praca cykliczna — zimny start"
+description = "Błysk aktywności co 10 s, sen w System OFF. Każde wybudzenie to reboot (budzik GRTC)."
 cmake_args  = [
   "-DCONFIG_SLEEP_PERIODIC_SYSTEM_OFF=y",
   "-DCONFIG_PERIODIC_PERIOD_MS=10000",

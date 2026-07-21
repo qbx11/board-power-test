@@ -21,13 +21,31 @@
 #   python3 tools/power-test/power_test.py run reset_only --dry-run
 #   python3 tools/power-test/power_test.py report
 
+import os
+import sys
+
+# Wewnątrz środowiska NCS (nrfutil toolchain-manager, Linux) zmienne
+# PYTHONHOME/PYTHONPATH wskazują pythona toolchaina. Dla naszego pythona
+# z .venv oznacza to pomieszaną stdlib (stdlib toolchaina + site-packages
+# venva) i niestabilność – losowe błędy ContextVar/MessagePump w TUI.
+# Re-exec z czystym środowiskiem; oryginały wędrują do BPT_SAVED_* i są
+# przywracane procesom `west` (child_env), bo narzędzia toolchaina ich
+# potrzebują.
+if ((os.environ.get("PYTHONHOME") or os.environ.get("PYTHONPATH"))
+        and sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+        and not os.environ.get("BPT_REEXECED")):
+    _env = dict(os.environ)
+    _env["BPT_REEXECED"] = "1"
+    for _var in ("PYTHONHOME", "PYTHONPATH"):
+        if _var in _env:
+            _env["BPT_SAVED_" + _var] = _env.pop(_var)
+    os.execve(sys.executable, [sys.executable] + sys.argv, _env)
+
 import argparse
 import csv
-import os
 import shlex
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -68,12 +86,24 @@ def load_manifest():
         die(f"scenarios.toml nie parsuje się: {e}")
 
 
+def child_env():
+    """Środowisko dla procesów west: przywróć PYTHONHOME/PYTHONPATH zdjęte
+    przy starcie (re-exec na górze pliku) – narzędzia toolchaina NCS ich
+    potrzebują, tylko naszemu pythonowi szkodzą."""
+    env = os.environ.copy()
+    for var in ("PYTHONHOME", "PYTHONPATH"):
+        saved = env.pop("BPT_SAVED_" + var, None)
+        if saved:
+            env[var] = saved
+    return env
+
+
 def run_cmd(cmd, dry, cwd=ROOT):
     """Wypisz i (poza --dry-run) wykonaj komendę."""
     print(f"\n>>> {shlex.join(cmd)}")
     if dry:
         return
-    rc = subprocess.run(cmd, cwd=cwd).returncode
+    rc = subprocess.run(cmd, cwd=cwd, env=child_env()).returncode
     if rc != 0:
         die(f"komenda zakończyła się kodem {rc} – przerywam scenariusz")
 
@@ -87,7 +117,7 @@ def find_west_workspace():
     Kolejność: workspace obejmujący to repo > env NCS_WORKSPACE >
     ~/ncs/<NCS_VERSION> (domyślna lokalizacja instalacji SDK)."""
     r = subprocess.run(["west", "topdir"], cwd=ROOT,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=child_env())
     if r.returncode == 0:
         return ROOT
 
@@ -153,9 +183,9 @@ def cmd_list(args):
     scenarios = manifest.get("scenarios", {})
     if not scenarios:
         die("manifest nie zawiera żadnych scenariuszy")
-    rows = [(name, s.get("description", ""), " ".join(s.get("cmake_args", [])))
+    rows = [(name, s.get("label", name), s.get("description", ""))
             for name, s in scenarios.items()]
-    print_table(("scenariusz", "opis", "flagi"), rows)
+    print_table(("scenariusz", "nazwa", "opis"), rows)
 
 
 def cmd_run(args):
@@ -348,10 +378,11 @@ def cmd_interactive():
 
     # --- wybór profilu płytki ---
     prof_names = list(profiles)
-    print("Profil płytki:")
+    print("Płytka:")
     for i, n in enumerate(prof_names, 1):
-        mark = "  (domyślny)" if n == default_prof else ""
-        print(f"  {i}. {n:<4} – {profiles[n]['board']}{mark}")
+        mark = "  (domyślna)" if n == default_prof else ""
+        print(f"  {i}. {profiles[n].get('label', n)} – "
+              f"{profiles[n]['board']}{mark}")
     prof_name = None
     while prof_name is None:
         raw = ask(f"Wybierz [Enter = {default_prof}]: ")
@@ -371,7 +402,8 @@ def cmd_interactive():
     scen_names = list(scenarios)
     print("\nScenariusze:")
     for i, n in enumerate(scen_names, 1):
-        print(f"  {i}. {n:<13} – {scenarios[n].get('description', '')}")
+        print(f"  {i}. {scenarios[n].get('label', n)} [{n}]\n"
+              f"     {scenarios[n].get('description', '')}")
     chosen = None
     while chosen is None:
         raw = ask("Wybierz (np. '1 3', 'a' = wszystkie): ")

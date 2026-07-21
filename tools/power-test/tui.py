@@ -23,25 +23,33 @@ import shlex
 import shutil
 import subprocess
 
+from rich.text import Text
 from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Collapsible, DataTable, Footer, Header,
-                             Input, Label, Log, Select, SelectionList, Static)
+from textual.widgets import (Button, Collapsible, DataTable, Header, Input,
+                             Label, Log, Select, SelectionList, Static)
 from textual.widgets.selection_list import Selection
 
 import power_test as core
 
 
 def _stream(cmd, cwd, on_line):
-    """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku)."""
+    """Uruchom proces i strumieniuj linie wyjścia (wołane w wątku).
+    env=child_env(): procesy west dostają z powrotem PYTHONHOME/PYTHONPATH
+    toolchaina, które naszemu pythonowi zdjęto przy starcie."""
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, errors="replace")
+                            text=True, errors="replace", env=core.child_env())
     for line in proc.stdout:
         on_line(line.rstrip())
     return proc.wait()
+
+
+def _label(name, item):
+    """Nazwa do wyświetlenia: `label` z manifestu, inaczej klucz."""
+    return item.get("label", name)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -74,8 +82,8 @@ class MeasureScreen(ModalScreen):
 
     def compose(self):
         with Vertical(classes="dialog"):
-            yield Static(f"[b]POMIAR: {self.scen_name}[/b] – "
-                         f"{self.scen.get('description', '')}")
+            yield Static(f"[b]POMIAR: {_label(self.scen_name, self.scen)}[/b]"
+                         f"\n{self.scen.get('description', '')}")
             yield Static(core.measure_instructions(self.scen, self.voltage,
                                                    self.settle_s),
                          classes="dialog-text")
@@ -151,7 +159,8 @@ class RunScreen(Screen):
         yield Header()
         yield Static("", id="status")
         yield VerticalScroll(id="cmds")
-        yield Footer()
+        yield Static("Esc — przerwij i wróć · klik w tytuł komendy — pełny log",
+                     id="hint")
 
     def on_mount(self):
         self.flow()
@@ -213,7 +222,8 @@ class RunScreen(Screen):
                 status.update(f"FAZA 2/2 · scenariusz {i}/{total} · {name}")
 
                 ok = await self.app.push_screen_wait(ConfirmScreen(
-                    f"[b]{name}[/b] – {scen.get('description', '')}\n\n"
+                    f"[b]{_label(name, scen)}[/b]\n"
+                    f"{scen.get('description', '')}\n\n"
                     "Programator podłączony i płytka ZASILONA\n"
                     "(np. VOUT z PPK2)?",
                     yes="Wgraj (flash --erase)", no="Pomiń scenariusz"))
@@ -264,31 +274,36 @@ class PowerTestApp(App):
     BINDINGS = [("ctrl+q", "quit", "Wyjście")]
 
     # Monochromatycznie: jeden kolor (odcienie szarości), zero kolorowych
-    # wypełnień – tylko ramki, focus jaśniejszą ramką, akcenty typografią.
+    # wypełnień – tylko ramki i typografia. Focus = jaśniejsza ramka;
+    # przyciski nie zmieniają tła w żadnym stanie (nic nie wygląda na
+    # "wciśnięte" na stałe).
     CSS = """
     Header { background: transparent; color: $text; }
-    Footer { background: transparent; }
-    Footer > .footer--key, FooterKey { background: transparent; }
 
     #setup { padding: 1 2; }
     .h { margin-top: 1; text-style: bold; }
     #profile, #sample, #scenarios { width: 72; max-width: 100%; }
     #scenarios { border: round #555555; background: transparent;
-                 max-height: 12; }
+                 max-height: 16; }
     #scenarios:focus { border: round #aaaaaa; }
     Input { background: transparent; border: round #555555; }
     Input:focus { border: round #aaaaaa; }
     SelectCurrent { background: transparent; border: round #555555; }
     Select:focus SelectCurrent { border: round #aaaaaa; }
+
     Button { background: transparent; border: round #555555;
-             color: $text; min-width: 10; }
-    Button:hover { border: round #aaaaaa; }
-    Button:focus { border: round #aaaaaa; text-style: bold; }
+             color: $text; min-width: 10; text-style: none; }
+    Button:hover { background: transparent; border: round #aaaaaa; }
+    Button:focus { background: transparent; border: round #aaaaaa;
+                   text-style: bold; }
+    Button.-active { background: transparent; border: round #aaaaaa; }
     #actions { margin-top: 1; height: auto; }
     #actions Button { margin-right: 2; }
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
+    #hint { background: transparent; color: #777777; padding: 0 1;
+            height: 1; dock: bottom; }
     #cmds { padding: 0 1; }
     .note { color: $text; padding: 0 1; }
     Collapsible { background: transparent; border: none; padding: 0; }
@@ -322,13 +337,14 @@ class PowerTestApp(App):
         yield Header()
         # VerticalScroll: przy małym oknie menu się przewija zamiast ucinać.
         with VerticalScroll(id="setup"):
-            yield Label("Profil płytki", classes="h")
-            yield Select(((f"{n} – {b['board']}", n)
+            yield Label("Płytka", classes="h")
+            yield Select(((f"{_label(n, b)}  ·  {b['board']}", n)
                           for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
-            yield Label("Scenariusze (klik / spacja = zaznacz)", classes="h")
+            yield Label("Scenariusze", classes="h")
             yield SelectionList(*(Selection(
-                f"{n} – {s.get('description', '')}", n)
+                Text.from_markup(f"[b]{_label(n, s)}[/b]\n"
+                                 f"[dim]{s.get('description', '')}[/dim]"), n)
                 for n, s in self.scenarios.items()), id="scenarios")
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
@@ -338,7 +354,6 @@ class PowerTestApp(App):
                 yield Button("Zaznacz wszystkie", id="select_all")
                 yield Button("Wyniki", id="results")
                 yield Button("Wyjście", id="quit")
-        yield Footer()
 
     def on_button_pressed(self, event):
         if event.button.id == "quit":
