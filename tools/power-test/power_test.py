@@ -299,8 +299,9 @@ def cmd_run(args):
             built[name] = None
             continue
         print(f"\n--- build: {name} – {scen.get('description', '')}")
-        cmd, build_dir = make_build_cmd(name, scen, prof_name, profile,
-                                        defaults.get("profile"))
+        cmd, build_dir = make_build_cmd(
+            name, scen, prof_name, profile, defaults.get("profile"),
+            pristine="always" if args.pristine else "auto")
         run_cmd(cmd, args.dry_run, cwd=workspace)
         built[name] = build_dir
 
@@ -315,7 +316,8 @@ def cmd_run(args):
               f"python3 tools/power-test/{Path(__file__).name} report")
 
 
-def make_build_cmd(name, scen, prof_name, profile, default_prof=None):
+def make_build_cmd(name, scen, prof_name, profile, default_prof=None,
+                   pristine="auto"):
     """Komenda `west build` + katalog builda dla scenariusza.
 
     Źródłem jest to repo, chyba że wpis ma `source` – wtedy budujemy
@@ -325,11 +327,16 @@ def make_build_cmd(name, scen, prof_name, profile, default_prof=None):
 
     Profil domyślny (`default_prof` z [defaults]) buduje do
     build_<scenariusz>/ – jak w README; pozostałe profile dostają prefiks
-    (build_<profil>_<scenariusz>/), żeby ich obrazy się nie nadpisywały."""
+    (build_<profil>_<scenariusz>/), żeby ich obrazy się nie nadpisywały.
+
+    `pristine` -> `west build -p`: 'auto' (domyślnie) buduje przyrostowo
+    (ninja przebuduje tylko zmieniony kod), a pełny build robi tylko gdy
+    west wykryje, że trzeba (pierwszy build, zmiana płytki/konfiguracji);
+    'always' wymusza czysty build za każdym razem (flaga --pristine)."""
     prefix = "" if prof_name == default_prof else f"{prof_name}_"
     build_dir = f"build_{prefix}{name}"
     src = resolve_path(scen["source"]) if scen.get("source") else ROOT
-    cmd = ["west", "build", "-b", profile["board"], "-p", "always",
+    cmd = ["west", "build", "-b", profile["board"], "-p", pristine,
            "-d", str(ROOT / build_dir), str(src)]
     root_arg = board_root_arg(profile)
     extra = ([root_arg] if root_arg else []) + list(scen.get("cmake_args", []))
@@ -539,7 +546,8 @@ def cmd_interactive():
 
     print(f"\nDo zrobienia: {', '.join(chosen)}  [profil: {prof_name}]")
     cmd_run(argparse.Namespace(scenarios=chosen, all=False, profile=prof_name,
-                               sample=None, no_erase=False, dry_run=False))
+                               sample=None, no_erase=False, dry_run=False,
+                               pristine=False))
 
 
 def main():
@@ -575,6 +583,9 @@ def main():
     run.add_argument("--no-erase", action="store_true",
                      help="flash bez --erase (domyślnie kasujemy, bo stan "
                           "pinów/UICR zostaje z poprzedniego obrazu)")
+    run.add_argument("--pristine", action="store_true",
+                     help="wymuś czysty (pełny) build zamiast przyrostowego "
+                          "(domyślnie west -p auto: buduje tylko zmiany)")
     run.add_argument("--dry-run", "-n", action="store_true",
                      help="tylko pokaż komendy i instrukcję, nic nie wykonuj")
     run.set_defaults(func=cmd_run)

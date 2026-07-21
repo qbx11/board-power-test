@@ -13,10 +13,11 @@ from unittest.mock import patch
 from common import FakeEnv, core
 
 
-def run_args(scenarios, dry_run=True, sample=None, no_erase=False):
+def run_args(scenarios, dry_run=True, sample=None, no_erase=False,
+             pristine=False):
     return argparse.Namespace(scenarios=scenarios, all=False, profile=None,
                               sample=sample, no_erase=no_erase,
-                              dry_run=dry_run)
+                              dry_run=dry_run, pristine=pristine)
 
 
 class CoreTests(unittest.TestCase):
@@ -50,6 +51,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(build_dir, "build_zwykly")
         self.assertEqual(cmd[cmd.index("--") - 1], str(self.env.repo))
         self.assertIn("-DCONFIG_SLEEP_SYSTEM_OFF_RESET_ONLY=y", cmd)
+
+    def test_build_cmd_domyslnie_pristine_auto(self):
+        # Domyślnie build przyrostowy: -p auto (ninja buduje tylko zmiany).
+        cmd, _ = core.make_build_cmd(
+            "zwykly", self.scenarios["zwykly"], "btz", self.profile, "btz")
+        self.assertEqual(cmd[cmd.index("-p") + 1], "auto")
+
+    def test_build_cmd_pristine_wymuszony(self):
+        cmd, _ = core.make_build_cmd(
+            "zwykly", self.scenarios["zwykly"], "btz", self.profile, "btz",
+            pristine="always")
+        self.assertEqual(cmd[cmd.index("-p") + 1], "always")
 
     def test_build_cmd_profil_nienbedomyslny_ma_prefiks(self):
         # Profil inny niż domyślny buduje do build_<profil>_<scenariusz>/,
@@ -156,6 +169,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(out.count("west flash"), 2)
         # dry-run: nic nie zostało faktycznie wykonane
         self.assertEqual(self.env.commands(), [])
+
+    def test_dry_run_pristine_flaga(self):
+        # Domyślnie -p auto; --pristine przełącza na -p always.
+        out = self.run_cli(run_args(["zwykly"]))
+        self.assertIn("-p auto", out)
+        self.assertNotIn("-p always", out)
+        out = self.run_cli(run_args(["zwykly"], pristine=True))
+        self.assertIn("-p always", out)
 
     def test_dry_run_tylko_hex_bez_budowania(self):
         out = self.run_cli(run_args(["hexowy"]))
