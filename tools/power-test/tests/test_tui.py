@@ -141,6 +141,45 @@ class TuiSetupTests(TuiHarness):
             self.assertTrue(button.has_class("pressed"))
 
 
+class TuiMouseTests(TuiHarness):
+    """Regresja buga: przy kilku otwartych oknach terminala na Linuksie
+    tryb myszy bywa gubiony (przełączanie fokusu okien / narzędzie piszące
+    do /dev/tty), przez co kliknięcia przestają działać. Aplikacja musi
+    odnawiać raportowanie myszy przy odzyskaniu fokusu."""
+
+    async def test_odzyskanie_fokusu_odnawia_mysz(self):
+        from textual import events
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            calls = []
+            app._reassert_mouse = lambda: calls.append(True)
+            app.post_message(events.AppFocus())
+            await pilot.pause()
+            self.assertTrue(calls, "AppFocus powinien odnowić tryb myszy")
+
+    async def test_reassert_wola_sterownik_i_nie_wywala_sie_bez_niego(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            # Sterownik z metodą włączania myszy – ma zostać wywołany.
+            hits = []
+
+            class FakeDriver:
+                def _enable_mouse_support(self):
+                    hits.append(True)
+
+            real_driver = app._driver
+            try:
+                app._driver = FakeDriver()
+                app._reassert_mouse()
+                self.assertEqual(len(hits), 1)
+
+                # Sterownik bez tej metody (np. headless) – bez wyjątku, no-op.
+                app._driver = object()
+                app._reassert_mouse()      # nie może rzucić
+            finally:
+                app._driver = real_driver  # przywróć – teardown go używa
+
+
 class TuiAddTests(TuiHarness):
 
     async def test_dodaj_firmware_hex_przez_dialog(self):
