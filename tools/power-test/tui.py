@@ -394,11 +394,13 @@ class RunScreen(Screen):
 
     BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
 
-    def __init__(self, prof_name, profile, names, sample, pristine=False):
+    def __init__(self, prof_name, profile, names, sample, pristine=False,
+                 reset=True):
         super().__init__()
         self.prof_name, self.profile = prof_name, profile
         self.names, self.sample = names, sample
         self.pristine = pristine
+        self.reset = reset
 
     def compose(self):
         yield Static("", id="status")
@@ -554,7 +556,8 @@ class RunScreen(Screen):
                     while True:
                         try:
                             await self.run_west(core.flash_cmd_for(
-                                scen, built[name], self.profile),
+                                scen, built[name], self.profile,
+                                reset=self.reset),
                                 workspace, f"flash {name}")
                             flashed = True
                             break
@@ -772,6 +775,8 @@ class PowerTestApp(App):
             yield Input(placeholder="np. BTZ #2", id="sample")
             yield Checkbox("Wymuś pełny rebuild (gotowe buildy są "
                            "normalnie pomijane)", value=False, id="pristine")
+            yield Checkbox("Zresetuj płytkę po wgraniu (J-Link) — firmware "
+                           "startuje od razu", value=True, id="reset")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -870,7 +875,9 @@ class PowerTestApp(App):
         self.push_screen(RunScreen(prof_name, self.boards[prof_name],
                                    names, sample,
                                    pristine=self.query_one("#pristine",
-                                                           Checkbox).value))
+                                                           Checkbox).value,
+                                   reset=self.query_one("#reset",
+                                                        Checkbox).value))
 
 
 if __name__ == "__main__":

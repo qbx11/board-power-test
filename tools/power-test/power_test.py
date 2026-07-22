@@ -519,18 +519,23 @@ def make_build_cmd(name, scen, prof_name, profile, default_prof=None,
     return cmd, build_dir
 
 
-def make_flash_cmd(build_dir, profile, erase=True):
+def make_flash_cmd(build_dir, profile, erase=True, reset=True):
     """Komenda `west flash`; --erase domyślnie (stan pinów/UICR potrafi
-    zostać z poprzedniego obrazu i zafałszować pomiar)."""
+    zostać z poprzedniego obrazu i zafałszować pomiar). --reset wymusza
+    restart płytki po wgraniu (J-Link nie zawsze robi to sam – bez niego
+    firmware nie startuje aż do ręcznego resetu i pomiar mierzy stary
+    stan)."""
     cmd = ["west", "flash", "-d", str(ROOT / build_dir)]
     if profile.get("runner"):
         cmd += ["-r", profile["runner"]]
     if erase:
         cmd += ["--erase"]
+    if reset:
+        cmd += ["--reset"]
     return cmd
 
 
-def make_hex_flash_cmd(hex_path, erase=True):
+def make_hex_flash_cmd(hex_path, erase=True, reset=True):
     """Komenda wgrania GOTOWEGO pliku .hex (scenariusz z polem `hex`).
 
     Nie przez `west flash --hex-file`: on wymaga katalogu builda (runner
@@ -538,18 +543,27 @@ def make_hex_flash_cmd(hex_path, erase=True):
     celowo nie ma. Wgrywamy bezpośrednio `nrfutil device program` –
     nrfutil i tak jest wymaganiem narzędzia, obsługuje J-Link (DK i
     zewnętrzny) i ma odpowiednik `--erase` (pełne kasowanie chipu);
-    bez erase zostaje domyślne kasowanie tylko zapisywanych stron."""
+    bez erase zostaje domyślne kasowanie tylko zapisywanych stron.
+    reset=True dokłada `reset=RESET_SYSTEM` – J-Link zresetuje płytkę po
+    wgraniu, żeby firmware wystartował od razu (inaczej pomiar łapie stan
+    sprzed restartu)."""
     cmd = ["nrfutil", "device", "program", "--firmware", str(hex_path)]
+    opts = []
     if erase:
-        cmd += ["--options", "chip_erase_mode=ERASE_ALL"]
+        opts.append("chip_erase_mode=ERASE_ALL")
+    if reset:
+        opts.append("reset=RESET_SYSTEM")
+    if opts:
+        cmd += ["--options", ",".join(opts)]
     return cmd
 
 
-def flash_cmd_for(scen, build_dir, profile, erase=True):
+def flash_cmd_for(scen, build_dir, profile, erase=True, reset=True):
     """Właściwa komenda flash dla wpisu: gotowy hex albo katalog builda."""
     if scen.get("hex"):
-        return make_hex_flash_cmd(resolve_path(scen["hex"]), erase=erase)
-    return make_flash_cmd(build_dir, profile, erase=erase)
+        return make_hex_flash_cmd(resolve_path(scen["hex"]), erase=erase,
+                                  reset=reset)
+    return make_flash_cmd(build_dir, profile, erase=erase, reset=reset)
 
 
 def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
@@ -565,7 +579,8 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
     if not args.dry_run:
         ask("Programator podłączony i płytka ZASILONA (np. VOUT z PPK2)? "
             "[Enter = wgrywam] ")
-    run_cmd(flash_cmd_for(scen, build_dir, profile, erase=not args.no_erase),
+    run_cmd(flash_cmd_for(scen, build_dir, profile, erase=not args.no_erase,
+                          reset=not args.no_reset),
             args.dry_run, cwd=workspace)
 
     # --- Instrukcja pomiaru (Power Profiler robi resztę) ---
@@ -742,8 +757,8 @@ def cmd_interactive():
 
     print(f"\nDo zrobienia: {', '.join(chosen)}  [profil: {prof_name}]")
     cmd_run(argparse.Namespace(scenarios=chosen, all=False, profile=prof_name,
-                               sample=None, no_erase=False, dry_run=False,
-                               pristine=False))
+                               sample=None, no_erase=False, no_reset=False,
+                               dry_run=False, pristine=False))
 
 
 def main():
@@ -779,6 +794,10 @@ def main():
     run.add_argument("--no-erase", action="store_true",
                      help="flash bez --erase (domyślnie kasujemy, bo stan "
                           "pinów/UICR zostaje z poprzedniego obrazu)")
+    run.add_argument("--no-reset", action="store_true",
+                     help="flash bez wymuszonego resetu (domyślnie po wgraniu "
+                          "resetujemy płytkę przez J-Link, żeby firmware "
+                          "wystartował od razu)")
     run.add_argument("--pristine", action="store_true",
                      help="wymuś czysty (pełny) build zamiast przyrostowego "
                           "(domyślnie west -p auto: buduje tylko zmiany)")

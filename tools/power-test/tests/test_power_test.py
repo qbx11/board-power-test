@@ -14,10 +14,11 @@ from common import FakeEnv, core
 
 
 def run_args(scenarios, dry_run=True, sample=None, no_erase=False,
-             pristine=False):
+             no_reset=False, pristine=False):
     return argparse.Namespace(scenarios=scenarios, all=False, profile=None,
                               sample=sample, no_erase=no_erase,
-                              dry_run=dry_run, pristine=pristine)
+                              no_reset=no_reset, dry_run=dry_run,
+                              pristine=pristine)
 
 
 class CoreTests(unittest.TestCase):
@@ -79,23 +80,40 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.parse_current("2.5 mA", default_unit="uA"), 2500.0)
 
     def test_flash_cmd_hex_nrfutil(self):
+        # Domyślnie erase + reset: nrfutil dostaje oba w jednym --options.
         cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,
                                  self.profile)
         self.assertEqual(cmd, ["nrfutil", "device", "program", "--firmware",
-                               str(self.env.hex_path),
-                               "--options", "chip_erase_mode=ERASE_ALL"])
+                               str(self.env.hex_path), "--options",
+                               "chip_erase_mode=ERASE_ALL,reset=RESET_SYSTEM"])
 
     def test_flash_cmd_hex_no_erase(self):
+        # Bez erase, ale reset domyślnie zostaje -> samo reset= w --options.
         cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,
                                  self.profile, erase=False)
+        self.assertNotIn("chip_erase_mode=ERASE_ALL", cmd)
+        self.assertEqual(cmd[cmd.index("--options") + 1], "reset=RESET_SYSTEM")
+
+    def test_flash_cmd_hex_no_erase_no_reset(self):
+        # Oba wyłączone -> nrfutil bez --options w ogóle.
+        cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,
+                                 self.profile, erase=False, reset=False)
         self.assertNotIn("--options", cmd)
 
     def test_flash_cmd_zwykly_regresja(self):
+        # Domyślnie west flash z --erase i wymuszonym --reset.
         cmd = core.flash_cmd_for(self.scenarios["zwykly"], "build_zwykly",
                                  self.profile)
         self.assertEqual(cmd, ["west", "flash", "-d",
                                str(self.env.repo / "build_zwykly"),
-                               "-r", "jlink", "--erase"])
+                               "-r", "jlink", "--erase", "--reset"])
+
+    def test_flash_cmd_zwykly_no_reset(self):
+        # --no-reset (opcja odznaczona) usuwa tylko --reset, erase zostaje.
+        cmd = core.flash_cmd_for(self.scenarios["zwykly"], "build_zwykly",
+                                 self.profile, reset=False)
+        self.assertNotIn("--reset", cmd)
+        self.assertIn("--erase", cmd)
 
     # --- walidacja manifestu ---
 
