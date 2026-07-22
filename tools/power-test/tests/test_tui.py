@@ -476,6 +476,31 @@ class TuiRunTests(TuiHarness):
             self.assertIn("| FLASH | 118436 B | 1536 KB | 7.53% |", joined)
             self.assertIn("| RAM | 25696 B | 188 KB | 13.35% |", joined)
 
+    async def test_kopiowanie_logu_budowania(self):
+        # Klawisz C kopiuje pełny zapis przebiegu (komendy + wyjście) do
+        # schowka – łącznie z wyjściem builda i tabelką pamięci.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            copied = []
+            app.copy_to_clipboard = lambda text: copied.append(text)
+            await self.start_run(pilot, ["zrodlowy"])
+            await self.wait_until(
+                pilot,
+                lambda a: any(isinstance(s, tui.RunScreen)
+                              for s in a.screen_stack),
+                msg="RunScreen")
+            run_screen = next(s for s in app.screen_stack
+                              if isinstance(s, tui.RunScreen))
+            await self.wait_until(
+                pilot,
+                lambda a: any("west build" in l for l in run_screen.transcript),
+                msg="log budowania")
+            run_screen.action_copy_log()
+            await pilot.pause()
+            self.assertTrue(copied)
+            self.assertIn("west build", copied[0])
+            self.assertIn("Memory region", copied[0])
+
     async def test_swd_reminder_domyslnie_pokazywany(self):
         # Domyślnie (checkbox zaznaczony) przed pomiarem pojawia się
         # przypomnienie o odpięciu programatora.

@@ -35,18 +35,21 @@ from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
 
 import power_test as core
 
-# Logo GoodByte (pixelart półblokami, wygenerowane z logo firmowego) –
-# nagłówek ekranu głównego. Monochromatyczne jak reszta interfejsu.
+# Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (figlet
+# „ANSI Shadow”), monochromatyczna jak reszta interfejsu; pod spodem
+# podpis narzędzia. Statyczny tekst, bez zależności runtime.
 LOGO = """\
-╭─                                                                ─╮
-        ▄▄▄▄▄                  ▄  ▄▄▄▄
-       █▀▀  ▀                  █  █▀ ▀█▄      ██
-      ▄█   ▄  ▄█▀▀█  █▀▀█▄ ▄█▀██  █▄▄▄█ █▄  █▀██▀ ▄▀▀█▄
-      ▀█  ▀▀█ █   ████   ███   █  █▀  ▀█ █▄██ ██ ██▄▄██
-       ▀█▄▄▄█ ▀█▄▄█▀ █▄▄██ █▄▄▄█  █▄▄▄█▀  ██  ██▄ █▄▄▄
-         ▀▀▀    ▀▀    ▀▀    ▀▀▀▀  ▀▀▀▀    █    ▀▀  ▀▀▀
-[#888888]               b o a r d   p o w e r   t e s t[/]
-╰─                                                                ─╯"""
+╭──────────────────────────────────────────────────────────────────────╮
+
+  ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗████████╗███████╗
+ ██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝╚══██╔══╝██╔════╝
+  ██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗
+  ██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝
+ ╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║      ██║   ███████╗
+  ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝      ╚═╝   ╚══════╝
+
+[#888888]                    b o a r d   p o w e r   t e s t[/]
+╰──────────────────────────────────────────────────────────────────────╯"""
 
 
 def _stream(cmd, cwd, on_line, handle=None):
@@ -398,7 +401,8 @@ class RunScreen(Screen):
     Każda komenda to zwijana sekcja: tytuł = preview, rozwija się
     klikiem albo automatycznie przy błędzie."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
+    BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć"),
+                ("c", "copy_log", "Kopiuj log budowania")]
 
     def __init__(self, prof_name, profile, names, sample, pristine=False,
                  reset=True, swd_reminder=True):
@@ -408,11 +412,24 @@ class RunScreen(Screen):
         self.pristine = pristine
         self.reset = reset
         self.swd_reminder = swd_reminder
+        # Pełny zapis przebiegu (komendy + ich wyjście) do skopiowania
+        # klawiszem C – przydatne zwłaszcza, gdy build padnie.
+        self.transcript = []
 
     def compose(self):
         yield Static("", id="status")
         yield VerticalScroll(id="cmds")
-        yield Static("Esc — przerwij i wróć", id="hint")
+        yield Static("Esc — przerwij i wróć   ·   C — kopiuj log budowania",
+                     id="hint")
+
+    def action_copy_log(self):
+        text = "\n".join(self.transcript).strip()
+        if not text:
+            self.app.notify("Nie ma jeszcze logów do skopiowania.",
+                            severity="warning")
+            return
+        self.app.copy_to_clipboard(text)
+        self.app.notify("Skopiowano log budowania do schowka.")
 
     def on_mount(self):
         self.flow()
@@ -432,6 +449,7 @@ class RunScreen(Screen):
         await cmds.mount(section)
         cmds.scroll_end(animate=False)
         out.write_line(f"$ {shlex.join(cmd)}")
+        self.transcript += ["", f"# {title}", f"$ {shlex.join(cmd)}"]
 
         frame = {"i": 0}
 
@@ -445,6 +463,7 @@ class RunScreen(Screen):
 
         def on_line(line):
             lines.append(line)
+            self.transcript.append(line)
             out.write_line(line)
 
         try:
@@ -645,7 +664,9 @@ class RunScreen(Screen):
                 self.app.pop_screen()
         except (SystemExit, RuntimeError) as e:
             msg = str(e) or "przerwano"
-            status.update(f"BŁĄD: {msg}")
+            if not msg.startswith("BŁĄD"):
+                msg = f"BŁĄD: {msg}"
+            status.update(msg)
             self.note("(Esc = powrót do ustawień)")
 
 
