@@ -395,12 +395,13 @@ class RunScreen(Screen):
     BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
 
     def __init__(self, prof_name, profile, names, sample, pristine=False,
-                 reset=True):
+                 reset=True, swd_reminder=True):
         super().__init__()
         self.prof_name, self.profile = prof_name, profile
         self.names, self.sample = names, sample
         self.pristine = pristine
         self.reset = reset
+        self.swd_reminder = swd_reminder
 
     def compose(self):
         yield Static("", id="status")
@@ -584,12 +585,14 @@ class RunScreen(Screen):
                         self.note(f"Pominięto {name} (flash nieudany).")
                         break
 
-                    # Twarde potwierdzenie SWD – jedyny przycisk.
-                    await self.app.push_screen_wait(ConfirmScreen(
-                        "[b]ODŁĄCZ przewód SWD/J-Link![/b]\n\n"
-                        "Podłączony debugger dodaje własny prąd\n"
-                        "i unieważnia pomiar minimum.",
-                        yes="SWD ODŁĄCZONY – przejdź do pomiaru", no=None))
+                    # Twarde potwierdzenie SWD – jedyny przycisk. Można je
+                    # wyłączyć (nie każdy mierzy z podłączonym programatorem).
+                    if self.swd_reminder:
+                        await self.app.push_screen_wait(ConfirmScreen(
+                            "[b]ODŁĄCZ przewód SWD/J-Link![/b]\n\n"
+                            "Podłączony debugger dodaje własny prąd\n"
+                            "i unieważnia pomiar minimum.",
+                            yes="SWD ODŁĄCZONY – przejdź do pomiaru", no=None))
 
                     result = await self.app.push_screen_wait(
                         MeasureScreen(name, scen, voltage, settle_s))
@@ -662,7 +665,7 @@ class PowerTestApp(App):
     .scen-arrow:hover { color: $text; }
     .scen-del { width: 3; color: #666666; padding: 0 0 0 1; }
     .scen-del:hover { color: $text; }
-    #pristine, #reset { border: none; background: transparent; padding: 0;
+    #pristine, #reset, #swd_reminder { border: none; background: transparent; padding: 0;
                 height: 1; margin-top: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
     .scen-desc.shown { display: block; }
@@ -805,6 +808,8 @@ class PowerTestApp(App):
                            "normalnie pomijane)", value=False, id="pristine")
             yield Checkbox("Zresetuj płytkę po wgraniu (J-Link)",
                            value=True, id="reset")
+            yield Checkbox("Przypomnij o odpięciu programatora (SWD/J-Link)",
+                           value=True, id="swd_reminder")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -905,7 +910,9 @@ class PowerTestApp(App):
                                    pristine=self.query_one("#pristine",
                                                            Checkbox).value,
                                    reset=self.query_one("#reset",
-                                                        Checkbox).value))
+                                                        Checkbox).value,
+                                   swd_reminder=self.query_one(
+                                       "#swd_reminder", Checkbox).value))
 
 
 if __name__ == "__main__":

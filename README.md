@@ -50,6 +50,11 @@ wystartował od razu, a nie dopiero po ręcznym resecie — inaczej pomiar łapi
 stan sprzed restartu. Reset jest domyślnie włączony; wyłącza go `--no-reset`
 (CLI) albo odznaczenie „Zresetuj płytkę po wgraniu" (interfejs).
 
+Przed pomiarem narzędzie **przypomina o odpięciu programatora** (SWD/J-Link
+dodaje własny prąd i psuje pomiar minimum). Kto mierzy bez podłączonego
+debuggera, może to przypomnienie wyłączyć: `--no-swd-reminder` (CLI) albo
+odznaczenie „Przypomnij o odpięciu programatora" (interfejs).
+
 Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
 (klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).
 Firmware pochodzi z jednego z trzech źródeł.

@@ -83,6 +83,40 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 self.fail("dialog nie zamknął się mimo ponawianych kliknięć")
         self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
 
+    async def drive_collecting_confirm_texts(self, pilot):
+        """Jak click_through_run, ale zwraca teksty napotkanych dialogów
+        ConfirmScreen – żeby sprawdzić, czy pojawiło się (albo nie)
+        przypomnienie o odpięciu programatora."""
+        app = pilot.app
+        texts = []
+        for _ in range(40):
+            await self.wait_until(
+                pilot,
+                lambda a: not isinstance(a.screen, tui.RunScreen),
+                msg="dialog albo koniec przebiegu")
+            screen = app.screen
+            if isinstance(screen, tui.ConfirmScreen):
+                texts.append(screen.text)
+            if not isinstance(screen, (tui.ConfirmScreen, tui.ChoiceScreen,
+                                       tui.MeasureScreen)):
+                return texts  # RunScreen zdjęty – koniec przebiegu
+            button = ("#skip" if isinstance(screen, tui.MeasureScreen)
+                      else "#yes")
+            for _ in range(5):
+                await pilot.pause()
+                await pilot.click(button)
+                try:
+                    await self.wait_until(pilot,
+                                          lambda a: a.screen is not screen,
+                                          timeout=3.0,
+                                          msg="zamknięcie dialogu")
+                    break
+                except AssertionError:
+                    continue
+            else:
+                self.fail("dialog nie zamknął się mimo ponawianych kliknięć")
+        self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
+
 
 class TuiSetupTests(TuiHarness):
 
@@ -410,6 +444,25 @@ class TuiRunTests(TuiHarness):
             self.assertTrue(any(c.startswith("nrfutil device program")
                                 and "reset=RESET_SYSTEM" not in c
                                 for c in cmds))
+
+    async def test_swd_reminder_domyslnie_pokazywany(self):
+        # Domyślnie (checkbox zaznaczony) przed pomiarem pojawia się
+        # przypomnienie o odpięciu programatora.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            self.assertTrue(app.query_one("#swd_reminder", Checkbox).value)
+            await self.start_run(pilot, ["hexowy"])
+            texts = await self.drive_collecting_confirm_texts(pilot)
+            self.assertTrue(any("ODŁĄCZ przewód SWD" in t for t in texts))
+
+    async def test_swd_reminder_odznaczony_pomija_okienko(self):
+        # Po odznaczeniu opcji okienko z przypomnieniem SWD się nie pojawia.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            app.query_one("#swd_reminder", Checkbox).value = False
+            await self.start_run(pilot, ["hexowy"])
+            texts = await self.drive_collecting_confirm_texts(pilot)
+            self.assertFalse(any("ODŁĄCZ przewód SWD" in t for t in texts))
 
     async def test_tylko_hex_bez_fazy_builda(self):
         app = tui.PowerTestApp()
