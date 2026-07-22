@@ -344,12 +344,33 @@ class TuiRunTests(TuiHarness):
             self.assertEqual(len(flashes), 2)
             self.assertTrue(any("build_zrodlowy" in f and "-r jlink" in f
                                 and "--erase" in f for f in flashes))
+            # Opcja resetu jest domyślnie zaznaczona -> west dostaje --reset,
+            # a nrfutil reset=RESET_SYSTEM (obok kasowania) w jednym --options.
+            self.assertTrue(all("--reset" in f for f in flashes))
             self.assertIn("nrfutil device program --firmware "
                           f"{self.env.hex_path} --options "
-                          "chip_erase_mode=ERASE_ALL", cmds)
+                          "chip_erase_mode=ERASE_ALL,reset=RESET_SYSTEM", cmds)
             # liczniki/notki zgadzają się ze stanem faktycznym
             self.assertTrue(any("Zbudowano 2 obraz(ów)." in n for n in notes))
             self.assertTrue(any("gotowy hex" in n for n in notes))
+
+    async def test_reset_domyslnie_zaznaczony_i_odznaczenie_go_wylacza(self):
+        # Opcja "Zresetuj płytkę po wgraniu" jest domyślnie zaznaczona;
+        # po jej odznaczeniu komendy flash idą bez wymuszonego resetu.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            self.assertTrue(app.query_one("#reset", Checkbox).value)
+            app.query_one("#reset", Checkbox).value = False
+            await self.start_run(pilot, ["zwykly", "hexowy"])
+            await self.click_through_run(pilot)
+
+            cmds = self.env.commands()
+            flashes = [c for c in cmds if c.startswith("west flash")]
+            self.assertTrue(flashes)
+            self.assertFalse(any("--reset" in f for f in flashes))
+            self.assertTrue(any(c.startswith("nrfutil device program")
+                                and "reset=RESET_SYSTEM" not in c
+                                for c in cmds))
 
     async def test_tylko_hex_bez_fazy_builda(self):
         app = tui.PowerTestApp()

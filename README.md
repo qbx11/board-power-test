@@ -44,6 +44,12 @@ obraz zbudowany tą samą komendą, faza builda go pomija. Zmiany w samych
 źródłach nie są śledzone — świeży build wymusza `--pristine` (CLI) albo
 „Wymuś pełny rebuild" (interfejs).
 
+Po wgraniu płytka jest **resetowana przez J-Link** (`west flash --reset`,
+a dla gotowych `.hex` `nrfutil ... reset=RESET_SYSTEM`), żeby firmware
+wystartował od razu, a nie dopiero po ręcznym resecie — inaczej pomiar łapie
+stan sprzed restartu. Reset jest domyślnie włączony; wyłącza go `--no-reset`
+(CLI) albo odznaczenie „Zresetuj płytkę po wgraniu" (interfejs).
+
 Każdy pomiar to **scenariusz** — wpis `[scenarios.<nazwa>]` w `scenarios.toml`
 (klucz identyfikuje scenariusz w CSV, nie zmieniaj go po zebraniu pomiarów).
 Firmware pochodzi z jednego z trzech źródeł.
