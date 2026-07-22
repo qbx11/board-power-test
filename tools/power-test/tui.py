@@ -23,6 +23,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 
 from pathlib import Path
 
@@ -105,7 +106,7 @@ class DescArrow(Static):
     małe wcięcie zamiast zaczynać się dopiero za nazwą)."""
 
     def __init__(self, desc_id, **kwargs):
-        super().__init__("▶", classes="scen-arrow", **kwargs)
+        super().__init__("▶", classes="scen-arrow scen-icon", **kwargs)
         self.desc_id = desc_id
 
     def on_click(self, event):
@@ -121,12 +122,38 @@ class DeleteCross(Static):
     potwierdzeniem; zebrane pomiary w CSV zostają)."""
 
     def __init__(self, scen_name, **kwargs):
-        super().__init__("✕", classes="scen-del", **kwargs)
+        super().__init__("✕", classes="scen-del scen-icon", **kwargs)
         self.scen_name = scen_name
 
     def on_click(self, event):
         event.stop()
         self.app.confirm_remove(self.scen_name)
+
+
+class ModeLabel(Static):
+    """Podpis przy przełączniku trybu ('Pomiar ręczny' / 'Tryb autonomiczny')
+    – klikalny, żeby nie trzeba było celować w mały suwak."""
+
+    def __init__(self, text, mode, **kwargs):
+        super().__init__(text, **kwargs)
+        self.mode = mode
+
+    def on_click(self, event):
+        event.stop()
+        self.app._set_mode(self.mode)
+
+
+class AutoGear(Static):
+    """⚙ w wierszu scenariusza – widoczne tylko w trybie autonomicznym;
+    otwiera nadpisanie ustawień tego kroku (czas, trigger, RTT, flagi)."""
+
+    def __init__(self, scen_name, **kwargs):
+        super().__init__("⚙", classes="scen-gear scen-icon auto-only", **kwargs)
+        self.scen_name = scen_name
+
+    def on_click(self, event):
+        event.stop()
+        self.app.configure_auto_step(self.scen_name)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -685,6 +712,227 @@ class RunScreen(Screen):
             self.note("(Esc = powrót do ustawień)")
 
 
+class AutoStepConfigScreen(ModalScreen):
+    """Nadpisanie ustawień POJEDYNCZEGO kroku trybu autonomicznego
+    (⚙ przy scenariuszu). Puste pola = użyj ustawień domyślnych z panelu
+    głównego. Zwraca słownik nadpisań (może być pusty) albo None."""
+
+    def __init__(self, scen_name, label, override):
+        super().__init__()
+        self.scen_name = scen_name
+        self.label = label
+        self.override = dict(override or {})
+
+    def compose(self):
+        o = self.override
+        with Vertical(classes="dialog"):
+            yield Static(f"[b]Krok: {self.label}[/b]\n"
+                         "Puste pole = użyj ustawień domyślnych z panelu.",
+                         classes="dialog-text")
+            yield Label("Czas pomiaru (np. 30s / 20m / 8h):")
+            yield Input(value=o.get("duration", ""),
+                        placeholder="domyślny", id="o_duration")
+            yield Label("Napięcie PPK2 [V]:")
+            yield Input(value=o.get("voltage", ""),
+                        placeholder="domyślne (z manifestu)", id="o_voltage")
+            yield Label("Start pomiaru:")
+            with Horizontal(id="o-trig-row"):
+                yield Select([("domyślnie", ""),
+                              ("po czasie [s]", "delay"),
+                              ("po logu RTT", "rtt")],
+                             value=o.get("trigger_type", ""),
+                             allow_blank=False, id="o_trigger")
+                yield Input(value=o.get("trigger_val", ""),
+                            placeholder="sekundy albo wzorzec logu",
+                            id="o_trigger_val")
+            yield Label("Konsola RTT:")
+            yield Select([("domyślnie", ""), ("off", "off"),
+                          ("trigger", "trigger"),
+                          ("continuous", "continuous")],
+                         value=o.get("rtt", ""), allow_blank=False,
+                         id="o_rtt")
+            yield Label("Dodatkowe flagi kompilacji (oddziel spacją):")
+            yield Input(value=" ".join(o.get("build_extra_args", [])),
+                        placeholder="np. -DCONFIG_LOG=y", id="o_flags")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Zapisz", id="save")
+                yield Button("Wyczyść nadpisania", id="clear")
+                yield Button("Anuluj", id="cancel")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "clear":
+            self.dismiss({})
+        else:
+            self.dismiss(self._collect())
+
+    def _collect(self):
+        import shlex as _shlex
+        out = {}
+        dur = self.query_one("#o_duration", Input).value.strip()
+        if dur:
+            out["duration"] = dur
+        volt = self.query_one("#o_voltage", Input).value.strip()
+        if volt:
+            out["voltage"] = volt
+        ttype = self.query_one("#o_trigger", Select).value
+        if ttype:
+            out["trigger_type"] = ttype
+            out["trigger_val"] = self.query_one("#o_trigger_val",
+                                                Input).value.strip()
+        rtt = self.query_one("#o_rtt", Select).value
+        if rtt:
+            out["rtt"] = rtt
+        flags = self.query_one("#o_flags", Input).value.strip()
+        if flags:
+            out["build_extra_args"] = _shlex.split(flags)
+        return out
+
+
+class AutoRunScreen(Screen):
+    """Pulpit trybu autonomicznego: postęp kroków, prąd na żywo, logi
+    build/flash, przycisk otwarcia wykresu. Silnik (autorun.engine)
+    biegnie w wątku; zdarzenia wracają przez call_from_thread. Esc =
+    przerwij (sesja jest domykana czysto)."""
+
+    BINDINGS = [("escape", "cancel", "Przerwij")]
+
+    def __init__(self, plan, sample):
+        super().__init__()
+        self.plan = plan               # gotowy autorun.plan.Plan (z okna)
+        self.sample = sample
+        self.cancel = threading.Event()
+        self.run_dir = None
+        self.live_session = None
+        self._viewer_opened = False
+        self._done = False
+
+    def compose(self):
+        yield Static("", id="status")
+        yield Static("", id="live")
+        with Horizontal(id="auto-head"):
+            yield Static("Postęp i logi", id="cmds-title")
+            yield Button("Otwórz wykres", id="open_viewer", disabled=True)
+        yield VerticalScroll(id="cmds")
+        yield Static("Esc — przerwij (sesja zostaje zapisana)", id="hint")
+
+    def on_mount(self):
+        self.query_one("#live", Static).update(
+            "[#888888]czekam na start pomiaru…[/]")
+        self.flow()
+
+    def note(self, text):
+        cmds = self.query_one("#cmds")
+        cmds.mount(Static(text, classes="note"))
+        cmds.scroll_end(animate=False)
+
+    def action_cancel(self):
+        if self._done:
+            self.app.pop_screen()
+            return
+        self.cancel.set()
+        self.query_one("#status", Static).update(
+            "Przerywam po bieżącym odczycie… (Esc jeszcze raz = powrót)")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "open_viewer":
+            target = self.live_session or self.run_dir
+            if target:
+                core.launch_viewer([target],
+                                   live=bool(self.live_session),
+                                   interactive=False)
+
+    # --- most zdarzenia silnika -> UI (wołane z wątku) ---
+
+    def _on_event(self, ev):
+        status = self.query_one("#status", Static)
+        if ev.kind == "plan_start":
+            self.run_dir = ev.data.get("run_dir")
+            self.note(f"[b]Plan {ev.text}[/b] – {ev.data.get('steps')} "
+                      "krok(ów)")
+        elif ev.kind == "phase":
+            status.update(ev.text)
+            self.note(f"[b]{ev.text}[/b]")
+        elif ev.kind == "state":
+            label = {"build": "budowanie", "power": "zasilanie",
+                     "flash": "wgrywanie", "trigger": "czekam na trigger",
+                     "measure": "POMIAR", "build_failed": "build padł"
+                     }.get(ev.text, ev.text)
+            detail = ev.data.get("detail", "")
+            status.update(f"krok {ev.step} · {ev.name} · {label}"
+                          + (f" ({detail})" if detail else ""))
+        elif ev.kind == "session":
+            self.live_session = ev.data.get("dir")
+            btn = self.query_one("#open_viewer", Button)
+            btn.disabled = False
+            if not self._viewer_opened and core.viewer_deps_present():
+                # Pierwsza sesja: otwórz wykres na żywo automatycznie.
+                core.launch_viewer([self.live_session], live=True,
+                                   interactive=False)
+                self._viewer_opened = True
+        elif ev.kind == "live":
+            d = ev.data
+            avg = d.get("avg_uA")
+            self.query_one("#live", Static).update(
+                f"prąd: [b]{avg if avg is not None else '—'} µA[/b]   "
+                f"czas: {d.get('elapsed_s')}/{d.get('duration_s')} s   "
+                f"próbek: {d.get('samples'):,}")
+        elif ev.kind == "annotation":
+            self.note(f"  ⟟ etykieta: {ev.text} @ {ev.data.get('t_s')} s")
+        elif ev.kind == "line":
+            self.note(f"[#888888]{ev.text}[/]")
+        elif ev.kind == "note":
+            self.note(ev.text)
+        elif ev.kind == "step_done":
+            d = ev.data
+            self.note(f"[b]krok {ev.step} {ev.name}[/b]: śr "
+                      f"{d.get('avg_uA')} µA (min {d.get('min_uA')}, "
+                      f"max {d.get('max_uA')})")
+        elif ev.kind == "plan_done":
+            self._finish(ev)
+
+    def _finish(self, ev):
+        self._done = True
+        status = self.query_one("#status", Static)
+        if ev.data.get("cancelled"):
+            status.update("Przerwano. Sesje zapisane.")
+        else:
+            status.update("Zakończono plan.")
+        self.query_one("#live", Static).update("")
+        if self.run_dir:
+            rel = Path(self.run_dir)
+            try:
+                rel = rel.relative_to(core.ROOT)
+            except ValueError:
+                pass
+            self.note(f"Sesje: {rel}/  ·  Esc = powrót")
+
+    @work(thread=True)
+    def flow(self):
+        """Wątek roboczy: zbuduj runner i wykonaj plan. event_cb marshaluje
+        każde zdarzenie na wątek UI (call_from_thread)."""
+        from autorun.engine import AutoRunError, AutoRunner
+
+        def emit(ev):
+            self.app.call_from_thread(self._on_event, ev)
+
+        try:
+            manifest = core.load_manifest()
+            runner = AutoRunner(self.plan, manifest, self.sample,
+                                event_cb=emit, cancel=self.cancel)
+            runner.run()
+        except AutoRunError as e:
+            self.app.call_from_thread(self._fail, str(e))
+        except Exception as e:                      # sprzęt, biblioteki
+            self.app.call_from_thread(self._fail, f"{type(e).__name__}: {e}")
+
+    def _fail(self, msg):
+        self._done = True
+        self.query_one("#status", Static).update(f"BŁĄD: {msg}")
+        self.note("[b]Plan przerwany błędem.[/b] Esc = powrót.")
+
+
 class PowerTestApp(App):
     TITLE = "board-power-test"
     ENABLE_COMMAND_PALETTE = False  # bez przycisku/skrótu palety komend
@@ -715,13 +963,38 @@ class PowerTestApp(App):
     .scenario-row { height: auto; }
     .scenario-head { height: 1; }
     .scen-check { border: none; background: transparent; padding: 0;
-                  height: 1; width: auto; }
+                  height: 1; width: 1fr; }
     .scen-check:focus { text-style: bold; }
     .scen-check.-on { text-style: bold; }
-    .scen-arrow { width: 3; color: #888888; padding: 0 0 0 1; }
-    .scen-arrow:hover { color: $text; }
-    .scen-del { width: 3; color: #666666; padding: 0 0 0 1; }
-    .scen-del:hover { color: $text; }
+    /* Grupa ikon (rozwiń/opcje/usuń) doklejona do prawej krawędzi wiersza
+       (checkbox ma width:1fr) – stała pozycja niezależnie od długości
+       nazwy scenariusza, zamiast kupić się zaraz za tekstem. */
+    .scen-actions { width: auto; height: 1; }
+    .scen-icon { width: 4; height: 1; content-align: center middle; }
+    .scen-icon:hover { background: #333333; color: $text; }
+    .scen-arrow { color: #888888; }
+    .scen-del { color: #666666; }
+    .scen-gear { color: #666666; }
+    .scen-gear.has-override { color: $text; text-style: bold; }
+
+    /* Przełącznik trybów: same klikalne teksty (bez suwaka, bez
+       animacji); aktywna strona pogrubiona i jaśniejsza. */
+    #mode-toggle { height: auto; width: 72; max-width: 100%;
+                   margin-bottom: 1; align: left middle; }
+    .mode-label { width: auto; color: #666666; margin: 0 1; }
+    .mode-label:hover { color: #999999; }
+    .mode-label.active { color: $text; text-style: bold; }
+    .mode-sep { width: auto; color: #444444; }
+
+    /* Panel konfiguracji trybu autonomicznego. */
+    #auto-config { width: 72; max-width: 100%; border: round #555555;
+                   background: transparent; height: auto; padding: 0 1;
+                   margin-top: 1; }
+    #auto-trig-row, #auto-mode-row { height: auto; }
+    .auto-col { width: 1fr; height: auto; padding-right: 1; }
+    #auto-hint { color: #888888; margin-top: 1; }
+    /* Domyślnie ukryte – _apply_mode() decyduje o widoczności. */
+    .auto-only { display: none; }
     #pristine, #reset, #swd_reminder { border: none; background: transparent; padding: 0;
                 height: 1; margin-top: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
@@ -756,6 +1029,10 @@ class PowerTestApp(App):
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
+    #live { background: transparent; padding: 0 1; height: 1;
+            color: #aaaaaa; }
+    #auto-head { height: auto; padding: 0 1; margin-top: 1; }
+    #auto-head Button { min-width: 0; }
     #cmds-head { height: auto; padding: 0 1; margin-top: 1; }
     #cmds-title { width: 1fr; height: 3; color: #777777;
                   content-align: left middle; padding: 0 1; }
@@ -849,6 +1126,8 @@ class PowerTestApp(App):
         self.scenarios = self.manifest.get("scenarios", {})
         if not self.boards or not self.scenarios:
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
+        self.mode = "standard"          # standard | auto
+        self.auto_overrides = {}        # {scenariusz: dict nadpisań kroku}
 
     def compose(self):
         default_prof = self.defaults.get("profile")
@@ -856,6 +1135,17 @@ class PowerTestApp(App):
             default_prof = next(iter(self.boards))
         # VerticalScroll: przy małym oknie menu się przewija zamiast ucinać.
         with VerticalScroll(id="setup"):
+            # Przełącznik trybów na samej górze: pomiar ręczny (Power
+            # Profiler) vs tryb autonomiczny (plan + PPK2 + wykres).
+            # Same klikalne teksty (bez animowanego suwaka) – kliknięcie
+            # w tekst przełącza tryb, aktywny jest wytłuszczony.
+            with Horizontal(id="mode-toggle"):
+                yield ModeLabel("Pomiar ręczny", "standard",
+                                id="mode-label-standard",
+                                classes="mode-label active")
+                yield Static("│", classes="mode-sep")
+                yield ModeLabel("Tryb autonomiczny", "auto",
+                                id="mode-label-auto", classes="mode-label")
             yield Static(LOGO, id="logo")
             yield Label("Płytka", classes="h")
             yield Select(((b["board"], n) for n, b in self.boards.items()),
@@ -868,15 +1158,55 @@ class PowerTestApp(App):
                 # oczekiwanych – te pokazuje dopiero instrukcja pomiaru.
                 for n, s in self.scenarios.items():
                     yield self._scenario_row(n, s)
+            # Panel ustawień pomiaru trybu autonomicznego (domyślne dla
+            # WSZYSTKICH zaznaczonych kroków; ⚙ przy scenariuszu nadpisuje
+            # pojedynczy). Widoczny tylko w trybie autonomicznym.
+            with Vertical(id="auto-config", classes="auto-only"):
+                yield Label("Ustawienia pomiaru (domyślne dla wszystkich "
+                            "kroków)", classes="h")
+                yield Label("Czas pomiaru na krok (np. 30s / 20m / 8h):")
+                yield Input(value="1h", id="auto_duration")
+                with Horizontal(id="auto-trig-row"):
+                    with Vertical(classes="auto-col"):
+                        yield Label("Start pomiaru:")
+                        yield Select([("po czasie [s]", "delay"),
+                                      ("po logu RTT", "rtt")],
+                                     value="delay", allow_blank=False,
+                                     id="auto_trigger")
+                    with Vertical(classes="auto-col"):
+                        yield Label("…wartość (sekundy albo wzorzec logu):")
+                        yield Input(value="20", id="auto_trigger_val")
+                with Horizontal(id="auto-mode-row"):
+                    with Vertical(classes="auto-col"):
+                        yield Label("Konsola RTT:")
+                        yield Select([("off (najniższy szum)", "off"),
+                                      ("trigger", "trigger"),
+                                      ("continuous (etykiety)",
+                                       "continuous")],
+                                     value="off", allow_blank=False,
+                                     id="auto_rtt")
+                    with Vertical(classes="auto-col"):
+                        yield Label("Zapis danych:")
+                        yield Select([("downsampled", "downsampled"),
+                                      ("raw (duże pliki!)", "raw"),
+                                      ("both", "both")],
+                                     value="downsampled", allow_blank=False,
+                                     id="auto_storage")
+                yield Static("[#888888]Kliknij ⚙ przy scenariuszu, aby "
+                             "nadpisać ustawienia dla jednego kroku. "
+                             "Kroki wykonują się w kolejności z listy.[/]",
+                             id="auto-hint")
+
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
             yield Check("Wymuś pełny rebuild (gotowe buildy są "
                         "normalnie pomijane)", value=False, id="pristine")
             yield Check("Zresetuj płytkę po wgraniu (J-Link)",
-                        value=True, id="reset")
+                        value=True, id="reset", classes="standard-only")
             yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
-                        value=True, id="swd_reminder")
+                        value=True, id="swd_reminder",
+                        classes="standard-only")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -894,8 +1224,11 @@ class PowerTestApp(App):
             Horizontal(
                 Check(_label(n, s), value=value, classes="scen-check",
                       id=f"check_{n}"),
-                DescArrow(f"desc_{n}", id=f"arrow_{n}"),
-                DeleteCross(n, id=f"del_{n}"),
+                Horizontal(
+                    DescArrow(f"desc_{n}", id=f"arrow_{n}"),
+                    AutoGear(n, id=f"gear_{n}"),
+                    DeleteCross(n, id=f"del_{n}"),
+                    classes="scen-actions"),
                 classes="scenario-head"),
             Static(body, classes="scen-desc", id=f"desc_{n}"),
             classes="scenario-row", id=f"row_{n}")
@@ -923,6 +1256,9 @@ class PowerTestApp(App):
         self._update_select_all()
         self.notify(f"Usunięto scenariusz '{name}' z scenarios.toml.")
 
+    def on_mount(self):
+        self._apply_mode()
+
     def on_button_pressed(self, event):
         if event.button.id == "quit":
             self.exit()
@@ -935,6 +1271,43 @@ class PowerTestApp(App):
             self.push_screen(ResultsScreen())
         elif event.button.id == "start":
             self._start()
+
+    # ---------- przełączanie trybów ----------
+
+    def _set_mode(self, mode):
+        if mode != self.mode:
+            self.mode = mode
+            self._apply_mode()
+
+    def _apply_mode(self):
+        """Pokaż/ukryj elementy zależne od trybu i wytłuść aktywną
+        etykietę przełącznika. Widoczność sterowana klasą na widgetach
+        (.auto-only / .standard-only)."""
+        auto = self.mode == "auto"
+        self.query_one("#mode-label-standard", Static).set_class(
+            not auto, "active")
+        self.query_one("#mode-label-auto", Static).set_class(auto, "active")
+        for w in self.query(".auto-only"):
+            w.display = auto
+        for w in self.query(".standard-only"):
+            w.display = not auto
+        self.query_one("#start", Button).label = (
+            "Start (autonomiczny)" if auto else "Start")
+
+    def configure_auto_step(self, name):
+        """⚙ przy scenariuszu: nadpisz ustawienia jego kroku."""
+        def done(result):
+            if result is None:
+                return
+            if result:
+                self.auto_overrides[name] = result
+            else:                       # 'Wyczyść nadpisania'
+                self.auto_overrides.pop(name, None)
+            self.query_one(f"#gear_{name}", AutoGear).set_class(
+                name in self.auto_overrides, "has-override")
+        self.push_screen(AutoStepConfigScreen(
+            name, _label(name, self.scenarios.get(name, {})),
+            self.auto_overrides.get(name)), callback=done)
 
     def _scenario_added(self, result):
         """Po 'Dodaj firmware': nowy scenariusz od razu na liście
@@ -972,6 +1345,9 @@ class PowerTestApp(App):
                         severity="error")
             self.query_one("#sample", Input).focus()
             return
+        if self.mode == "auto":
+            self._start_auto(names, sample, prof_name)
+            return
         self.push_screen(RunScreen(prof_name, self.boards[prof_name],
                                    names, sample,
                                    pristine=self.query_one("#pristine",
@@ -980,6 +1356,69 @@ class PowerTestApp(App):
                                                         Checkbox).value,
                                    swd_reminder=self.query_one(
                                        "#swd_reminder", Checkbox).value))
+
+    def _start_auto(self, names, sample, prof_name):
+        """Zbuduj plan z ustawień okna (domyślne + nadpisania per krok)
+        i uruchom pulpit trybu autonomicznego."""
+        try:
+            plan = self._build_auto_plan(names, prof_name)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+        from autorun.plan import validate_plan
+        errors = validate_plan(plan, self.manifest)
+        if errors:
+            self.notify("Błędy konfiguracji:\n" + "\n".join(errors),
+                        severity="error", timeout=8)
+            return
+        self.push_screen(AutoRunScreen(plan, sample))
+
+    def _build_auto_plan(self, names, prof_name):
+        """Plan trybu autonomicznego z widgetów okna. Kolejność kroków =
+        kolejność zaznaczonych scenariuszy na liście. Nadpisania per krok
+        (⚙) mają pierwszeństwo nad ustawieniami domyślnymi."""
+        from autorun.plan import (Plan, PlanStep, Storage, Trigger,
+                                  parse_duration)
+
+        g_dur = self.query_one("#auto_duration", Input).value.strip()
+        g_ttype = self.query_one("#auto_trigger", Select).value
+        g_tval = self.query_one("#auto_trigger_val", Input).value.strip()
+        g_rtt = self.query_one("#auto_rtt", Select).value
+        g_storage = self.query_one("#auto_storage", Select).value
+        pristine = self.query_one("#pristine", Checkbox).value
+
+        def make_trigger(ttype, tval):
+            if ttype == "rtt":
+                return Trigger(type="rtt", pattern=tval, timeout_s=180.0)
+            try:
+                secs = float((tval or "0").replace(",", "."))
+            except ValueError:
+                raise ValueError(f"Start 'po czasie': '{tval}' nie jest "
+                                 "liczbą sekund.")
+            return Trigger(type="delay", seconds=secs)
+
+        steps = []
+        for n in names:
+            o = self.auto_overrides.get(n, {})
+            dur = o.get("duration") or g_dur
+            try:
+                dur_s = parse_duration(dur)
+            except ValueError as e:
+                raise ValueError(f"{_label(n, self.scenarios[n])}: {e}")
+            ttype = o.get("trigger_type") or g_ttype
+            tval = o.get("trigger_val", g_tval) if "trigger_type" in o \
+                else g_tval
+            rtt = o.get("rtt") or g_rtt
+            # Trigger po logu RTT wymaga włączonej konsoli – podnieś z off.
+            if ttype == "rtt" and rtt == "off":
+                rtt = "trigger"
+            steps.append(PlanStep(
+                scenario=n, duration_s=dur_s, voltage=o.get("voltage", ""),
+                trigger=make_trigger(ttype, tval), rtt=rtt,
+                storage=Storage(mode=g_storage, window_ms=1),
+                build_extra_args=o.get("build_extra_args", []),
+                pristine=pristine))
+        return Plan(name="interfejs", board=prof_name, steps=steps)
 
 
 if __name__ == "__main__":

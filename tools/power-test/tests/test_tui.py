@@ -494,9 +494,13 @@ class TuiRunTests(TuiHarness):
                 msg="RunScreen")
             run_screen = next(s for s in app.screen_stack
                               if isinstance(s, tui.RunScreen))
+            # Poczekaj, aż WYJŚCIE builda (nie sama linia komendy) zostanie
+            # wystreamowane do zapisu – inaczej kopiujemy przed spłynięciem
+            # tabelki pamięci (wyścig asyncio.to_thread -> call_from_thread).
             await self.wait_until(
                 pilot,
-                lambda a: any("west build" in l for l in run_screen.transcript),
+                lambda a: any("Memory region" in l
+                              for l in run_screen.transcript),
                 msg="log budowania")
             self.assertTrue(run_screen.query("#copy_log"))   # jest przycisk
             run_screen._copy_log()
