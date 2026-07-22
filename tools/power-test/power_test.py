@@ -63,8 +63,15 @@ import tomllib  # noqa: E402  (import po sprawdzeniu wersji, celowo)
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "scenarios.toml"
 CSV_PATH = ROOT / "reports" / "pomiary.csv"
-CSV_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
-              "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
+# Kolumny dziennika. Pierwsze dziewięć to schemat historyczny (pomiar
+# ręczny z Power Profilera); cztery ostatnie dokłada tryb autonomiczny
+# (autorun): min/max prądu, czas pomiaru i ścieżka sesji z wykresem.
+# Wiersze ręczne zostawiają nowe pola puste – ensure_csv_schema()
+# dopisuje brakujące kolumny do starego pliku bez utraty danych.
+CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
+                   "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
+CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja"]
+CSV_FIELDS = CSV_BASE_FIELDS + CSV_AUTORUN_FIELDS
 
 
 def die(msg):
@@ -725,9 +732,36 @@ def make_row(name, scen, profile, sample, voltage, current, uwagi):
     }
 
 
+def ensure_csv_schema():
+    """Dociągnij stary dziennik do bieżącego schematu CSV_FIELDS.
+
+    Pierwsza wersja narzędzia zapisywała tylko CSV_BASE_FIELDS; tryb
+    autonomiczny dokłada kolumny (min/max, czas, sesja). Jeśli istniejący
+    plik ma węższy nagłówek, przepisujemy go RAZ: nowy nagłówek + stare
+    wiersze uzupełnione pustymi polami. Bez pliku albo z aktualnym
+    nagłówkiem nic nie robimy."""
+    if not CSV_PATH.is_file():
+        return
+    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames or []
+        missing = [c for c in CSV_FIELDS if c not in header]
+        if not missing:
+            return
+        rows = list(reader)
+    fields = header + missing
+    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({c: row.get(c, "") for c in fields})
+
+
 def append_row(row, verbose=True):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     new_file = not CSV_PATH.exists()
+    if not new_file:
+        ensure_csv_schema()
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if new_file:
@@ -735,6 +769,59 @@ def append_row(row, verbose=True):
         writer.writerow(row)
     if verbose:
         print(f"Zapisano: {CSV_PATH.relative_to(ROOT)}")
+
+
+TOOL_DIR = Path(__file__).resolve().parent
+VIEWER_DEPS = ["PyQt6", "pyqtgraph"]
+
+
+def viewer_deps_present():
+    """Czy okno wykresu (PyQt6 + pyqtgraph) da się zaimportować w
+    aktualnym pythonie? (bez importowania Qt do naszego procesu)."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("PyQt6", "pyqtgraph", "numpy"))
+
+
+def ensure_viewer_deps(interactive=True):
+    """Doinstaluj zależności viewera do venva przy pierwszym użyciu –
+    ciężkie (PyQt6), więc trzymamy je poza bazowym bootstrapem. Zwraca
+    True, gdy są dostępne."""
+    if viewer_deps_present():
+        return True
+    if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
+        print("Okno wykresu wymaga PyQt6 + pyqtgraph. Uruchom przez "
+              "`board-power-test` (instaluje do venva) albo zainstaluj "
+              "ręcznie: pip install " + " ".join(VIEWER_DEPS))
+        return False
+    if interactive:
+        ans = ask(f"Okno wykresu potrzebuje {', '.join(VIEWER_DEPS)} "
+                  "(jednorazowa instalacja do venva). Zainstalować? [t/N]: ")
+        if ans.lower() not in ("t", "tak", "y", "yes"):
+            print("Pominięto – bez zależności okno się nie otworzy.")
+            return False
+    print(f"Instaluję {', '.join(VIEWER_DEPS)}…")
+    rc = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                         *VIEWER_DEPS, "numpy"]).returncode
+    if rc != 0:
+        print("Instalacja nie powiodła się.")
+        return False
+    return viewer_deps_present()
+
+
+def launch_viewer(paths=(), live=False, interactive=True):
+    """Uruchom osobny proces okna wykresu (viewer.__main__). Osobny
+    proces, bo PyQt i Textual nie współdzielą pętli zdarzeń ani
+    terminala. env NIE przez child_env() – viewer chce czystego pythona
+    z venva (przywrócone PYTHONHOME popsułoby import Qt)."""
+    if not ensure_viewer_deps(interactive=interactive):
+        return None
+    cmd = [sys.executable, "-m", "viewer"]
+    if live and paths:
+        cmd += ["--live", str(paths[0])]
+    elif paths:
+        cmd += ["--open", *[str(p) for p in paths]]
+    return subprocess.Popen(cmd, cwd=str(TOOL_DIR), env=os.environ.copy())
 
 
 def cmd_add(args):
@@ -772,6 +859,90 @@ def cmd_report(args):
     print_table(tuple(cols), [tuple(r.get(c, "") for c in cols) for r in rows])
     print(f"\n({len(rows)} pomiarów; pełne dane, w tym flagi builda: "
           f"{CSV_PATH.relative_to(ROOT)})")
+
+
+def cmd_autorun(args):
+    """`autorun <plan.toml>` – tryb autonomiczny: build+flash+pomiar
+    całego planu bez udziału człowieka (PPK2 sam zasila i mierzy).
+    Bogaty podgląd na żywo jest w TUI; tu strumieniujemy zdarzenia
+    tekstem – idealne do sesji nocnej przez SSH."""
+    import threading
+
+    from autorun.engine import AutoRunner
+    from autorun.plan import load_plan, validate_plan
+
+    try:
+        plan = load_plan(args.plan)
+    except ValueError as e:
+        die(str(e))
+    manifest = load_manifest()
+    if args.board:
+        plan.board = args.board
+    errors = validate_plan(plan, manifest)
+    if errors:
+        die("\n  ".join(["błędy planu:"] + errors))
+
+    sample = args.sample
+    if not sample and not args.dry_run:
+        while not sample:
+            sample = ask("Egzemplarz płytki (np. 'BTZ #2'): ")
+
+    def on_event(ev):
+        if ev.kind in ("phase", "plan_start"):
+            print(f"\n=== {ev.text or ev.data} ===")
+        elif ev.kind == "note":
+            print(ev.text)
+        elif ev.kind == "state":
+            detail = ev.data.get("detail", "")
+            label = {"power": "zasilanie", "flash": "flash",
+                     "build": "build", "trigger": "trigger",
+                     "measure": "pomiar", "build_failed": "build padł",
+                     }.get(ev.text, ev.text)
+            print(f"  [krok {ev.step}] {ev.name} -> {label}"
+                  + (f": {detail}" if detail else ""))
+        elif ev.kind == "line":
+            print(f"    {ev.text}")
+        elif ev.kind == "live":
+            d = ev.data
+            print(f"    pomiar {ev.name}: {d.get('elapsed_s')}/"
+                  f"{d.get('duration_s')} s  śr {d.get('avg_uA')} µA",
+                  end="\r", flush=True)
+        elif ev.kind == "annotation":
+            print(f"\n    ⟟ etykieta: {ev.text} @ {ev.data.get('t_s')} s")
+        elif ev.kind == "step_done":
+            d = ev.data
+            print(f"\n  [krok {ev.step}] {ev.name}: śr {d.get('avg_uA')} µA "
+                  f"(min {d.get('min_uA')}, max {d.get('max_uA')})")
+
+    cancel = threading.Event()
+    runner = AutoRunner(plan, manifest, sample, event_cb=on_event,
+                        cancel=cancel, dry_run=args.dry_run)
+    try:
+        results = runner.run()
+    except KeyboardInterrupt:
+        cancel.set()
+        print("\nPrzerywam plan…")
+        return
+    except Exception as e:               # AutoRunError itd.
+        die(str(e))
+
+    print("\n\n=== PODSUMOWANIE PLANU ===")
+    for r in results:
+        avg = r.summary.get("avg_uA")
+        extra = f"śr {avg} µA" if avg is not None else (r.error or "")
+        print(f"  krok {r.index} {r.scenario}: {r.status}"
+              + (f" – {extra}" if extra else ""))
+    if not args.dry_run:
+        print(f"\nSesje z wykresami: {runner.run_dir.relative_to(ROOT)}/\n"
+              "Podgląd wykresu:  board-power-test viewer "
+              f"{runner.run_dir.relative_to(ROOT)}")
+
+
+def cmd_viewer(args):
+    """`viewer [katalog…]` – otwórz okno wykresu (PyQt+pyqtgraph) na
+    wskazanych sesjach albo bibliotekę historii (bez argumentów).
+    Zależności Qt doinstalowują się leniwie przy pierwszym uruchomieniu."""
+    launch_viewer(args.paths, live=False)
 
 
 def cmd_interactive():
@@ -892,6 +1063,26 @@ def main():
 
     sub.add_parser("report", help="tabela zebranych pomiarów (reports/pomiary.csv)") \
        .set_defaults(func=cmd_report)
+
+    auto = sub.add_parser(
+        "autorun", help="tryb autonomiczny: wykonaj plan (plans/*.toml) – "
+                        "build+flash+pomiar PPK2 bez udziału człowieka")
+    auto.add_argument("plan", help="ścieżka do pliku planu (plans/<nazwa>.toml)")
+    auto.add_argument("--sample", "-s", help="egzemplarz płytki, np. 'BTZ #2'")
+    auto.add_argument("--profile", "-p", dest="board",
+                      help="profil płytki z [boards.*] (nadpisuje pole planu)")
+    auto.add_argument("--dry-run", "-n", action="store_true",
+                      help="pokaż komendy i przejdź kroki bez sprzętu "
+                           "(bez PPK2 i bez faktycznego pomiaru)")
+    auto.set_defaults(func=cmd_autorun)
+
+    view = sub.add_parser(
+        "viewer", help="otwórz okno wykresu (PyQt) na sesjach pomiarowych "
+                       "albo bibliotekę historii (bez argumentów)")
+    view.add_argument("paths", nargs="*",
+                      help="katalogi sesji (reports/sessions/…); bez nich "
+                           "otwiera się biblioteka historii")
+    view.set_defaults(func=cmd_viewer)
 
     args = ap.parse_args()
     args.func(args)

@@ -118,3 +118,11 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # description = "Pomiar obrazu zbudowanego poza narzędziem."
 # hex         = "../moj-projekt/build/zephyr/zephyr.hex"
 # expected    = "..."
+
+[scenarios.blinky-advanced]
+description = "Aplikacja z ../NCS-Projects/blinky-advanced (build przez west)."
+source      = "../NCS-Projects/blinky-advanced"
+
+[scenarios.mesh-reliability-tester]
+description = "Aplikacja z ../mesh-reliability-tester (build przez west)."
+source      = "../mesh-reliability-tester"

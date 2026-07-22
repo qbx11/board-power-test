@@ -1,0 +1,664 @@
+# ============================================================
+#  autorun/engine.py – silnik trybu autonomicznego
+# ============================================================
+# AutoRunner wykonuje plan bez udziału człowieka:
+#   FAZA 1: zbuduj wszystkie obrazy z góry (jak cmd_run),
+#   FAZA 2: per krok – zasil płytkę z PPK2, flash, [power-cycle],
+#           czekaj na trigger (delay / wzorzec RTT), mierz prąd przez
+#           zadany czas, sfinalizuj sesję i dopisz wiersz CSV.
+#
+# Silnik działa w wątku wołającego: TUI odpala go przez
+# asyncio.to_thread i dostaje zdarzenia przez event_cb (opakowane
+# call_from_thread), CLI woła run() wprost i drukuje zdarzenia.
+# Przerwanie = threading.Event `cancel` – sprawdzany we wszystkich
+# pętlach; przerwany pomiar jest domykany (częściowa sesja zostaje).
+
+import re
+import shlex
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import power_test as core
+
+from .plan import validate_plan
+from .rtt import LinePatternMatcher, PylinkRttReader, RttError, \
+    jlink_device_for
+from .session import SessionWriter, _atomic_json, new_session_dir
+
+# Ile czasu bez ŻADNYCH próbek uznajemy za zerwane połączenie z PPK2
+# (po 3 nieudanych restartach pomiaru stosowana jest polityka kroku).
+STALL_TIMEOUT_S = 10.0
+READ_INTERVAL_S = 0.01     # ~10 ms między odczytami portu PPK2
+
+
+class AutoRunError(RuntimeError):
+    pass
+
+
+@dataclass
+class EngineEvent:
+    """Zdarzenie dla UI. kind: plan_start / phase / step_start / state /
+    line / note / live / annotation / step_done / plan_done."""
+    kind: str
+    step: int = 0              # numer kroku (1..N), 0 = całość planu
+    name: str = ""             # scenariusz kroku
+    text: str = ""
+    data: dict = field(default_factory=dict)
+
+
+@dataclass
+class StepResult:
+    index: int
+    scenario: str
+    status: str                # done/skipped/build_failed/trigger_timeout/
+    #                            error/cancelled
+    session_dir: Path = None
+    summary: dict = field(default_factory=dict)
+    error: str = ""
+
+
+def default_sampler_factory(plan):
+    from .ppk2 import Ppk2ApiSampler
+    return Ppk2ApiSampler(plan.ppk2_port)
+
+
+def default_rtt_factory(profile):
+    return PylinkRttReader(jlink_device_for(profile["board"]))
+
+
+class AutoRunner:
+
+    def __init__(self, plan, manifest, sample, *, sampler_factory=None,
+                 rtt_factory=None, event_cb=None, cancel=None,
+                 dry_run=False):
+        self.plan = plan
+        self.manifest = manifest
+        self.sample = sample
+        self.sampler_factory = sampler_factory or default_sampler_factory
+        self.rtt_factory = rtt_factory or default_rtt_factory
+        self.event_cb = event_cb or (lambda ev: None)
+        self.cancel = cancel or threading.Event()
+        self.dry_run = dry_run
+
+        self.defaults = manifest.get("defaults", {})
+        self.scenarios = manifest.get("scenarios", {})
+        self.prof_name, self.profile = core.resolve_profile(
+            manifest, plan.board or None)
+        self.run_dir = None
+        self._plan_log = None
+        self._sampler = None
+        self._dut_on = False
+
+    # ---------- pomocnicze ----------
+
+    def _emit(self, kind, step=0, name="", text="", data=None, **extra):
+        """Zdarzenie do UI. Dane można podać słownikiem (data={...}) albo
+        pojedynczymi kwargami (detail=...) – oba trafiają do EngineEvent.data."""
+        payload = dict(data or {})
+        payload.update(extra)
+        self.event_cb(EngineEvent(kind, step, name, text, payload))
+
+    def _log(self, text, files=()):
+        """Linia do plan.log (i opcjonalnie logów kroku) + zdarzenie."""
+        stamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{stamp}] {text}"
+        for f in (self._plan_log, *files):
+            if f is not None:
+                f.write(line + "\n")
+                f.flush()
+        return line
+
+    def _note(self, text, step=0, name="", files=()):
+        self._emit("note", step, name, self._log(text, files))
+
+    def _check_cancel(self):
+        if self.cancel.is_set():
+            raise _Cancelled()
+
+    def _run_streamed(self, cmd, cwd, title, step=0, name="",
+                      log_file=None):
+        """Subprocess ze strumieniowaniem linii do zdarzeń i logu –
+        odpowiednik tui._stream, ale po stronie silnika (bez UI).
+        Przerwanie (cancel) ubija proces."""
+        header = f"$ {shlex.join(cmd)}"
+        self._log(f"{title}: {header}", files=(log_file,) if log_file
+                  else ())
+        self._emit("line", step, name, header)
+        if self.dry_run:
+            return 0
+        with subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True,
+                              errors="replace",
+                              env=core.child_env()) as proc:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if log_file is not None:
+                    log_file.write(line + "\n")
+                self._emit("line", step, name, line)
+                if self.cancel.is_set():
+                    proc.terminate()
+            if log_file is not None:
+                log_file.flush()
+            rc = proc.wait()
+        self._check_cancel()
+        return rc
+
+    # ---------- budowanie ----------
+
+    def _voltage_for(self, step):
+        scen = self.scenarios[step.scenario]
+        return str(step.voltage or scen.get("voltage")
+                   or self.defaults.get("voltage", "3.0"))
+
+    def _build_spec(self, idx, step, used_dirs):
+        """(komenda, katalog builda) dla kroku. Dwa kroki z tym samym
+        scenariuszem, ale innymi flagami, dostają osobne katalogi
+        (sufiks _krokN), żeby obrazy się nie nadpisywały."""
+        scen = self.scenarios[step.scenario]
+        pristine = "always" if step.pristine else "auto"
+        cmd, build_dir = core.make_build_cmd(
+            step.scenario, scen, self.prof_name, self.profile,
+            self.defaults.get("profile"), pristine=pristine)
+        if step.build_extra_args:
+            if "--" not in cmd:
+                cmd.append("--")
+            cmd += list(step.build_extra_args)
+        if step.build_cmd:
+            src = (core.resolve_path(scen["source"])
+                   if scen.get("source") else core.ROOT)
+            cmd = [a.format(board=self.profile["board"],
+                            build_dir=str(core.ROOT / build_dir),
+                            src=str(src))
+                   for a in shlex.split(step.build_cmd)]
+        fingerprint = core._build_fingerprint(cmd)
+        if used_dirs.get(build_dir, fingerprint) != fingerprint:
+            new_dir = f"{build_dir}_krok{idx}"
+            cmd = [a.replace(str(core.ROOT / build_dir),
+                             str(core.ROOT / new_dir)) for a in cmd]
+            build_dir = new_dir
+            fingerprint = core._build_fingerprint(cmd)
+        used_dirs[build_dir] = fingerprint
+        return cmd, build_dir
+
+    def _phase_build(self, workspace):
+        """FAZA 1: buildy wszystkich kroków z góry. Zwraca
+        {indeks_kroku: katalog_builda | None (hex) | BUILD_FAILED}."""
+        built, used_dirs, done_dirs = {}, {}, {}
+        to_build = [(i, s) for i, s in enumerate(self.plan.steps, 1)
+                    if "hex" not in self.scenarios[s.scenario]]
+        self._emit("phase", text=f"FAZA 1/2: budowanie "
+                                 f"{len(to_build)} obraz(ów)")
+        for idx, step in enumerate(self.plan.steps, 1):
+            self._check_cancel()
+            scen = self.scenarios[step.scenario]
+            if "hex" in scen:
+                built[idx] = None
+                self._note(f"krok {idx} ({step.scenario}): gotowy hex "
+                           f"({scen['hex']}) – bez budowania")
+                continue
+            cmd, build_dir = self._build_spec(idx, step, used_dirs)
+            if build_dir in done_dirs:
+                built[idx] = build_dir
+                self._note(f"krok {idx} ({step.scenario}): ten sam obraz "
+                           f"co krok {done_dirs[build_dir]} – bez "
+                           "ponownego builda")
+                continue
+            if (not step.pristine and not self.dry_run
+                    and core.build_up_to_date(build_dir, cmd)):
+                built[idx] = build_dir
+                done_dirs[build_dir] = idx
+                self._note(f"krok {idx} ({step.scenario}): gotowy build "
+                           f"({build_dir}/) – pomijam")
+                continue
+            self._emit("state", idx, step.scenario, "build")
+            rc = self._run_streamed(cmd, workspace,
+                                    f"build {step.scenario}", idx,
+                                    step.scenario)
+            if rc != 0:
+                self._note(f"krok {idx} ({step.scenario}): build padł "
+                           f"(kod {rc})", idx, step.scenario)
+                if self.plan.on_build_error == "abort":
+                    raise AutoRunError(
+                        f"build kroku {idx} ({step.scenario}) zakończony "
+                        f"błędem (kod {rc}); plan ma on_build_error = "
+                        "'abort'")
+                built[idx] = BUILD_FAILED
+                continue
+            if not self.dry_run:
+                core.record_build(build_dir, cmd)
+            built[idx] = build_dir
+            done_dirs[build_dir] = idx
+        return built
+
+    # ---------- pomiar ----------
+
+    def _ensure_dut_power(self, on):
+        if self.dry_run or self._sampler is None:
+            return
+        if self._dut_on != on:
+            self._sampler.dut_power(on)
+            self._dut_on = on
+
+    def _wait_trigger(self, idx, step, session_dir, run_log):
+        """Warunek startu pomiaru. Zwraca (czytnik_rtt | None) – przy
+        rtt='continuous' połączenie zostaje otwarte na czas pomiaru."""
+        trig = step.trigger
+        if trig.type == "delay":
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"czekam {trig.seconds:g} s")
+            self._note(f"trigger: delay {trig.seconds:g} s", idx,
+                       step.scenario, files=(run_log,))
+            if self.dry_run:
+                return None
+            self._sleep_cancellable(trig.seconds)
+            if step.rtt != "continuous":
+                return None
+            reader = self.rtt_factory(self.profile)
+            reader.attach()
+            return reader
+
+        # trigger rtt: czekaj na wzorzec na konsoli RTT
+        self._emit("state", idx, step.scenario, "trigger",
+                   detail=f"czekam na RTT: {trig.pattern!r}")
+        self._note(f"trigger: rtt pattern={trig.pattern!r} "
+                   f"timeout={trig.timeout_s:g} s", idx, step.scenario,
+                   files=(run_log,))
+        if self.dry_run:
+            return None
+        rx = re.compile(trig.pattern)
+        reader = self.rtt_factory(self.profile)
+        reader.attach()
+        rtt_log = open(session_dir / "rtt.log", "a", encoding="utf-8")
+        try:
+            deadline = time.monotonic() + trig.timeout_s
+            while True:
+                self._check_cancel()
+                if time.monotonic() >= deadline:
+                    raise _TriggerTimeout(
+                        f"wzorzec {trig.pattern!r} nie pojawił się na "
+                        f"RTT w {trig.timeout_s:g} s")
+                line = reader.readline(timeout_s=0.5)
+                if line is None:
+                    continue
+                rtt_log.write(line + "\n")
+                if rx.search(line):
+                    self._note(f"trigger RTT złapany: {line!r}", idx,
+                               step.scenario, files=(run_log,))
+                    break
+        except BaseException:
+            reader.detach()
+            raise
+        finally:
+            rtt_log.close()
+        if step.rtt == "continuous":
+            return reader
+        # rtt='trigger': zamknij J-Link PRZED pomiarem (podłączony
+        # debugger dodaje prąd); krótka chwila na uspokojenie.
+        reader.detach()
+        time.sleep(1.0)
+        return None
+
+    def _sleep_cancellable(self, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._check_cancel()
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+    def _measure(self, idx, step, writer, rtt_reader):
+        """Pętla pomiaru: czytaj PPK2, karm sesję, raportuj na żywo.
+        Koniec, gdy zbierzemy próbki warte duration_s (oś danych) albo
+        cancel. Wątek RTT (continuous) stawia auto-etykiety równolegle."""
+        sampler = self._sampler
+        target = step.duration_s * sampler.sample_rate
+        stop_rtt = threading.Event()
+        rtt_thread = None
+        if rtt_reader is not None:
+            matcher = LinePatternMatcher(step.labels)
+            rtt_thread = threading.Thread(
+                target=self._rtt_label_loop,
+                args=(rtt_reader, matcher, writer, stop_rtt, idx, step),
+                daemon=True)
+            rtt_thread.start()
+
+        sampler.start()
+        errors = 0
+        last_data = time.monotonic()
+        last_status = 0.0
+        sec_sum, sec_n = 0.0, 0
+        expected_base = time.monotonic()
+        reported_deficit = 0
+        try:
+            while writer.samples_written < target:
+                self._check_cancel()
+                time.sleep(READ_INTERVAL_S)
+                try:
+                    chunk = sampler.read()
+                except Exception as e:
+                    # Zerwany odczyt USB: do 3 restartów pomiaru, potem
+                    # polityka kroku.
+                    errors += 1
+                    self._note(f"błąd odczytu PPK2 ({e}) – restart "
+                               f"pomiaru {errors}/3", idx, step.scenario)
+                    if errors > 3:
+                        raise AutoRunError(f"PPK2 nie odpowiada: {e}")
+                    try:
+                        sampler.stop()
+                        sampler.start()
+                    except Exception:
+                        pass
+                    continue
+                now = time.monotonic()
+                if len(chunk):
+                    over = writer.samples_written + len(chunk) - target
+                    if over > 0:
+                        chunk = chunk[:len(chunk) - int(over)]
+                    writer.write_samples(chunk)
+                    sec_sum += float(chunk.sum())
+                    sec_n += len(chunk)
+                    last_data = now
+                elif now - last_data > STALL_TIMEOUT_S:
+                    raise AutoRunError(
+                        f"PPK2 nie przysłał żadnych próbek przez "
+                        f"{STALL_TIMEOUT_S:g} s – zerwane połączenie?")
+                if now - last_status >= 1.0:
+                    # Rozliczenie zgubionych próbek: ile powinno przyjść
+                    # wg zegara vs ile przyszło (nadwyżka deficytu ponad
+                    # już zgłoszoną trafia do meta.gaps).
+                    expected = (now - expected_base) * sampler.sample_rate
+                    deficit = int(expected - writer.samples_written
+                                  - reported_deficit)
+                    if deficit > sampler.sample_rate * 0.2:
+                        writer.record_gap(deficit)
+                        reported_deficit += deficit
+                    avg = sec_sum / sec_n if sec_n else None
+                    writer.update_status("measuring", avg)
+                    self._emit("live", idx, step.scenario, data={
+                        "avg_uA": round(avg, 3) if avg else None,
+                        "elapsed_s": round(writer.elapsed_s, 1),
+                        "duration_s": step.duration_s,
+                        "samples": writer.samples_written})
+                    sec_sum, sec_n = 0.0, 0
+                    last_status = now
+        finally:
+            stop_rtt.set()
+            try:
+                sampler.stop()
+            except Exception:
+                pass
+            if rtt_thread is not None:
+                rtt_thread.join(timeout=3)
+            if rtt_reader is not None:
+                rtt_reader.detach()
+
+    def _rtt_label_loop(self, reader, matcher, writer, stop, idx, step):
+        """Wątek auto-etykiet (rtt='continuous'): każda linia RTT do
+        rtt.log, linie pasujące do reguł -> adnotacje sesji. Czas
+        etykiety = bieżąca pozycja pomiaru (próbki/rate)."""
+        with open(writer.dir / "rtt.log", "a", encoding="utf-8") as log:
+            while not stop.is_set():
+                try:
+                    line = reader.readline(timeout_s=0.5)
+                except RttError as e:
+                    self._note(f"RTT przerwane w trakcie pomiaru: {e}",
+                               idx, step.scenario)
+                    return
+                if line is None:
+                    continue
+                log.write(line + "\n")
+                log.flush()
+                hit = matcher.match(line)
+                if hit is not None:
+                    label, pattern = hit
+                    t_s = writer.elapsed_s
+                    writer.annotate(t_s, label, pattern=pattern,
+                                    rtt_line=line)
+                    self._emit("annotation", idx, step.scenario, label,
+                               t_s=round(t_s, 3))
+
+    # ---------- krok ----------
+
+    def _run_step(self, idx, step, build_dir, workspace):
+        scen = self.scenarios[step.scenario]
+        voltage = self._voltage_for(step)
+        self._emit("step_start", idx, step.scenario,
+                   data={"duration_s": step.duration_s,
+                         "voltage": voltage})
+        if self.dry_run:
+            return self._dry_step(idx, step, scen, voltage, build_dir,
+                                  workspace)
+        session_dir = new_session_dir(self.run_dir, step.scenario)
+        run_log = open(session_dir / "run.log", "a", encoding="utf-8")
+        try:
+            # Zasilanie z PPK2 (source meter) – płytka musi mieć prąd,
+            # żeby J-Link mógł ją w ogóle zaprogramować.
+            self._emit("state", idx, step.scenario, "power",
+                       detail=f"{voltage} V")
+            if not self.dry_run:
+                self._sampler.set_voltage(
+                    round(float(voltage.replace(",", ".")) * 1000))
+                self._ensure_dut_power(True)
+
+            self._emit("state", idx, step.scenario, "flash")
+            rc = self._run_streamed(
+                core.flash_cmd_for(scen, build_dir, self.profile),
+                workspace, f"flash {step.scenario}", idx, step.scenario,
+                log_file=run_log)
+            if rc != 0:
+                raise AutoRunError(f"flash zakończony błędem (kod {rc})")
+
+            if step.power_cycle and not self.dry_run:
+                # Czysty zimny start: chwilowe odcięcie zasilania po
+                # flashu (stan z sesji programowania nie zostaje).
+                self._note("power-cycle płytki (czysty start)", idx,
+                           step.scenario, files=(run_log,))
+                self._sampler.dut_power(False)
+                time.sleep(0.5)
+                self._sampler.dut_power(True)
+                self._dut_on = True
+
+            rtt_reader = self._wait_trigger(idx, step, session_dir,
+                                            run_log)
+
+            self._emit("state", idx, step.scenario, "measure")
+            self._emit("session", idx, step.scenario,
+                       data={"dir": str(session_dir), "live": True})
+            writer = SessionWriter(
+                session_dir,
+                meta=self._session_meta(idx, step, scen, voltage,
+                                        build_dir),
+                sample_rate=(self._sampler.sample_rate
+                             if not self.dry_run else 100_000),
+                storage_mode=step.storage.mode,
+                window_ms=step.storage.window_ms)
+            if self.dry_run:
+                summary = writer.finalize("done")
+                return StepResult(idx, step.scenario, "done",
+                                  session_dir, summary)
+            try:
+                self._measure(idx, step, writer, rtt_reader)
+            except _Cancelled:
+                summary = writer.finalize("cancelled")
+                self._append_csv(step, scen, voltage, summary,
+                                 session_dir, "przerwano")
+                return StepResult(idx, step.scenario, "cancelled",
+                                  session_dir, summary)
+            summary = writer.finalize("done")
+            self._append_csv(step, scen, voltage, summary, session_dir)
+            self._emit("step_done", idx, step.scenario, data=summary)
+            self._note(f"krok {idx} ({step.scenario}): "
+                       f"avg {summary.get('avg_uA')} µA, "
+                       f"min {summary.get('min_uA')} µA, "
+                       f"max {summary.get('max_uA')} µA", idx,
+                       step.scenario, files=(run_log,))
+            return StepResult(idx, step.scenario, "done", session_dir,
+                              summary)
+        except _TriggerTimeout as e:
+            self._fail_meta(session_dir, idx, step, scen, voltage,
+                            "trigger_timeout", str(e))
+            return StepResult(idx, step.scenario, "trigger_timeout",
+                              session_dir, error=str(e))
+        except AutoRunError as e:
+            self._fail_meta(session_dir, idx, step, scen, voltage,
+                            "error", str(e))
+            return StepResult(idx, step.scenario, "error", session_dir,
+                              error=str(e))
+        finally:
+            run_log.close()
+
+    def _dry_step(self, idx, step, scen, voltage, build_dir, workspace):
+        """Krok w trybie dry-run: pokaż komendy flash + trigger, ale nie
+        dotykaj sprzętu ani dysku sesji."""
+        self._emit("state", idx, step.scenario, "power",
+                   detail=f"{voltage} V")
+        self._emit("state", idx, step.scenario, "flash")
+        self._run_streamed(core.flash_cmd_for(scen, build_dir,
+                                              self.profile),
+                           workspace, f"flash {step.scenario}", idx,
+                           step.scenario)
+        self._wait_trigger(idx, step, None, None)
+        self._emit("state", idx, step.scenario, "measure",
+                   detail=f"{step.duration_s:g} s (dry-run – bez pomiaru)")
+        return StepResult(idx, step.scenario, "done")
+
+    def _session_meta(self, idx, step, scen, voltage, build_dir):
+        return {"plan": self.plan.name, "step": idx,
+                "scenario": step.scenario,
+                "label": scen.get("label", step.scenario),
+                "flags": core.scenario_flags(scen)
+                + (" " + " ".join(step.build_extra_args)
+                   if step.build_extra_args else ""),
+                "board": self.profile["board"],
+                "sample": self.sample,
+                "voltage_V": voltage,
+                "build_dir": build_dir if isinstance(build_dir, str)
+                else None,
+                "duration_s": step.duration_s,
+                "trigger": {"type": step.trigger.type,
+                            "seconds": step.trigger.seconds,
+                            "pattern": step.trigger.pattern},
+                "rtt": step.rtt}
+
+    def _fail_meta(self, session_dir, idx, step, scen, voltage, status,
+                   error):
+        """Krok padł przed/po pomiarze: minimalne meta.json, żeby sesja
+        była widoczna w bibliotece z powodem błędu."""
+        self._note(f"krok {idx} ({step.scenario}): {status} – {error}",
+                   idx, step.scenario)
+        if not (session_dir / "meta.json").is_file():
+            _atomic_json(session_dir / "meta.json", {
+                "schema_version": 1, "state": status, "error": error,
+                "start": datetime.now().isoformat(timespec="seconds"),
+                **self._session_meta(idx, step, scen, voltage, None)})
+
+    def _append_csv(self, step, scen, voltage, summary, session_dir,
+                    note=""):
+        if not summary.get("samples"):
+            return
+        row = core.make_row(step.scenario, scen, self.profile,
+                            self.sample, voltage, summary["avg_uA"],
+                            note or f"autorun: plan {self.plan.name}")
+        row.update({
+            "prad_min_uA": summary["min_uA"],
+            "prad_max_uA": summary["max_uA"],
+            "czas_s": summary["duration_s"],
+            "sesja": str(Path(session_dir).relative_to(core.ROOT))})
+        core.append_row(row, verbose=False)
+
+    # ---------- przebieg ----------
+
+    def run(self):
+        """Wykonaj cały plan; zwraca listę StepResult (po jednym na
+        krok). Wyjątki AutoRunError = twarde zatrzymanie planu."""
+        errors = validate_plan(self.plan, self.manifest)
+        errors += core.validate_scenarios(
+            sorted({s.scenario for s in self.plan.steps
+                    if s.scenario in self.scenarios}), self.scenarios)
+        if errors:
+            raise AutoRunError("\n  ".join(
+                [f"błędy planu '{self.plan.name}':"] + errors))
+
+        sessions_root = core.CSV_PATH.parent / "sessions"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_dir = sessions_root / f"{stamp}_{self.plan.name}"
+        if not self.dry_run:
+            self.run_dir.mkdir(parents=True)
+            self._plan_log = open(self.run_dir / "plan.log", "a",
+                                  encoding="utf-8")
+        results = []
+        try:
+            self._emit("plan_start", text=self.plan.name,
+                       data={"steps": len(self.plan.steps),
+                             "run_dir": str(self.run_dir)})
+            self._log(f"plan {self.plan.name}: {len(self.plan.steps)} "
+                      f"krok(ów), profil {self.prof_name} "
+                      f"({self.profile['board']}), egzemplarz "
+                      f"{self.sample}")
+
+            needs_west = any("hex" not in self.scenarios[s.scenario]
+                             for s in self.plan.steps)
+            workspace = core.ROOT
+            if needs_west and not self.dry_run:
+                workspace = core.find_west_workspace()
+                if workspace != core.ROOT:
+                    self._note(f"workspace NCS: {workspace} "
+                               "(build out-of-tree)")
+
+            built = self._phase_build(workspace)
+
+            self._emit("phase", text=f"FAZA 2/2: pomiary "
+                                     f"({len(self.plan.steps)} krok(ów))")
+            if not self.dry_run:
+                self._sampler = self.sampler_factory(self.plan)
+                self._sampler.open()
+                self._note(f"PPK2 otwarty ({getattr(self._sampler, 'port', '?')})")
+
+            for idx, step in enumerate(self.plan.steps, 1):
+                self._check_cancel()
+                if built.get(idx) is BUILD_FAILED:
+                    results.append(StepResult(idx, step.scenario,
+                                              "build_failed"))
+                    self._emit("state", idx, step.scenario,
+                               "build_failed")
+                    continue
+                result = self._run_step(idx, step, built.get(idx),
+                                        workspace)
+                results.append(result)
+                if result.status == "cancelled":
+                    break
+                if (result.status in ("error", "trigger_timeout")
+                        and self.plan.on_step_error == "abort"):
+                    raise AutoRunError(
+                        f"krok {idx} ({step.scenario}): {result.error}; "
+                        "plan ma on_step_error = 'abort'")
+            self._emit("plan_done", data={
+                "results": [(r.index, r.scenario, r.status)
+                            for r in results]})
+            return results
+        except _Cancelled:
+            self._note("przerwano plan (Esc)")
+            self._emit("plan_done", data={"cancelled": True})
+            return results
+        finally:
+            if self._sampler is not None:
+                self._ensure_dut_power(False)
+                self._sampler.close()
+                self._sampler = None
+            if self._plan_log is not None:
+                self._plan_log.close()
+                self._plan_log = None
+
+
+class _Cancelled(Exception):
+    pass
+
+
+class _TriggerTimeout(Exception):
+    pass
+
+
+BUILD_FAILED = object()    # znacznik w mapie buildów FAZY 1

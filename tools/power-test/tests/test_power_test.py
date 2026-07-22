@@ -190,7 +190,9 @@ class CoreTests(unittest.TestCase):
     def test_make_row_nazwy_kolumn_bez_zmian(self):
         row = core.make_row("hexowy", self.scenarios["hexowy"], self.profile,
                             "TEST #1", "3.0", 1.0, "")
-        self.assertEqual(list(row), core.CSV_FIELDS)
+        # Pomiar ręczny wypełnia kolumny bazowe; kolumny trybu
+        # autonomicznego (min/max, czas, sesja) dokłada silnik autorun.
+        self.assertEqual(list(row), core.CSV_BASE_FIELDS)
         self.assertEqual(row["flagi"], "hex=gotowe/firmware.hex")
 
 
