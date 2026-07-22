@@ -77,6 +77,12 @@ if [ "$1" = "build" ]; then
   prev=""; d=""
   for a in "$@"; do [ "$prev" = "-d" ] && d="$a"; prev="$a"; done
   [ -n "$d" ] && mkdir -p "$d/zephyr" && touch "$d/zephyr/zephyr.hex"
+  cat <<'MEM'
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      118436 B      1536 KB      7.53%
+             RAM:       25696 B       188 KB     13.35%
+        IDT_LIST:          0 GB        32 KB      0.00%
+MEM
 fi
 exit 0
 """

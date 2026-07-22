@@ -80,6 +80,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.parse_current("0,95", default_unit="uA"), 0.95)
         self.assertEqual(core.parse_current("2.5 mA", default_unit="uA"), 2500.0)
 
+    def test_parse_memory_report_do_markdown(self):
+        out = ("-- west build output --\n"
+               "Memory region         Used Size  Region Size  %age Used\n"
+               "           FLASH:      118436 B      1536 KB      7.53%\n"
+               "             RAM:       25696 B       188 KB     13.35%\n"
+               "        IDT_LIST:          0 GB        32 KB      0.00%\n"
+               "Generating files...\n")
+        md = core.parse_memory_report(out)
+        self.assertEqual(md.splitlines()[0],
+                         "| Memory region | Used Size | Region Size | "
+                         "%age Used |")
+        self.assertEqual(md.splitlines()[1], "| --- | --- | --- | --- |")
+        self.assertIn("| FLASH | 118436 B | 1536 KB | 7.53% |", md)
+        self.assertIn("| IDT_LIST | 0 GB | 32 KB | 0.00% |", md)
+
+    def test_parse_memory_report_brak_tabeli(self):
+        # Wyjście flasha (bez sekcji Memory region) -> None.
+        self.assertIsNone(core.parse_memory_report(
+            "flashing...\nApplication programmed\nDone\n"))
+
     def test_flash_cmd_hex_nrfutil(self):
         # Domyślnie erase + reset: nrfutil dostaje oba w jednym --options.
         cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,

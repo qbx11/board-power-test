@@ -48,11 +48,16 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
         z przebiegu (zbierane w locie – po zdjęciu RunScreen już ich nie ma)."""
         app = pilot.app
         notes = set()
+        # Tabelki pamięci też znikają z RunScreen po jego zdjęciu – zbieramy
+        # je w locie do atrybutu, żeby testy mogły je sprawdzić po przebiegu.
+        self.mem_reports = set()
 
         def collect_notes():
             for s in app.screen_stack:
                 if isinstance(s, tui.RunScreen):
                     notes.update(str(w.render()) for w in s.query(".note"))
+                    self.mem_reports.update(
+                        str(w.render()) for w in s.query(".mem-report"))
 
         for _ in range(40):
             await self.wait_until(
@@ -143,6 +148,18 @@ class TuiSetupTests(TuiHarness):
             await pilot.click("#arrow_zwykly")
             await pilot.pause()
             self.assertFalse(desc.has_class("shown"))     # i zwija z powrotem
+
+    async def test_zaznaczenie_pokazuje_ptaszek_a_nie_x(self):
+        # Zaznaczone checkboxy pokazują ✓ (a nie domyślny X Textuala).
+        self.assertEqual(tui.Check.BUTTON_INNER, "✓")
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            box = app.query_one("#check_zwykly", Checkbox)
+            self.assertIsInstance(box, tui.Check)
+            box.value = True
+            await pilot.pause()
+            self.assertIn("✓", str(box.render()))
+            self.assertNotIn("X", str(box.render()))
 
     async def test_opis_bez_wartosci_oczekiwanych(self):
         # W polu Scenariusze opis nie pokazuje oczekiwanych/zmierzonych
@@ -444,6 +461,20 @@ class TuiRunTests(TuiHarness):
             self.assertTrue(any(c.startswith("nrfutil device program")
                                 and "reset=RESET_SYSTEM" not in c
                                 for c in cmds))
+
+    async def test_tabela_pamieci_md_po_buildzie(self):
+        # Po zbudowaniu scenariusza źródłowego pokazuje się tabelka pamięci
+        # sformatowana jako Markdown (gotowa do skopiowania).
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zrodlowy"])
+            await self.click_through_run(pilot)
+            joined = "\n".join(self.mem_reports)
+            self.assertIn("| Memory region | Used Size | Region Size | "
+                          "%age Used |", joined)
+            self.assertIn("| --- | --- | --- | --- |", joined)
+            self.assertIn("| FLASH | 118436 B | 1536 KB | 7.53% |", joined)
+            self.assertIn("| RAM | 25696 B | 188 KB | 13.35% |", joined)
 
     async def test_swd_reminder_domyslnie_pokazywany(self):
         # Domyślnie (checkbox zaznaczony) przed pomiarem pojawia się

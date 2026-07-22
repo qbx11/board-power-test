@@ -45,7 +45,7 @@ LOGO = """\
       ▀█  ▀▀█ █   ████   ███   █  █▀  ▀█ █▄██ ██ ██▄▄██
        ▀█▄▄▄█ ▀█▄▄█▀ █▄▄██ █▄▄▄█  █▄▄▄█▀  ██  ██▄ █▄▄▄
          ▀▀▀    ▀▀    ▀▀    ▀▀▀▀  ▀▀▀▀    █    ▀▀  ▀▀▀
-[#888888]               e m b e d d e d   s y s t e m s[/]
+[#888888]               b o a r d   p o w e r   t e s t[/]
 ╰─                                                                ─╯"""
 
 
@@ -88,6 +88,12 @@ def _display_path(path):
 def _label(name, item):
     """Nazwa do wyświetlenia: `label` z manifestu, inaczej klucz."""
     return item.get("label", name)
+
+
+class Check(Checkbox):
+    """Checkbox z ptaszkiem (✓) zamiast domyślnego X w stanie zaznaczonym."""
+
+    BUTTON_INNER = "✓"
 
 
 class DescArrow(Static):
@@ -435,10 +441,16 @@ class RunScreen(Screen):
 
         spinner = self.set_interval(1 / 8, tick)
         handle = {}
+        lines = []
+
+        def on_line(line):
+            lines.append(line)
+            out.write_line(line)
+
         try:
             rc = await asyncio.to_thread(
                 _stream, cmd, cwd,
-                lambda line: self.app.call_from_thread(out.write_line, line),
+                lambda line: self.app.call_from_thread(on_line, line),
                 handle)
         except asyncio.CancelledError:
             # Esc w trakcie: ubij proces west/nrfutil, żeby nie wisiał
@@ -458,6 +470,15 @@ class RunScreen(Screen):
             section.collapsed = False
             raise RuntimeError(f"'{title}' zakończone błędem (kod {rc})")
         section.title = f"✓ {title}"
+
+        # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown
+        # (od razu do skopiowania). Przy flashu parser zwraca None.
+        report = core.parse_memory_report(lines)
+        if report is not None:
+            box = Static(report, classes="mem-report", markup=False)
+            box.border_title = "pamięć (Markdown — skopiuj)"
+            await self.query_one("#cmds").mount(box)
+            self.query_one("#cmds").scroll_end(animate=False)
 
     @work
     async def flow(self):
@@ -708,6 +729,12 @@ class PowerTestApp(App):
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
     .cmd-log { height: 14; border: round #555555; background: transparent;
                margin: 0 1 1 2; }
+    /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
+       skopiowania. */
+    .mem-report { height: auto; width: auto; max-width: 100%;
+                  border: round #555555; border-title-color: #888888;
+                  background: transparent; color: $text;
+                  padding: 0 1; margin: 0 1 1 2; }
 
     /* Dymki (notify): monochromatycznie jak dialogi i bez sztywnej
        szerokości 60 – przy małym oknie dymek się dopasowuje zamiast
@@ -804,12 +831,12 @@ class PowerTestApp(App):
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
-            yield Checkbox("Wymuś pełny rebuild (gotowe buildy są "
-                           "normalnie pomijane)", value=False, id="pristine")
-            yield Checkbox("Zresetuj płytkę po wgraniu (J-Link)",
-                           value=True, id="reset")
-            yield Checkbox("Przypomnij o odpięciu programatora (SWD/J-Link)",
-                           value=True, id="swd_reminder")
+            yield Check("Wymuś pełny rebuild (gotowe buildy są "
+                        "normalnie pomijane)", value=False, id="pristine")
+            yield Check("Zresetuj płytkę po wgraniu (J-Link)",
+                        value=True, id="reset")
+            yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
+                        value=True, id="swd_reminder")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -825,8 +852,8 @@ class PowerTestApp(App):
             body += f"\nUwaga: {s['note']}"
         return Vertical(
             Horizontal(
-                Checkbox(_label(n, s), value=value, classes="scen-check",
-                         id=f"check_{n}"),
+                Check(_label(n, s), value=value, classes="scen-check",
+                      id=f"check_{n}"),
                 DescArrow(f"desc_{n}", id=f"arrow_{n}"),
                 DeleteCross(n, id=f"del_{n}"),
                 classes="scenario-head"),

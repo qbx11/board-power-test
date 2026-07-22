@@ -629,6 +629,43 @@ def parse_current(raw, default_unit="uA"):
     return round(float(s.strip()) * factor, 6)
 
 
+def parse_memory_report(output):
+    """Wyłuskaj z wyjścia builda tabelkę 'Memory region' (podsumowanie
+    zajętości FLASH/RAM z linkera) i sformatuj ją jako tabelę Markdown –
+    gotową do wklejenia np. do PR-a czy notatki. Zwraca tekst tabeli albo
+    None, gdy w wyjściu jej nie ma (np. przy flashu, nie buildzie)."""
+    lines = output.splitlines() if isinstance(output, str) else list(output)
+    start = next((i for i, ln in enumerate(lines)
+                  if "Memory region" in ln and "Used Size" in ln), None)
+    if start is None:
+        return None
+    # Wiersz: 'NAZWA:  <liczba> <jedn>B  <liczba> <jedn>B  <proc>%'
+    # (rozmiary mają spację między liczbą a jednostką, więc łapiemy je
+    # regexem zamiast dzielić po białych znakach).
+    row_re = re.compile(r"^\s*(?P<region>\w[\w.]*)\s*:\s+"
+                        r"(?P<used>[\d,]+\s*[KMGT]?B)\s+"
+                        r"(?P<size>[\d,]+\s*[KMGT]?B)\s+"
+                        r"(?P<pct>[\d.]+\s*%)\s*$")
+
+    def norm(s):
+        return re.sub(r"\s+", " ", s).strip()
+
+    rows = []
+    for ln in lines[start + 1:]:
+        m = row_re.match(ln)
+        if m:
+            rows.append((m["region"], norm(m["used"]), norm(m["size"]),
+                         norm(m["pct"])))
+        elif rows or ln.strip():
+            break  # koniec tabeli (albo zaraz po nagłówku nie ma wierszy)
+    if not rows:
+        return None
+    out = ["| Memory region | Used Size | Region Size | %age Used |",
+           "| --- | --- | --- | --- |"]
+    out += [f"| {r} | {u} | {s} | {p} |" for r, u, s, p in rows]
+    return "\n".join(out)
+
+
 def measure_instructions(scen, voltage, settle_s):
     """Tekst instrukcji pomiaru – wspólny dla CLI i TUI."""
     text = (" 1. ODŁĄCZ przewód SWD/J-Link (podłączony debugger dodaje prąd!).\n"
