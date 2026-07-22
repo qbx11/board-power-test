@@ -477,12 +477,15 @@ class TuiRunTests(TuiHarness):
             self.assertIn("| RAM | 25696 B | 188 KB | 13.35% |", joined)
 
     async def test_kopiowanie_logu_budowania(self):
-        # Klawisz C kopiuje pełny zapis przebiegu (komendy + wyjście) do
-        # schowka – łącznie z wyjściem builda i tabelką pamięci.
+        # Przycisk "Kopiuj log budowania" kopiuje pełny zapis przebiegu
+        # (komendy + wyjście + tabelka pamięci) do systemowego schowka.
+        captured = []
+        orig = tui.core.copy_to_clipboard
+        tui.core.copy_to_clipboard = lambda text: (captured.append(text)
+                                                   or "pbcopy")
+        self.addCleanup(setattr, tui.core, "copy_to_clipboard", orig)
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
-            copied = []
-            app.copy_to_clipboard = lambda text: copied.append(text)
             await self.start_run(pilot, ["zrodlowy"])
             await self.wait_until(
                 pilot,
@@ -495,11 +498,12 @@ class TuiRunTests(TuiHarness):
                 pilot,
                 lambda a: any("west build" in l for l in run_screen.transcript),
                 msg="log budowania")
-            run_screen.action_copy_log()
+            self.assertTrue(run_screen.query("#copy_log"))   # jest przycisk
+            run_screen._copy_log()
             await pilot.pause()
-            self.assertTrue(copied)
-            self.assertIn("west build", copied[0])
-            self.assertIn("Memory region", copied[0])
+            self.assertTrue(captured)
+            self.assertIn("west build", captured[0])
+            self.assertIn("Memory region", captured[0])
 
     async def test_swd_reminder_domyslnie_pokazywany(self):
         # Domyślnie (checkbox zaznaczony) przed pomiarem pojawia się

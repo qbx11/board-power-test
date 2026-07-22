@@ -666,6 +666,36 @@ def parse_memory_report(output):
     return "\n".join(out)
 
 
+def copy_to_clipboard(text):
+    """Skopiuj tekst do SYSTEMOWEGO schowka lokalnym narzędziem: pbcopy
+    (macOS), wl-copy/xclip/xsel (Linux). Zwraca nazwę użytego narzędzia
+    albo None, gdy żadnego nie ma. Pewniejsze niż OSC 52 (sekwencja, której
+    część terminali – m.in. macOS Terminal.app – nie obsługuje)."""
+    if sys.platform == "darwin":
+        tools = [["pbcopy"]]
+    else:
+        tools = [["wl-copy"], ["xclip", "-selection", "clipboard"],
+                 ["xsel", "--clipboard", "--input"]]
+    for tool in tools:
+        if shutil.which(tool[0]) is None:
+            continue
+        try:
+            subprocess.run(tool, input=text, text=True, check=True)
+            return tool[0]
+        except (OSError, subprocess.CalledProcessError):
+            continue
+    return None
+
+
+def save_text_log(text, name="ostatni-build.log"):
+    """Zapisz tekst do reports/<name> i zwróć ścieżkę względną do repo –
+    fallback, gdy schowka nie ma (log i tak zostaje do skopiowania z pliku)."""
+    path = CSV_PATH.parent / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path.relative_to(ROOT)
+
+
 def measure_instructions(scen, voltage, settle_s):
     """Tekst instrukcji pomiaru – wspólny dla CLI i TUI."""
     text = (" 1. ODŁĄCZ przewód SWD/J-Link (podłączony debugger dodaje prąd!).\n"

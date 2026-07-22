@@ -100,6 +100,18 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(core.parse_memory_report(
             "flashing...\nApplication programmed\nDone\n"))
 
+    def test_copy_to_clipboard_bez_narzedzia(self):
+        # Gdy w PATH nie ma pbcopy/xclip/... -> None (wołający robi fallback).
+        from unittest import mock
+        with mock.patch("power_test.shutil.which", return_value=None):
+            self.assertIsNone(core.copy_to_clipboard("cokolwiek"))
+
+    def test_save_text_log_pisze_plik(self):
+        rel = core.save_text_log("linia1\nlinia2", name="test-build.log")
+        path = core.ROOT / rel
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_text(encoding="utf-8"), "linia1\nlinia2")
+
     def test_flash_cmd_hex_nrfutil(self):
         # Domyślnie erase + reset: nrfutil dostaje oba w jednym --options.
         cmd = core.flash_cmd_for(self.scenarios["hexowy"], None,

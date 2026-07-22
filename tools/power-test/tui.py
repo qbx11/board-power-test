@@ -43,8 +43,8 @@ LOGO = """\
 
   ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗████████╗███████╗
  ██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝╚══██╔══╝██╔════╝
-  ██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗
-  ██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝
+ ██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗
+ ██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝
  ╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║      ██║   ███████╗
   ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝      ╚═╝   ╚══════╝
 
@@ -401,8 +401,7 @@ class RunScreen(Screen):
     Każda komenda to zwijana sekcja: tytuł = preview, rozwija się
     klikiem albo automatycznie przy błędzie."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć"),
-                ("c", "copy_log", "Kopiuj log budowania")]
+    BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
 
     def __init__(self, prof_name, profile, names, sample, pristine=False,
                  reset=True, swd_reminder=True):
@@ -419,17 +418,31 @@ class RunScreen(Screen):
     def compose(self):
         yield Static("", id="status")
         yield VerticalScroll(id="cmds")
-        yield Static("Esc — przerwij i wróć   ·   C — kopiuj log budowania",
-                     id="hint")
+        with Horizontal(id="run-actions"):
+            yield Button("Kopiuj log budowania", id="copy_log")
+        yield Static("Esc — przerwij i wróć   ·   zaznacz tekst i skopiuj "
+                     "(macOS: ⌥+przeciągnij, potem ⌘C)", id="hint")
 
-    def action_copy_log(self):
+    def on_button_pressed(self, event):
+        if event.button.id == "copy_log":
+            self._copy_log()
+
+    def _copy_log(self):
+        """Kopiuj pełny zapis przebiegu do schowka. Najpierw lokalne
+        narzędzie (pbcopy itd. – pewne), a niezależnie OSC 52 dla terminali,
+        które je wspierają. Gdy schowka brak – zapis do pliku i ścieżka."""
         text = "\n".join(self.transcript).strip()
         if not text:
             self.app.notify("Nie ma jeszcze logów do skopiowania.",
                             severity="warning")
             return
-        self.app.copy_to_clipboard(text)
-        self.app.notify("Skopiowano log budowania do schowka.")
+        self.app.copy_to_clipboard(text)          # OSC 52 (gdzie działa)
+        tool = core.copy_to_clipboard(text)       # systemowy schowek (pewne)
+        if tool:
+            self.app.notify(f"Skopiowano log budowania do schowka ({tool}).")
+        else:
+            path = core.save_text_log(text)
+            self.app.notify(f"Brak narzędzia schowka — zapisano log do {path}.")
 
     def on_mount(self):
         self.flow()
@@ -741,6 +754,8 @@ class PowerTestApp(App):
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
+    #run-actions { height: auto; padding: 0 1; dock: bottom; }
+    #run-actions Button { min-width: 0; }
     #hint { background: transparent; color: #777777; padding: 0 1;
             height: 1; dock: bottom; }
     #cmds { padding: 0 1; }
