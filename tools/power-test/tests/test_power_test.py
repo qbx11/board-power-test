@@ -14,10 +14,11 @@ from common import FakeEnv, core
 
 
 def run_args(scenarios, dry_run=True, sample=None, no_erase=False,
-             no_reset=False, pristine=False):
+             no_reset=False, no_swd_reminder=False, pristine=False):
     return argparse.Namespace(scenarios=scenarios, all=False, profile=None,
                               sample=sample, no_erase=no_erase,
-                              no_reset=no_reset, dry_run=dry_run,
+                              no_reset=no_reset,
+                              no_swd_reminder=no_swd_reminder, dry_run=dry_run,
                               pristine=pristine)
 
 

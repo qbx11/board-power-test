@@ -592,9 +592,11 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
         return
 
     # --- 4. Twarde potwierdzenie odłączenia SWD (bez tego pomiar
-    #        minimum jest śmieciem – wymagamy wpisania 'tak') ---
-    while ask("Potwierdź, że przewód SWD/J-Link jest ODŁĄCZONY (wpisz 'tak'): ").lower() != "tak":
-        pass
+    #        minimum jest śmieciem – wymagamy wpisania 'tak'). Można je
+    #        pominąć (--no-swd-reminder), gdy pomiar idzie bez programatora. ---
+    if not args.no_swd_reminder:
+        while ask("Potwierdź, że przewód SWD/J-Link jest ODŁĄCZONY (wpisz 'tak'): ").lower() != "tak":
+            pass
 
     # --- 5. Wynik z Power Profilera -> dziennik CSV ---
     current = None
@@ -758,7 +760,8 @@ def cmd_interactive():
     print(f"\nDo zrobienia: {', '.join(chosen)}  [profil: {prof_name}]")
     cmd_run(argparse.Namespace(scenarios=chosen, all=False, profile=prof_name,
                                sample=None, no_erase=False, no_reset=False,
-                               dry_run=False, pristine=False))
+                               no_swd_reminder=False, dry_run=False,
+                               pristine=False))
 
 
 def main():
@@ -798,6 +801,10 @@ def main():
                      help="flash bez wymuszonego resetu (domyślnie po wgraniu "
                           "resetujemy płytkę przez J-Link, żeby firmware "
                           "wystartował od razu)")
+    run.add_argument("--no-swd-reminder", action="store_true",
+                     help="pomiń przypomnienie o odpięciu programatora "
+                          "(SWD/J-Link) przed pomiarem – gdy mierzysz bez "
+                          "podłączonego debuggera")
     run.add_argument("--pristine", action="store_true",
                      help="wymuś czysty (pełny) build zamiast przyrostowego "
                           "(domyślnie west -p auto: buduje tylko zmiany)")
