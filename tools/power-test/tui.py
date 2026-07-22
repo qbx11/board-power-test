@@ -448,6 +448,10 @@ class RunScreen(Screen):
             raise
         finally:
             spinner.stop()
+            # Narzędzia flashujące (J-Link/nrfutil) potrafią pisać wprost
+            # do /dev/tty i zresetować tryb myszy – odnów go, zanim pojawi
+            # się kolejny klikalny dialog (SWD/pomiar).
+            self.app._reassert_mouse()
         if rc != 0:
             section.title = f"✗ {title} — kod {rc}"
             section.collapsed = False
@@ -742,6 +746,30 @@ class PowerTestApp(App):
     #browse-tree > .tree--highlight { text-style: none; }
     #browse-tree > .tree--highlight-line { background: transparent; }
     """
+
+    def _reassert_mouse(self):
+        """Ponownie włącz w terminalu raportowanie myszy (sekwencje
+        ?1000/1003/1015/1006h). Textual zapisuje je RAZ przy starcie i
+        odnawia tylko przy SIGTSTP/SIGCONT – nie przy zwykłym odzyskaniu
+        fokusu okna. Na Linuksie przy kilku otwartych oknach terminala
+        tryb myszy bywa gubiony: przełączanie fokusu między oknami albo
+        narzędzie piszące wprost do /dev/tty (J-Link/nrfutil) potrafi go
+        zresetować i wtedy aplikacja przestaje reagować na kliknięcia aż
+        do restartu. Ponowny zapis jest idempotentny (gdy tryb i tak jest
+        włączony – nic nie psuje), więc wołamy go po powrocie fokusu."""
+        driver = getattr(self, "_driver", None)
+        enable = getattr(driver, "_enable_mouse_support", None)
+        if enable is not None:
+            try:
+                enable()
+            except Exception:
+                pass
+
+    def on_app_focus(self, event):
+        # Okno odzyskało fokus (np. powrót z innego okna terminala) –
+        # odnów tryb myszy, żeby kliknięcia znów działały. Uzupełnia
+        # wewnętrzny handler Textuala (oba się wywołują, patrz MRO).
+        self._reassert_mouse()
 
     def __init__(self):
         super().__init__()
