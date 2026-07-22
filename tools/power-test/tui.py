@@ -658,7 +658,7 @@ class PowerTestApp(App):
     .scen-arrow:hover { color: $text; }
     .scen-del { width: 3; color: #666666; padding: 0 0 0 1; }
     .scen-del:hover { color: $text; }
-    #pristine { border: none; background: transparent; padding: 0;
+    #pristine, #reset { border: none; background: transparent; padding: 0;
                 height: 1; margin-top: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
     .scen-desc.shown { display: block; }
@@ -775,8 +775,8 @@ class PowerTestApp(App):
             yield Input(placeholder="np. BTZ #2", id="sample")
             yield Checkbox("Wymuś pełny rebuild (gotowe buildy są "
                            "normalnie pomijane)", value=False, id="pristine")
-            yield Checkbox("Zresetuj płytkę po wgraniu (J-Link) — firmware "
-                           "startuje od razu", value=True, id="reset")
+            yield Checkbox("Zresetuj płytkę po wgraniu (J-Link)",
+                           value=True, id="reset")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
