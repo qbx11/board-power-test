@@ -5,6 +5,10 @@ komenda buduje czysty obraz pomiarowy, wgrywa go i prowadzi przez pomiar
 w nRF Connect Power Profiler. **Pomiar wykonujesz w Power Profilerze** — narzędzie
 zapisuje odczyt do wspólnego dziennika `reports/pomiary.csv`.
 
+Ma też **tryb autonomiczny**: wykonuje cały plan (kolejność kodów, czasy,
+warunki startu) bez udziału człowieka — sam zasila płytkę z PPK2, mierzy
+prąd i rysuje wykres w osobnym oknie. Patrz [Tryb autonomiczny](#tryb-autonomiczny).
+
 ## Instalacja
 
 ```sh
@@ -138,6 +142,75 @@ ukośniki/myślniki zamień na podkreślenia — wtedy Zephyr aplikuje go automa
 Wzorzec regionu retencji jest w `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`
 (dostosuj adresy do mapy RAM swojej płytki). Pomiar na nowej płytce:
 `board-power-test run reset_only -p mojaplytka`.
+
+## Tryb autonomiczny
+
+Zamiast ręcznego pomiaru w Power Profilerze narzędzie potrafi **samo**
+zbudować i wgrać kolejne kody, zasilić płytkę z PPK2 (tryb source meter),
+zmierzyć pobór prądu przez zadany czas i narysować wykres. Można zostawić
+płytkę na całą noc.
+
+W interfejsie przełącznik trybów na górze okna zmienia **Pomiar ręczny** na
+**Tryb autonomiczny**. Wtedy zaznaczasz scenariusze do przetestowania i ustawiasz
+pomiar wprost w oknie (czas na krok, warunek startu, konsola RTT, zapis danych);
+⚙ przy scenariuszu nadpisuje ustawienia pojedynczego kroku (czas, napięcie,
+trigger, flagi kompilacji). Kroki wykonują się w kolejności z listy.
+
+Z CLI (albo do powtarzalnych, wersjonowanych przebiegów) ten sam pomiar opisuje
+**plan** w `plans/<nazwa>.toml` (wzór: `plans/nocny.example.toml`). Plan to
+uporządkowana lista kroków; każdy wskazuje scenariusz ze `scenarios.toml`
+i mówi, jak go zmierzyć:
+
+```toml
+[plan]
+name  = "nocny"
+board = "btz"
+
+[[plan.steps]]
+scenario = "reset_only"
+duration = "8h"                             # ile mierzyć: "45s"/"20m"/"8h"/sekundy
+voltage  = "3.0"                            # napięcie źródła PPK2
+trigger  = { type = "delay", seconds = 20 } # start pomiaru 20 s po flashu…
+rtt      = "off"
+storage  = { mode = "downsampled", window_ms = 1 }
+
+[[plan.steps]]
+scenario = "mesh-reliability-tester"
+duration = "2h"
+trigger  = { type = "rtt", pattern = "Friend established", timeout = "180s" }  # …albo po logu RTT
+rtt      = "continuous"                      # etykiety z logów RTT na wykresie
+  [[plan.steps.labels]]
+  pattern = "Friend Poll sent"
+  label   = "Friend Poll"
+```
+
+Uruchomienie planu z CLI:
+
+```sh
+board-power-test autorun plans/nocny.toml -s "BTZ #2"
+board-power-test autorun plans/nocny.toml --dry-run   # pokaż kroki bez sprzętu
+```
+
+Każdy pomiar zapisuje **sesję** w `reports/sessions/<przebieg>/<czas>_<scenariusz>/`
+(dane wykresu, metadane, etykiety) i wiersz podsumowania (średnia/min/max, czas,
+ścieżka sesji) w `reports/pomiary.csv`.
+
+### Okno wykresu
+
+```sh
+board-power-test viewer                       # biblioteka historii
+board-power-test viewer reports/sessions/…/…  # konkretna sesja
+```
+
+Osobne okno (PyQt6 + pyqtgraph, doinstalowuje się przy pierwszym uruchomieniu):
+podgląd na żywo, zoom z minimapą całości, statystyki zaznaczenia (ładunek, estymata
+baterii), etykiety automatyczne (z RTT) i ręczne (klik na wykresie), porównywanie
+wielu sesji, eksport PNG/CSV.
+
+**Tryby RTT** (pole `rtt`): `off` — J-Link odpięty, najniższy szum (do minimów snu);
+`trigger` — podłączony tylko do złapania wzorca startu; `continuous` — podłączony
+przez cały pomiar (etykiety, ale prąd z narzutem debuggera). Szczegóły w komentarzach
+`plans/nocny.example.toml`.
 
 ## Testy
 
