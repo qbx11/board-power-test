@@ -417,9 +417,11 @@ class RunScreen(Screen):
 
     def compose(self):
         yield Static("", id="status")
+        # Nagłówek okna logów: przycisk kopiowania tuż nad nimi, po prawej.
+        with Horizontal(id="cmds-head"):
+            yield Static("Logi budowania", id="cmds-title")
+            yield Button("Kopiuj log", id="copy_log")
         yield VerticalScroll(id="cmds")
-        with Horizontal(id="run-actions"):
-            yield Button("Kopiuj log budowania", id="copy_log")
         yield Static("Esc — przerwij i wróć   ·   zaznacz tekst i skopiuj "
                      "(macOS: ⌥+przeciągnij, potem ⌘C)", id="hint")
 
@@ -754,8 +756,10 @@ class PowerTestApp(App):
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
-    #run-actions { height: auto; padding: 0 1; dock: bottom; }
-    #run-actions Button { min-width: 0; }
+    #cmds-head { height: auto; padding: 0 1; margin-top: 1; }
+    #cmds-title { width: 1fr; height: 3; color: #777777;
+                  content-align: left middle; padding: 0 1; }
+    #cmds-head Button { min-width: 0; }
     #hint { background: transparent; color: #777777; padding: 0 1;
             height: 1; dock: bottom; }
     #cmds { padding: 0 1; }
