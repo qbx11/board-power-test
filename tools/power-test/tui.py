@@ -35,18 +35,21 @@ from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
 
 import power_test as core
 
-# Logo GoodByte (pixelart półblokami, wygenerowane z logo firmowego) –
-# nagłówek ekranu głównego. Monochromatyczne jak reszta interfejsu.
+# Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (figlet
+# „ANSI Shadow”), monochromatyczna jak reszta interfejsu; pod spodem
+# podpis narzędzia. Statyczny tekst, bez zależności runtime.
 LOGO = """\
-╭─                                                                ─╮
-        ▄▄▄▄▄                  ▄  ▄▄▄▄
-       █▀▀  ▀                  █  █▀ ▀█▄      ██
-      ▄█   ▄  ▄█▀▀█  █▀▀█▄ ▄█▀██  █▄▄▄█ █▄  █▀██▀ ▄▀▀█▄
-      ▀█  ▀▀█ █   ████   ███   █  █▀  ▀█ █▄██ ██ ██▄▄██
-       ▀█▄▄▄█ ▀█▄▄█▀ █▄▄██ █▄▄▄█  █▄▄▄█▀  ██  ██▄ █▄▄▄
-         ▀▀▀    ▀▀    ▀▀    ▀▀▀▀  ▀▀▀▀    █    ▀▀  ▀▀▀
-[#888888]               e m b e d d e d   s y s t e m s[/]
-╰─                                                                ─╯"""
+╭──────────────────────────────────────────────────────────────────────╮
+
+  ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗████████╗███████╗
+ ██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝╚══██╔══╝██╔════╝
+ ██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗
+ ██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝
+ ╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║      ██║   ███████╗
+  ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝      ╚═╝   ╚══════╝
+
+[#888888]                    b o a r d   p o w e r   t e s t[/]
+╰──────────────────────────────────────────────────────────────────────╯"""
 
 
 def _stream(cmd, cwd, on_line, handle=None):
@@ -88,6 +91,12 @@ def _display_path(path):
 def _label(name, item):
     """Nazwa do wyświetlenia: `label` z manifestu, inaczej klucz."""
     return item.get("label", name)
+
+
+class Check(Checkbox):
+    """Checkbox z ptaszkiem (✓) zamiast domyślnego X w stanie zaznaczonym."""
+
+    BUTTON_INNER = "✓"
 
 
 class DescArrow(Static):
@@ -402,11 +411,40 @@ class RunScreen(Screen):
         self.pristine = pristine
         self.reset = reset
         self.swd_reminder = swd_reminder
+        # Pełny zapis przebiegu (komendy + ich wyjście) do skopiowania
+        # klawiszem C – przydatne zwłaszcza, gdy build padnie.
+        self.transcript = []
 
     def compose(self):
         yield Static("", id="status")
+        # Nagłówek okna logów: przycisk kopiowania tuż nad nimi, po prawej.
+        with Horizontal(id="cmds-head"):
+            yield Static("Logi budowania", id="cmds-title")
+            yield Button("Kopiuj log", id="copy_log")
         yield VerticalScroll(id="cmds")
-        yield Static("Esc — przerwij i wróć", id="hint")
+        yield Static("Esc — przerwij i wróć   ·   zaznacz tekst i skopiuj "
+                     "(macOS: ⌥+przeciągnij, potem ⌘C)", id="hint")
+
+    def on_button_pressed(self, event):
+        if event.button.id == "copy_log":
+            self._copy_log()
+
+    def _copy_log(self):
+        """Kopiuj pełny zapis przebiegu do schowka. Najpierw lokalne
+        narzędzie (pbcopy itd. – pewne), a niezależnie OSC 52 dla terminali,
+        które je wspierają. Gdy schowka brak – zapis do pliku i ścieżka."""
+        text = "\n".join(self.transcript).strip()
+        if not text:
+            self.app.notify("Nie ma jeszcze logów do skopiowania.",
+                            severity="warning")
+            return
+        self.app.copy_to_clipboard(text)          # OSC 52 (gdzie działa)
+        tool = core.copy_to_clipboard(text)       # systemowy schowek (pewne)
+        if tool:
+            self.app.notify(f"Skopiowano log budowania do schowka ({tool}).")
+        else:
+            path = core.save_text_log(text)
+            self.app.notify(f"Brak narzędzia schowka — zapisano log do {path}.")
 
     def on_mount(self):
         self.flow()
@@ -426,6 +464,7 @@ class RunScreen(Screen):
         await cmds.mount(section)
         cmds.scroll_end(animate=False)
         out.write_line(f"$ {shlex.join(cmd)}")
+        self.transcript += ["", f"# {title}", f"$ {shlex.join(cmd)}"]
 
         frame = {"i": 0}
 
@@ -435,10 +474,17 @@ class RunScreen(Screen):
 
         spinner = self.set_interval(1 / 8, tick)
         handle = {}
+        lines = []
+
+        def on_line(line):
+            lines.append(line)
+            self.transcript.append(line)
+            out.write_line(line)
+
         try:
             rc = await asyncio.to_thread(
                 _stream, cmd, cwd,
-                lambda line: self.app.call_from_thread(out.write_line, line),
+                lambda line: self.app.call_from_thread(on_line, line),
                 handle)
         except asyncio.CancelledError:
             # Esc w trakcie: ubij proces west/nrfutil, żeby nie wisiał
@@ -458,6 +504,15 @@ class RunScreen(Screen):
             section.collapsed = False
             raise RuntimeError(f"'{title}' zakończone błędem (kod {rc})")
         section.title = f"✓ {title}"
+
+        # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown
+        # (od razu do skopiowania). Przy flashu parser zwraca None.
+        report = core.parse_memory_report(lines)
+        if report is not None:
+            box = Static(report, classes="mem-report", markup=False)
+            box.border_title = "pamięć (Markdown — skopiuj)"
+            await self.query_one("#cmds").mount(box)
+            self.query_one("#cmds").scroll_end(animate=False)
 
     @work
     async def flow(self):
@@ -624,7 +679,9 @@ class RunScreen(Screen):
                 self.app.pop_screen()
         except (SystemExit, RuntimeError) as e:
             msg = str(e) or "przerwano"
-            status.update(f"BŁĄD: {msg}")
+            if not msg.startswith("BŁĄD"):
+                msg = f"BŁĄD: {msg}"
+            status.update(msg)
             self.note("(Esc = powrót do ustawień)")
 
 
@@ -699,6 +756,10 @@ class PowerTestApp(App):
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
+    #cmds-head { height: auto; padding: 0 1; margin-top: 1; }
+    #cmds-title { width: 1fr; height: 3; color: #777777;
+                  content-align: left middle; padding: 0 1; }
+    #cmds-head Button { min-width: 0; }
     #hint { background: transparent; color: #777777; padding: 0 1;
             height: 1; dock: bottom; }
     #cmds { padding: 0 1; }
@@ -708,6 +769,12 @@ class PowerTestApp(App):
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
     .cmd-log { height: 14; border: round #555555; background: transparent;
                margin: 0 1 1 2; }
+    /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
+       skopiowania. */
+    .mem-report { height: auto; width: auto; max-width: 100%;
+                  border: round #555555; border-title-color: #888888;
+                  background: transparent; color: $text;
+                  padding: 0 1; margin: 0 1 1 2; }
 
     /* Dymki (notify): monochromatycznie jak dialogi i bez sztywnej
        szerokości 60 – przy małym oknie dymek się dopasowuje zamiast
@@ -804,12 +871,12 @@ class PowerTestApp(App):
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
-            yield Checkbox("Wymuś pełny rebuild (gotowe buildy są "
-                           "normalnie pomijane)", value=False, id="pristine")
-            yield Checkbox("Zresetuj płytkę po wgraniu (J-Link)",
-                           value=True, id="reset")
-            yield Checkbox("Przypomnij o odpięciu programatora (SWD/J-Link)",
-                           value=True, id="swd_reminder")
+            yield Check("Wymuś pełny rebuild (gotowe buildy są "
+                        "normalnie pomijane)", value=False, id="pristine")
+            yield Check("Zresetuj płytkę po wgraniu (J-Link)",
+                        value=True, id="reset")
+            yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
+                        value=True, id="swd_reminder")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
                 yield Button("Zaznacz wszystkie", id="select_all")
@@ -825,8 +892,8 @@ class PowerTestApp(App):
             body += f"\nUwaga: {s['note']}"
         return Vertical(
             Horizontal(
-                Checkbox(_label(n, s), value=value, classes="scen-check",
-                         id=f"check_{n}"),
+                Check(_label(n, s), value=value, classes="scen-check",
+                      id=f"check_{n}"),
                 DescArrow(f"desc_{n}", id=f"arrow_{n}"),
                 DeleteCross(n, id=f"del_{n}"),
                 classes="scenario-head"),
