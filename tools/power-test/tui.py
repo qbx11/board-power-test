@@ -268,8 +268,8 @@ class FirmwareTree(DirectoryTree):
     to szum przy wskazywaniu firmware'u), bez plików ukrytych.
     Ikony znakowe zamiast emoji – spójnie z monochromatycznym UI."""
 
-    ICON_NODE = "▸ "
-    ICON_NODE_EXPANDED = "▾ "
+    ICON_NODE = "▶ "
+    ICON_NODE_EXPANDED = "▼ "
     ICON_FILE = "· "
 
     def filter_paths(self, paths):
@@ -742,7 +742,7 @@ class MeasurementCard(Vertical):
         c = self._config
         opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
         with Horizontal(classes="card-head"):
-            yield CardTitle(f"▾ Pomiar {self.number}", classes="card-title")
+            yield CardTitle(f"▼ Pomiar {self.number}", classes="card-title")
             yield CardDelete(self.uid)
         # Ciało karty (chowane przy zwinięciu). Selecty MUSZĄ powstać jako
         # widoczne – Select zamontowany od razu jako display:none nie tworzy
@@ -859,18 +859,18 @@ class MeasurementCard(Vertical):
     def _refresh_title(self):
         title = self.query_one(".card-title", CardTitle)
         if not self.collapsed:
-            title.update(f"▾ Pomiar {self.number}")
+            title.update(f"▼ Pomiar {self.number}")
             return
         scen = self._scenario()
         if not scen:
-            title.update(f"▸ Pomiar {self.number} — (wybierz scenariusz)")
+            title.update(f"▶ Pomiar {self.number} — (wybierz scenariusz)")
             return
         label = _label(scen, self.scenarios.get(scen, {}))
         # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
         dupes = sum(1 for card in self.app.query(MeasurementCard)
                     if card._scenario() == scen)
         suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
-        title.update(f"▸ {label}{suffix}")
+        title.update(f"▶ {label}{suffix}")
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
