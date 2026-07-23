@@ -262,6 +262,47 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].trigger.seconds, 0)  # start od razu
             self.assertEqual(plan.steps[0].sample_rate, 100000)  # domyślnie max
 
+    async def test_serial_monitor_in_plan(self):
+        # Monitor dongla: port -> monitor_port, a 'start po logu' -> trigger
+        # serial z fragmentem. Priorytet nad delay.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            card.query_one(".card-serial-on", tui.Check).value = True
+            card.query_one(".card-serial-port", Input).value = "/dev/ttyACM1"
+            card.query_one(".card-serial-trig-on", tui.Check).value = True
+            card.query_one(".card-serial-pattern", Input).value = \
+                "Friendship z LPN nawiazany"
+            await pilot.pause()
+            plan = app._build_auto_plan("btz")
+            self.assertEqual(plan.steps[0].monitor_port, "/dev/ttyACM1")
+            self.assertEqual(plan.steps[0].trigger.type, "serial")
+            self.assertEqual(plan.steps[0].trigger.pattern,
+                             "Friendship z LPN nawiazany")
+
+    async def test_serial_fields_apply_to_all(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second = list(app.query(tui.MeasurementCard))
+            first.query_one(".card-serial-on", tui.Check).value = True
+            first.query_one(".card-serial-port", Input).value = "/dev/ttyACM2"
+            await pilot.pause()
+            app._apply_to_all(first.query_one(".card-apply", tui.Button))
+            await pilot.pause()
+            self.assertTrue(
+                second.query_one(".card-serial-on", tui.Check).value)
+            self.assertEqual(
+                second.query_one(".card-serial-port", Input).value,
+                "/dev/ttyACM2")
+
     async def test_sample_rate_in_plan(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 60)) as pilot:

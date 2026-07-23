@@ -107,6 +107,7 @@ class PlanStep:
     voltage: str = ""            # puste = z manifestu (scenariusz/defaults)
     trigger: Trigger = field(default_factory=Trigger)
     rtt: str = "off"
+    monitor_port: str = ""       # dongiel serial (logi); puste = brak monitora
     sample_rate: int = 100000    # próbki/s (decymacja z 100 kS/s PPK2)
     storage: Storage = field(default_factory=Storage)
     build_extra_args: list = field(default_factory=list)
@@ -150,6 +151,7 @@ def _step_from_toml(raw, idx):
         voltage=str(raw.get("voltage", "")),
         trigger=trigger,
         rtt=raw.get("rtt", "off"),
+        monitor_port=str(raw.get("monitor_port", "")),
         sample_rate=int(raw.get("sample_rate", 100000)),
         storage=storage,
         build_extra_args=list(raw.get("build_extra_args", [])),
@@ -229,9 +231,16 @@ def validate_plan(plan, manifest):
         if step.sample_rate not in SAMPLE_RATES:
             errors.append(f"{who}: sample_rate = {step.sample_rate} – "
                           "dozwolone: " + ", ".join(map(str, SAMPLE_RATES)))
-        if step.trigger.type not in ("delay", "rtt"):
+        if step.trigger.type not in ("delay", "rtt", "serial"):
             errors.append(f"{who}: trigger.type = '{step.trigger.type}' – "
-                          "dozwolone: delay | rtt")
+                          "dozwolone: delay | rtt | serial")
+        if step.trigger.type == "serial":
+            if not step.trigger.pattern:
+                errors.append(f"{who}: trigger serial wymaga pola 'pattern' "
+                              "(fragment logu)")
+            if not step.monitor_port:
+                errors.append(f"{who}: trigger serial wymaga 'monitor_port' "
+                              "(port dongla, np. /dev/ttyACM0)")
         if step.trigger.type == "rtt":
             if not step.trigger.pattern:
                 errors.append(f"{who}: trigger rtt wymaga pola 'pattern'")

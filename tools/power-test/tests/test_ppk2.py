@@ -20,12 +20,17 @@ class FakePPK2:
         self.voltages = []
         self.dut = []
         self.ser = _FakeSerial()
+        self.remainder = {"sequence": b"", "len": 0}
+        self.started = False
 
     def set_source_voltage(self, mV):
         self.voltages.append(mV)
 
     def toggle_DUT_power(self, state):
         self.dut.append(state)
+
+    def start_measuring(self):
+        self.started = True
 
     def stop_measuring(self):
         pass
@@ -34,6 +39,10 @@ class FakePPK2:
 class _FakeSerial:
     def __init__(self):
         self.closed = False
+        self.flushed = False
+
+    def reset_input_buffer(self):
+        self.flushed = True
 
     def close(self):
         self.closed = True
@@ -73,6 +82,19 @@ class VoltageGuardTest(unittest.TestCase):
             s.set_voltage(5000)                       # groźne odrzucone
         # do urządzenia NIE poszła groźna komenda
         self.assertEqual(s._ppk2.voltages, [3300])
+
+    def test_start_realigns_stream(self):
+        # start() musi wyczyścić bufor portu i wyzerować `remainder`, żeby
+        # próbki 4-bajtowe nie były przesunięte (to dawało błędne odczyty).
+        s = ppk2.Ppk2ApiSampler()
+        fake = FakePPK2()
+        fake.remainder = {"sequence": b"xy", "len": 2}   # zaległa reszta
+        s._ppk2 = fake
+        s.start()
+        self.assertTrue(fake.ser.flushed)
+        self.assertEqual(fake.remainder, {"sequence": b"", "len": 0})
+        self.assertTrue(fake.started)
+        self.assertTrue(s._measuring)
 
     def test_close_cuts_power_and_frees_port(self):
         s = ppk2.Ppk2ApiSampler()

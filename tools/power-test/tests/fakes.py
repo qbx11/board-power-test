@@ -115,3 +115,9 @@ class FakeRttReader:
         self.attached = False
         self.detached = True
         self.log.append("detach")
+
+
+class FakeSerialReader(FakeRttReader):
+    """Monitor dongla bez sprzętu – ten sam interfejs co FakeRttReader
+    (attach/readline/detach ze skryptem (opóźnienie_s, tekst))."""
+    pass

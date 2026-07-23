@@ -129,6 +129,24 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(
             planmod.validate_plan(self._plan(sample_rate=1000), MANIFEST), [])
 
+    def test_serial_trigger_needs_port_and_pattern(self):
+        # trigger serial bez portu i bez wzorca -> dwa błędy
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="serial", pattern=""))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("monitor_port" in e for e in errs))
+        self.assertTrue(any("pattern" in e for e in errs))
+        # z portem i fragmentem przechodzi
+        ok = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            monitor_port="/dev/ttyACM0",
+            trigger=planmod.Trigger(type="serial", pattern="Friendship"))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
+                                  MANIFEST), [])
+
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(
             scenario="reset_only", duration_s=30,

@@ -783,6 +783,22 @@ class MeasurementCard(Vertical):
                     yield Input(value=c.get("pattern", ""),
                                 placeholder="wzorzec logu RTT",
                                 classes="card-pattern")
+                # Monitor dongla (serial) – logi z osobnego urządzenia (np.
+                # węzeł Friend). Widoczny przed i podczas pomiaru; opcjonalnie
+                # startuje pomiar, gdy w logu pojawi się fragment tekstu.
+                yield Check("Monitor dongla (serial)",
+                            value=c.get("serial_on", False),
+                            classes="card-serial-on")
+                with Vertical(classes="card-serial-box"):
+                    yield Input(value=c.get("serial_port", "/dev/ttyACM0"),
+                                placeholder="/dev/ttyACM0",
+                                classes="card-serial-port")
+                    yield Check("Start pomiaru po logu (zawiera tekst)",
+                                value=c.get("serial_trig", False),
+                                classes="card-serial-trig-on")
+                    yield Input(value=c.get("serial_pattern", ""),
+                                placeholder="np. Friendship z LPN nawiazany",
+                                classes="card-serial-pattern")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
                         yield Label("Napięcie (V, 2.0–3.3):")
@@ -814,18 +830,21 @@ class MeasurementCard(Vertical):
         self._refresh_title()
 
     def on_checkbox_changed(self, event):
-        # Checkboxy karty (start-po-czasie / RTT) sterują widocznością swoich
-        # pól – nie puszczamy zdarzenia wyżej (App liczy tylko scen-check).
-        if event.control.has_class("card-delay-on") or \
-           event.control.has_class("card-rtt-on"):
-            self._sync_advanced()
-            event.stop()
+        # Checkboxy karty (start-po-czasie / RTT / monitor dongla) sterują
+        # widocznością swoich pól – nie puszczamy zdarzenia wyżej (App liczy
+        # tylko scen-check).
+        self._sync_advanced()
+        event.stop()
 
     def _sync_advanced(self):
         self.query_one(".card-delay-s").display = \
             self.query_one(".card-delay-on", Checkbox).value
         self.query_one(".card-rtt-box").display = \
             self.query_one(".card-rtt-on", Checkbox).value
+        self.query_one(".card-serial-box").display = \
+            self.query_one(".card-serial-on", Checkbox).value
+        self.query_one(".card-serial-pattern").display = \
+            self.query_one(".card-serial-trig-on", Checkbox).value
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
@@ -870,6 +889,13 @@ class MeasurementCard(Vertical):
             "rtt_on": self.query_one(".card-rtt-on", Checkbox).value,
             "rtt_mode": self.query_one(".card-rtt", Select).value,
             "pattern": self.query_one(".card-pattern", Input).value.strip(),
+            "serial_on": self.query_one(".card-serial-on", Checkbox).value,
+            "serial_port":
+                self.query_one(".card-serial-port", Input).value.strip(),
+            "serial_trig":
+                self.query_one(".card-serial-trig-on", Checkbox).value,
+            "serial_pattern":
+                self.query_one(".card-serial-pattern", Input).value.strip(),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
@@ -883,6 +909,12 @@ class MeasurementCard(Vertical):
         self.query_one(".card-rtt-on", Checkbox).value = cfg["rtt_on"]
         self.query_one(".card-rtt", Select).value = cfg["rtt_mode"]
         self.query_one(".card-pattern", Input).value = cfg["pattern"]
+        self.query_one(".card-serial-on", Checkbox).value = cfg["serial_on"]
+        self.query_one(".card-serial-port", Input).value = cfg["serial_port"]
+        self.query_one(".card-serial-trig-on", Checkbox).value = \
+            cfg["serial_trig"]
+        self.query_one(".card-serial-pattern", Input).value = \
+            cfg["serial_pattern"]
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
@@ -973,6 +1005,10 @@ class AutoRunScreen(Screen):
         yield DataTable(id="results", zebra_stripes=False,
                         cursor_type="none")
         yield VerticalScroll(id="cmds")
+        # Monitor dongla (serial) – logi widoczne przed i podczas pomiaru.
+        with Vertical(id="dongle-panel"):
+            yield Static("Monitor dongla", id="dongle-title")
+            yield Log(id="dongle-log")
         # Duże okno pomiaru POD logami build/flash.
         with Vertical(id="measure-panel"):
             yield Static("", id="measure-head")
@@ -985,9 +1021,10 @@ class AutoRunScreen(Screen):
 
     def on_mount(self):
         table = self.query_one("#results", DataTable)
-        table.add_columns("#", "Scenariusz", "Średni", "Min", "Max", "Czas")
+        table.add_columns("#", "Scenariusz", "Średni", "Max", "Czas")
         table.display = False          # pokaże się z pierwszym wynikiem
         self.query_one("#measure-panel").display = False
+        self.query_one("#dongle-panel").display = False
         self.flow()
 
     def note(self, text):
@@ -1100,6 +1137,12 @@ class AutoRunScreen(Screen):
         elif ev.kind == "session":
             # Wykres (osobne okno) chwilowo wyłączony – zajmiemy się później.
             self.live_session = ev.data.get("dir")
+        elif ev.kind == "countdown":
+            status.update(f"{ev.name} · start pomiaru za "
+                          f"[b]{self._fmt_time(ev.data.get('remaining_s', 0))}"
+                          "[/b]")
+        elif ev.kind == "monitor":
+            self._monitor_line(ev.text)
         elif ev.kind == "live":
             self._update_measure(ev)
         elif ev.kind == "paused":
@@ -1145,6 +1188,12 @@ class AutoRunScreen(Screen):
             f"[#888888]teraz {self._fmt_uA(d.get('inst_uA'))} · "
             f"próbek {d.get('samples', 0):,}[/]")
 
+    def _monitor_line(self, text):
+        panel = self.query_one("#dongle-panel")
+        if not panel.display:
+            panel.display = True
+        self.query_one("#dongle-log", Log).write_line(text)
+
     def _set_paused(self, ev, paused):
         head = self.query_one("#measure-head", Static)
         btn = self.query_one("#stop_measure", Button)
@@ -1168,10 +1217,12 @@ class AutoRunScreen(Screen):
         table.display = True
         table.add_row(str(ev.step), ev.name,
                       self._fmt_uA(d.get("avg_uA")),
-                      self._fmt_uA(d.get("min_uA")),
                       self._fmt_uA(d.get("max_uA")),
                       self._fmt_time(d.get("duration_s") or 0))
         self.query_one("#measure-panel").display = False
+        # Sprzątnij monitor dongla tego kroku (następny odsłoni się sam).
+        self.query_one("#dongle-log", Log).clear()
+        self.query_one("#dongle-panel").display = False
 
     def _finish(self, ev):
         self._done = True
@@ -1279,10 +1330,12 @@ class PowerTestApp(App):
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-delay-on, .card-rtt-on { border: none; background: transparent;
+    .card-delay-on, .card-rtt-on, .card-serial-on, .card-serial-trig-on {
+                     border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
-    .card-rtt-box { height: auto; }
+    .card-serial-port, .card-serial-pattern { width: 100%; }
+    .card-rtt-box, .card-serial-box { height: auto; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
@@ -1333,6 +1386,11 @@ class PowerTestApp(App):
                                     color: #888888; text-style: none; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
     #cmds { padding: 0 1; height: auto; max-height: 22; }
+    /* Monitor dongla (serial) – logi przed i podczas pomiaru. */
+    #dongle-panel { height: auto; }
+    #dongle-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
+    #dongle-log { height: 8; border: round #555555; background: transparent;
+                  margin: 0 1; }
     /* Duże okno pomiaru pod logami build/flash. */
     #measure-panel { height: auto; border: round #888888; margin: 1 1;
                      padding: 1 2; background: transparent; }
@@ -1722,8 +1780,9 @@ class PowerTestApp(App):
 
     def _build_auto_plan(self, prof_name):
         """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =
-        kolejność kart. Trigger: RTT 'start po logu' > 'start po czasie' >
-        od razu; przy RTT continuous wzorzec staje się auto-etykietą."""
+        kolejność kart. Trigger (priorytet): log dongla > RTT 'start po logu'
+        > 'start po czasie' > od razu; przy RTT continuous wzorzec staje się
+        auto-etykietą."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
                                   Trigger, parse_duration)
 
@@ -1741,28 +1800,31 @@ class PowerTestApp(App):
             except ValueError as e:
                 raise ValueError(f"Pomiar {card.number}: {e}")
             rtt = c["rtt_mode"] if c["rtt_on"] else "off"
+            monitor_port = c["serial_port"] if c["serial_on"] else ""
             labels = []
-            if rtt == "trigger":
+            if rtt == "continuous" and c["pattern"]:
+                labels = [LabelRule(pattern=c["pattern"],
+                                    label=c["pattern"])]
+            if c["serial_on"] and c["serial_trig"] and c["serial_pattern"]:
+                trigger = Trigger(type="serial", pattern=c["serial_pattern"],
+                                  timeout_s=180.0)
+            elif rtt == "trigger":
                 trigger = Trigger(type="rtt", pattern=c["pattern"],
                                   timeout_s=180.0)
-            else:
-                if c["delay_on"]:
-                    try:
-                        secs = parse_duration(c["delay_s"])
-                    except ValueError:
-                        raise ValueError(
-                            f"Pomiar {card.number}: start po czasie – "
-                            f"'{c['delay_s']}' nie jest czasem (np. 30s).")
-                else:
-                    secs = 0.0
+            elif c["delay_on"]:
+                try:
+                    secs = parse_duration(c["delay_s"])
+                except ValueError:
+                    raise ValueError(
+                        f"Pomiar {card.number}: start po czasie – "
+                        f"'{c['delay_s']}' nie jest czasem (np. 30s).")
                 trigger = Trigger(type="delay", seconds=secs)
-                if rtt == "continuous" and c["pattern"]:
-                    labels = [LabelRule(pattern=c["pattern"],
-                                        label=c["pattern"])]
+            else:
+                trigger = Trigger(type="delay", seconds=0.0)
             steps.append(PlanStep(
                 scenario=c["scenario"], duration_s=dur_s,
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
-                sample_rate=c["sample_rate"],
+                monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
                 labels=labels, pristine=pristine))
         return Plan(name="interfejs", board=prof_name, steps=steps)
