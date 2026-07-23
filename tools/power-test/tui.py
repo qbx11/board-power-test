@@ -1446,7 +1446,7 @@ class PowerTestApp(App):
     #dongle-log { height: 8; border: round #555555; background: transparent;
                   margin: 0 1; }
     /* Duże okno pomiaru pod logami build/flash. */
-    #measure-panel { height: auto; border: round #888888; margin: 1 1;
+    #measure-panel { height: auto; border: round #555555; margin: 1 1;
                      padding: 1 2; background: transparent; }
     #measure-head { height: 1; color: $text; }
     #measure-row { height: auto; margin-top: 1; }
