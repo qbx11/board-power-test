@@ -759,7 +759,7 @@ class MeasurementCard(Vertical):
                 sel_kw["value"] = scen0
             yield Select(opts, **sel_kw)
             yield Label("Czas pomiaru (np. 30s / 20m / 8h):")
-            yield Input(value=c.get("duration", ""), placeholder="np. 8h",
+            yield Input(value=c.get("duration", ""), placeholder="np. 20m",
                         classes="card-duration")
             with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
                              classes="card-adv"):
@@ -1790,7 +1790,7 @@ class PowerTestApp(App):
         sample = self.query_one("#sample", Input).value.strip()
         prof_name = self.query_one("#profile", Select).value
         if not sample:
-            self.notify("Podaj egzemplarz płytki (np. 'BTZ #2').",
+            self.notify("Podaj egzemplarz płytki (np. 'nRF54 #1').",
                         severity="error")
             self.query_one("#sample", Input).focus()
             return
