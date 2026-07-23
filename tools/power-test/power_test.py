@@ -106,6 +106,14 @@ def child_env():
         saved = env.pop("BPT_SAVED_" + var, None)
         if saved:
             env[var] = saved
+    # J-Link EDU/EDU Mini wymusza dialog GUI "terms of use" przy KAŻDYM
+    # połączeniu (licencja edukacyjna) – "Don't show again" go nie wyłącza
+    # (SEGGER: to zachowanie zamierzone). Bez managera okien J-Link nie
+    # pokazuje dialogów i przyjmuje domyślną opcję (auto-akceptacja), więc
+    # zdejmujemy DISPLAY/WAYLAND – west flash i nrfutil działają wtedy
+    # autonomicznie, bez ręcznego klikania.
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
     return env
 
 

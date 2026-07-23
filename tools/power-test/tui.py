@@ -991,6 +991,7 @@ class AutoRunScreen(Screen):
         self.run_dir = None
         self.live_session = None
         self._done = False
+        self._saved = False            # kliknięto "Zapisz pomiary"?
         self._n_steps = len(plan.steps)
         # Aktywna zwijana sekcja komendy (build/flash) + jej spinner.
         self._active_section = None
@@ -1004,6 +1005,10 @@ class AutoRunScreen(Screen):
         # kroku, a jego okna build/flash znikają.
         yield DataTable(id="results", zebra_stripes=False,
                         cursor_type="none")
+        # Surowe dane sesji (raw.bin/tiery) zajmują dużo miejsca, więc ich
+        # zachowanie jest opcjonalne – przycisk pod tabelą wyników pokazuje
+        # się dopiero w widoku "zakończono".
+        yield Button("Zapisz pomiary", id="save_results")
         yield VerticalScroll(id="cmds")
         # Monitor dongla (serial) – logi widoczne przed i podczas pomiaru.
         with Vertical(id="dongle-panel"):
@@ -1017,7 +1022,7 @@ class AutoRunScreen(Screen):
                 yield Static("", id="measure-remain")
             yield Static("", id="measure-inst")
             yield Button("Stop", id="stop_measure")
-        yield Static("Esc — przerwij (sesja zostaje zapisana)", id="hint")
+        yield Static("Esc — przerwij pomiar", id="hint")
 
     def on_mount(self):
         table = self.query_one("#results", DataTable)
@@ -1025,6 +1030,7 @@ class AutoRunScreen(Screen):
         table.display = False          # pokaże się z pierwszym wynikiem
         self.query_one("#measure-panel").display = False
         self.query_one("#dongle-panel").display = False
+        self.query_one("#save_results").display = False   # dopiero po planie
         self.flow()
 
     def note(self, text):
@@ -1075,7 +1081,7 @@ class AutoRunScreen(Screen):
 
     def action_cancel(self):
         if self._done:
-            self.app.pop_screen()
+            self._exit_when_done()
             return
         self.cancel.set()
         self.query_one("#status", Static).update(
@@ -1084,6 +1090,49 @@ class AutoRunScreen(Screen):
     def on_button_pressed(self, event):
         if event.button.id == "stop_measure":
             self._toggle_pause()
+        elif event.button.id == "save_results":
+            self._save_results()
+
+    # --- opcjonalny zapis surowych danych sesji ---
+
+    def _run_dir_rel(self):
+        """Ścieżka katalogu przebiegu względem repo (albo absolutna)."""
+        try:
+            return str(Path(self.run_dir).relative_to(core.ROOT))
+        except (ValueError, TypeError):
+            return str(self.run_dir)
+
+    def _save_results(self):
+        """Zachowaj surowe dane sesji tego przebiegu (domyślnie kasowane
+        przy wyjściu). Wiersze w reports/pomiary.csv i tak już są – tu tylko
+        blokujemy skasowanie ciężkich katalogów raw.bin/tiery."""
+        self._saved = True
+        btn = self.query_one("#save_results", Button)
+        btn.label = "Zapisano ✓"
+        btn.disabled = True
+        self.query_one("#status", Static).update(
+            f"Zapisano pomiary: {self._run_dir_rel()}/")
+        self.query_one("#hint", Static).update("Esc — powrót")
+
+    def _exit_when_done(self):
+        """Wyjście z widoku zakończenia. Jeśli nie zapisano, pytamy, czy
+        skasować surowe dane sesji (zajmują dużo miejsca)."""
+        if self._saved or not (self.run_dir and Path(self.run_dir).is_dir()):
+            self.app.pop_screen()
+            return
+        self.app.push_screen(
+            ConfirmScreen(
+                f"Nie zapisano surowych danych sesji "
+                f"({self._run_dir_rel()}/).\n"
+                "Usunąć je i zwolnić miejsce, czy zostawić na dysku?\n"
+                "(Wiersze w reports/pomiary.csv zostają tak czy inaczej.)",
+                yes="Usuń", no="Zostaw"),
+            callback=self._discard_decided)
+
+    def _discard_decided(self, delete):
+        if delete and self.run_dir:
+            shutil.rmtree(self.run_dir, ignore_errors=True)
+        self.app.pop_screen()
 
     def _toggle_pause(self):
         """Stop = pauza pomiaru i czasu; drugi klik = wznów ten sam pomiar."""
@@ -1227,18 +1276,20 @@ class AutoRunScreen(Screen):
     def _finish(self, ev):
         self._done = True
         status = self.query_one("#status", Static)
-        if ev.data.get("cancelled"):
-            status.update("Przerwano. Sesje zapisane.")
-        else:
-            status.update("Zakończono plan.")
+        status.update("Przerwano plan." if ev.data.get("cancelled")
+                      else "Zakończono plan.")
         self.query_one("#measure-panel").display = False
-        if self.run_dir:
-            rel = Path(self.run_dir)
-            try:
-                rel = rel.relative_to(core.ROOT)
-            except ValueError:
-                pass
-            self.note(f"Sesje: {rel}/  ·  Esc = powrót")
+        # Surowe dane sesji leżą na dysku tymczasowo – zostają tylko po
+        # kliknięciu "Zapisz pomiary", inaczej kasujemy je przy wyjściu
+        # (wiersze w reports/pomiary.csv są zapisane niezależnie).
+        if self.run_dir and Path(self.run_dir).is_dir():
+            self.query_one("#save_results", Button).display = True
+            self.note(f"Surowe dane sesji: {self._run_dir_rel()}/")
+            self.query_one("#hint", Static).update(
+                "Zapisz pomiary — zachowaj surowe dane sesji · "
+                "Esc — wyjście (bez zapisu dane sesji zostaną usunięte)")
+        else:
+            self.query_one("#hint", Static).update("Esc — powrót")
 
     @work(thread=True)
     def flow(self):
@@ -1384,6 +1435,8 @@ class PowerTestApp(App):
                margin: 1 1 0 1; }
     #results > .datatable--header { background: transparent;
                                     color: #888888; text-style: none; }
+    /* Opcjonalny zapis surowych danych sesji – pod tabelą wyników. */
+    #save_results { margin: 1 1 0 1; min-width: 18; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
     #cmds { padding: 0 1; height: auto; max-height: 22; }
     /* Monitor dongla (serial) – logi przed i podczas pomiaru. */
