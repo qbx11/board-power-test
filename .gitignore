@@ -5,3 +5,8 @@ build_*/
 .DS_Store
 __pycache__/
 .venv/
+# Sesje pomiarowe trybu autonomicznego (dane, mogą być duże) i lokalne
+# plany. Wzór planu (plans/*.example.toml) trafia do repo.
+reports/sessions/
+plans/*.toml
+!plans/*.example.toml

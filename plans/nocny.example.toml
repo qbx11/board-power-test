@@ -1,0 +1,87 @@
+# ============================================================
+#  Przykładowy PLAN trybu autonomicznego (autorun)
+# ============================================================
+# Skopiuj do plans/<swoja-nazwa>.toml i dostosuj. Uruchomienie:
+#   board-power-test autorun plans/nocny.toml
+# (pliki *.example.toml są celowo pomijane na liście planów.)
+#
+# Plan = uporządkowana lista kroków. Każdy krok wskazuje scenariusz ze
+# scenarios.toml (klucz sekcji [scenarios.<...>]) i mówi, JAK go
+# zmierzyć: napięcie, ile mierzyć, kiedy zacząć, czy podglądać RTT,
+# jak zapisać dane. Płytkę zasila i mierzy PPK2 (source meter) – nic
+# nie robisz ręcznie, można zostawić na noc.
+
+[plan]
+name        = "nocny"
+description  = "Nocna sesja porównawcza trybów snu"
+board        = "btz"       # profil z [boards.*]; pusto = [defaults].profile
+on_build_error = "skip"    # gdy build kroku padnie: skip = pomiń krok, abort = przerwij plan
+on_step_error  = "skip"    # gdy padnie pomiar/trigger: skip = pomiń krok, abort = przerwij plan
+ppk2_port    = ""          # pusto = autodetekcja; wpisz port, gdy masz kilka PPK2
+
+# --- Krok 1: absolutne minimum snu, długi pomiar ---
+[[plan.steps]]
+scenario = "reset_only"
+duration = "8h"                             # "45s" / "20m" / "8h" / "1h30m" / liczba sekund
+voltage  = "3.0"                            # napięcie źródła PPK2 [V] – TWARDY limit 2.0–3.3 V
+trigger  = { type = "delay", seconds = 20 } # zacznij mierzyć 20 s po flashu/resecie
+rtt      = "off"                            # patrz "Tryby RTT" niżej – do minimów snu ZAWSZE off
+storage  = { mode = "downsampled", window_ms = 1 }  # min/avg/max co 1 ms (piki nie giną)
+power_cycle = true                          # OFF/ON po flashu = czysty zimny start
+
+# --- Krok 2: własna aplikacja, start po logu z RTT + auto-etykiety ---
+[[plan.steps]]
+scenario = "mesh-reliability-tester"
+duration = "2h"
+voltage  = "3.0"
+# Zamiast stałego opóźnienia: czekaj, aż na konsoli RTT pojawi się log
+# pasujący do wzorca (regex). timeout = ile czekać, zanim uznamy krok
+# za nieudany (polityka on_step_error).
+trigger  = { type = "rtt", pattern = "Friend established", timeout = "180s" }
+rtt      = "continuous"                      # RTT podłączony przez cały pomiar (wymagane dla etykiet)
+storage  = { mode = "both", window_ms = 1 }  # tiery + pełny raw (uwaga: raw ~1,4 GB/h!)
+power_cycle = true
+# build_extra_args = ["-DCONFIG_LOG=y"]      # doklejane ZA cmake_args scenariusza
+# build_cmd = "west build -b {board} -d {build_dir} {src} -- -DCONFIG_X=y"
+#   Pełny override komendy builda (shlex). Placeholdery {board}/{build_dir}/{src}
+#   podstawia narzędzie. Wyklucza się z build_extra_args.
+
+  # Auto-etykiety: linia RTT pasująca do `pattern` (regex) stawia znacznik
+  # na wykresie. Działają TYLKO przy rtt = "continuous".
+  [[plan.steps.labels]]
+  pattern = "Friend Poll sent"
+  label   = "Friend Poll"
+
+  [[plan.steps.labels]]
+  pattern = "Friend Update"
+  label   = "Friend Update"
+
+# ============================================================
+#  Tryby RTT (pole `rtt`) – kompromis szum ↔ etykiety
+# ============================================================
+# RTT wymaga AKTYWNEJ sesji J-Link, a podłączony debugger DODAJE prąd.
+#
+#   off        – J-Link nieaktywny podczas pomiaru. Najniższy szum,
+#                wyniki bliskie datasheetowi. Tylko trigger `delay`,
+#                bez auto-etykiet. UŻYWAJ do absolutnych minimów snu.
+#
+#   trigger    – podłącz tylko po to, by złapać wzorzec startowy, potem
+#                zamknij sesję J-Link PRZED oknem pomiaru. Zamknięcie nie
+#                resetuje targetu, ale domena debug i sam kabel SWD mogą
+#                jeszcze chwilę dodawać upływ – do prawdziwych podłóg snu
+#                lepiej `off` + trigger `delay`.
+#
+#   continuous – J-Link podłączony przez cały pomiar. Auto-etykiety
+#                działają, ale prąd zawiera narzut debuggera. Dobre do
+#                pomiarów WZGLĘDNYCH i średnich (profil pracy), złe do
+#                bezwzględnej podłogi snu.
+
+# ============================================================
+#  Zapis danych (pole `storage`)
+# ============================================================
+#   mode = "downsampled" – tylko tiery min/avg/max (małe pliki, pełny
+#                          zoom nawet dla wielogodzinnych sesji). Domyślne.
+#   mode = "raw"         – tylko surowe próbki 100 kS/s (float32,
+#                          ~1,4 GB/h). Maksymalna dokładność.
+#   mode = "both"        – oba naraz.
+#   window_ms            – okno bazowego tieru (1 ms = piki widoczne).

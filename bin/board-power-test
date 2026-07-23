@@ -33,15 +33,35 @@ printf '\033]0;board-power-test\007'
 # automatycznie przy pierwszym uruchomieniu. Gdy instalacja się nie uda
 # (np. brak sieci), narzędzie działa dalej w trybie tekstowym.
 #   BPT_NO_TUI=1  – nie instaluj/nie używaj TUI (zawsze tryb tekstowy)
+# Zależności bazowe venva: interfejs (textual) + tryb autonomiczny
+# (ppk2-api do pomiaru prądu, numpy do składania próbek, pylink-square
+# do konsoli RTT). CIĘŻKIE zależności okna wykresu (PyQt6, pyqtgraph)
+# NIE są tu – doinstalowują się leniwie przy pierwszym otwarciu wykresu.
+BPT_BASE_DEPS="textual ppk2-api numpy pylink-square"
+# Znacznik wersji zestawu zależności: gdy dokładamy nowe do już
+# istniejących venvów, podbijamy numer i doinstalowujemy raz.
+BPT_DEPS_VERSION="v2"
+
 PYBIN="python3"
 VENV="$REPO/.venv"
 if [ -x "$VENV/bin/python" ]; then
 	PYBIN="$VENV/bin/python"
+	# Istniejący venv sprzed trybu autonomicznego – dociągnij nowe
+	# zależności raz (znacznik .bpt_deps_<wersja>).
+	if [ "${BPT_NO_TUI:-}" != "1" ] && [ ! -f "$VENV/.bpt_deps_$BPT_DEPS_VERSION" ]; then
+		echo "board-power-test: aktualizuję zależności trybu autonomicznego (ppk2-api, numpy, pylink)..."
+		if "$VENV/bin/pip" install --quiet $BPT_BASE_DEPS >/dev/null 2>&1; then
+			touch "$VENV/.bpt_deps_$BPT_DEPS_VERSION"
+		else
+			echo "board-power-test: nie udało się doinstalować zależności (offline?) – tryb autonomiczny może nie działać." >&2
+		fi
+	fi
 elif [ "${BPT_NO_TUI:-}" != "1" ]; then
-	echo "board-power-test: pierwsze uruchomienie – instaluję interfejs (venv + textual)..."
+	echo "board-power-test: pierwsze uruchomienie – instaluję interfejs (venv + zależności)..."
 	if python3 -m venv "$VENV" >/dev/null 2>&1 &&
-		"$VENV/bin/pip" install --quiet textual >/dev/null 2>&1; then
+		"$VENV/bin/pip" install --quiet $BPT_BASE_DEPS >/dev/null 2>&1; then
 		PYBIN="$VENV/bin/python"
+		touch "$VENV/.bpt_deps_$BPT_DEPS_VERSION"
 	else
 		echo "board-power-test: instalacja interfejsu nie powiodła się – używam trybu tekstowego." >&2
 		rm -rf "$VENV"
