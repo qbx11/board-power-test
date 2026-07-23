@@ -27,6 +27,8 @@ import threading
 
 from pathlib import Path
 
+from rich.markup import escape
+
 from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -143,17 +145,29 @@ class ModeLabel(Static):
         self.app._set_mode(self.mode)
 
 
-class AutoGear(Static):
-    """⚙ w wierszu scenariusza – widoczne tylko w trybie autonomicznym;
-    otwiera nadpisanie ustawień tego kroku (czas, trigger, RTT, flagi)."""
+class CardDelete(Static):
+    """✕ w nagłówku karty 'Pomiar N' – usuwa kartę z kreatora."""
 
-    def __init__(self, scen_name, **kwargs):
-        super().__init__("⚙", classes="scen-gear scen-icon auto-only", **kwargs)
-        self.scen_name = scen_name
+    def __init__(self, uid, **kwargs):
+        super().__init__("✕", classes="card-del", **kwargs)
+        self.uid = uid
 
     def on_click(self, event):
         event.stop()
-        self.app.configure_auto_step(self.scen_name)
+        self.app.remove_measurement(self.uid)
+
+
+class CardTitle(Static):
+    """Nagłówek karty 'Pomiar N' – klik zwija/rozwija kartę, żeby po
+    dodaniu wielu pomiarów wciąż było je widać jako listę."""
+
+    def on_click(self, event):
+        event.stop()
+        card = self.parent
+        while card is not None and not isinstance(card, MeasurementCard):
+            card = card.parent
+        if card is not None:
+            card.toggle_collapsed()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -712,82 +726,213 @@ class RunScreen(Screen):
             self.note("(Esc = powrót do ustawień)")
 
 
-class AutoStepConfigScreen(ModalScreen):
-    """Nadpisanie ustawień POJEDYNCZEGO kroku trybu autonomicznego
-    (⚙ przy scenariuszu). Puste pola = użyj ustawień domyślnych z panelu
-    głównego. Zwraca słownik nadpisań (może być pusty) albo None."""
+class MeasurementCard(Vertical):
+    """Jedna karta 'Pomiar N' w kreatorze trybu autonomicznego: scenariusz
+    + czas, a start-po-czasie / RTT / napięcie / zapis w zwijanych
+    ustawieniach zaawansowanych (domyślnie schowane i wyłączone).
+    Czyta/ustawia własną konfigurację, nie dotyka innych kart."""
 
-    def __init__(self, scen_name, label, override):
-        super().__init__()
-        self.scen_name = scen_name
-        self.label = label
-        self.override = dict(override or {})
+    def __init__(self, uid, scenarios, number, config=None, collapsed=False):
+        super().__init__(classes="measurement-card", id=f"card_{uid}")
+        self.uid = uid
+        self.scenarios = scenarios
+        self.number = number
+        self._config = config or {}
+        self.collapsed = collapsed
 
     def compose(self):
-        o = self.override
-        with Vertical(classes="dialog"):
-            yield Static(f"[b]Krok: {self.label}[/b]\n"
-                         "Puste pole = użyj ustawień domyślnych z panelu.",
-                         classes="dialog-text")
+        c = self._config
+        opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
+        with Horizontal(classes="card-head"):
+            yield CardTitle(f"▾ Pomiar {self.number}", classes="card-title")
+            yield CardDelete(self.uid)
+        # Ciało karty (chowane przy zwinięciu). Selecty MUSZĄ powstać jako
+        # widoczne – Select zamontowany od razu jako display:none nie tworzy
+        # overlaya; ukrycie następuje dopiero w on_mount (post-mount).
+        with Vertical(classes="card-body"):
+            yield Label("Scenariusz:")
+            # Domyślnie NIC nie zaznaczone (blank). Wartość podajemy tylko gdy
+            # config faktycznie ma znany scenariusz – blankiem steruje sam
+            # widget (sentinel zależny od wersji Textual).
+            scen0 = c.get("scenario")
+            sel_kw = dict(allow_blank=True, prompt="— wybierz scenariusz —",
+                          classes="card-scenario")
+            if scen0 in self.scenarios:
+                sel_kw["value"] = scen0
+            yield Select(opts, **sel_kw)
             yield Label("Czas pomiaru (np. 30s / 20m / 8h):")
-            yield Input(value=o.get("duration", ""),
-                        placeholder="domyślny", id="o_duration")
-            yield Label("Napięcie PPK2 [V] (dozwolone 2.0–3.3):")
-            yield Input(value=o.get("voltage", ""),
-                        placeholder="domyślne (z manifestu)", id="o_voltage")
-            yield Label("Start pomiaru:")
-            with Horizontal(id="o-trig-row"):
-                yield Select([("domyślnie", ""),
-                              ("po czasie [s]", "delay"),
-                              ("po logu RTT", "rtt")],
-                             value=o.get("trigger_type", ""),
-                             allow_blank=False, id="o_trigger")
-                yield Input(value=o.get("trigger_val", ""),
-                            placeholder="sekundy albo wzorzec logu",
-                            id="o_trigger_val")
-            yield Label("Konsola RTT:")
-            yield Select([("domyślnie", ""), ("off", "off"),
-                          ("trigger", "trigger"),
-                          ("continuous", "continuous")],
-                         value=o.get("rtt", ""), allow_blank=False,
-                         id="o_rtt")
-            yield Label("Dodatkowe flagi kompilacji (oddziel spacją):")
-            yield Input(value=" ".join(o.get("build_extra_args", [])),
-                        placeholder="np. -DCONFIG_LOG=y", id="o_flags")
+            yield Input(value=c.get("duration", ""), placeholder="np. 8h",
+                        classes="card-duration")
+            with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
+                             classes="card-adv"):
+                # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
+                yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
+                            value=c.get("delay_on", False),
+                            classes="card-delay-on")
+                yield Input(value=c.get("delay_s", "20s"),
+                            placeholder="np. 30s", classes="card-delay-s")
+                # Konsola RTT – opcjonalna; pola pojawiają się po włączeniu.
+                yield Check("Konsola RTT (start po logu / etykiety)",
+                            value=c.get("rtt_on", False),
+                            classes="card-rtt-on")
+                with Vertical(classes="card-rtt-box"):
+                    yield Select([("start po logu", "trigger"),
+                                  ("etykiety (continuous)", "continuous")],
+                                 value=c.get("rtt_mode", "trigger"),
+                                 allow_blank=False, classes="card-rtt")
+                    yield Input(value=c.get("pattern", ""),
+                                placeholder="wzorzec logu RTT",
+                                classes="card-pattern")
+                with Horizontal(classes="card-row card-vs-row"):
+                    with Vertical(classes="card-col"):
+                        yield Label("Napięcie (V, 2.0–3.3):")
+                        yield Input(value=c.get("voltage", "3.0"),
+                                    classes="card-voltage")
+                    with Vertical(classes="card-col"):
+                        yield Label("Zapis danych:")
+                        yield Select([("downsampled", "downsampled"),
+                                      ("raw (duże!)", "raw"),
+                                      ("both", "both")],
+                                     value=c.get("storage", "downsampled"),
+                                     allow_blank=False, classes="card-storage")
+            with Horizontal(classes="card-apply-row"):
+                yield Button("Zastosuj do wszystkich", classes="card-apply")
+                yield Button("Zastosuj do następnych",
+                             classes="card-apply-next")
+
+    def on_mount(self):
+        # Post-mount: dopiero teraz ukrywamy zaawansowane pola i (ewentualnie)
+        # zwijamy kartę – overlaye Selectów już istnieją, więc bezpiecznie.
+        self._sync_advanced()
+        self.query_one(".card-body").display = not self.collapsed
+        self._refresh_title()
+
+    def on_checkbox_changed(self, event):
+        # Checkboxy karty (start-po-czasie / RTT) sterują widocznością swoich
+        # pól – nie puszczamy zdarzenia wyżej (App liczy tylko scen-check).
+        if event.control.has_class("card-delay-on") or \
+           event.control.has_class("card-rtt-on"):
+            self._sync_advanced()
+            event.stop()
+
+    def _sync_advanced(self):
+        self.query_one(".card-delay-s").display = \
+            self.query_one(".card-delay-on", Checkbox).value
+        self.query_one(".card-rtt-box").display = \
+            self.query_one(".card-rtt-on", Checkbox).value
+
+    def toggle_collapsed(self):
+        self.set_collapsed(not self.collapsed)
+
+    def set_collapsed(self, collapsed):
+        self.collapsed = collapsed
+        self.query_one(".card-body").display = not collapsed
+        self._refresh_title()
+
+    def set_number(self, number):
+        self.number = number
+        self._refresh_title()
+
+    def _refresh_title(self):
+        title = self.query_one(".card-title", CardTitle)
+        if not self.collapsed:
+            title.update(f"▾ Pomiar {self.number}")
+            return
+        scen = self._scenario()
+        if not scen:
+            title.update(f"▸ Pomiar {self.number} — (wybierz scenariusz)")
+            return
+        label = _label(scen, self.scenarios.get(scen, {}))
+        # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
+        dupes = sum(1 for card in self.app.query(MeasurementCard)
+                    if card._scenario() == scen)
+        suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
+        title.update(f"▸ {label}{suffix}")
+
+    def _scenario(self):
+        """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
+        Textual – rozpoznajemy blank po tym, że nie jest znaną nazwą)."""
+        scen = self.query_one(".card-scenario", Select).value
+        return scen if scen in self.scenarios else ""
+
+    def get_config(self):
+        return {
+            "scenario": self._scenario(),
+            "duration": self.query_one(".card-duration", Input).value.strip(),
+            "delay_on": self.query_one(".card-delay-on", Checkbox).value,
+            "delay_s": self.query_one(".card-delay-s", Input).value.strip(),
+            "rtt_on": self.query_one(".card-rtt-on", Checkbox).value,
+            "rtt_mode": self.query_one(".card-rtt", Select).value,
+            "pattern": self.query_one(".card-pattern", Input).value.strip(),
+            "voltage": self.query_one(".card-voltage", Input).value.strip(),
+            "storage": self.query_one(".card-storage", Select).value,
+        }
+
+    def apply_shared(self, cfg):
+        """Ustaw wszystko OPRÓCZ scenariusza (dla 'Zastosuj do wszystkich')."""
+        self.query_one(".card-duration", Input).value = cfg["duration"]
+        self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
+        self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
+        self.query_one(".card-rtt-on", Checkbox).value = cfg["rtt_on"]
+        self.query_one(".card-rtt", Select).value = cfg["rtt_mode"]
+        self.query_one(".card-pattern", Input).value = cfg["pattern"]
+        self.query_one(".card-voltage", Input).value = cfg["voltage"]
+        self.query_one(".card-storage", Select).value = cfg["storage"]
+        self._sync_advanced()
+
+
+class Ppk2ConnectScreen(ModalScreen):
+    """Ekran połączenia z PPK2 przed startem: wykrycie portu (bez pomiaru)
+    i info o napięciu. Zwraca True (Start) albo None (Anuluj). Sam pomiar
+    otwiera PPK2 ponownie – tu tylko potwierdzamy, że urządzenie jest."""
+
+    def __init__(self, detect=None):
+        super().__init__()
+        # detect() -> port (str) albo wyjątek; podmieniane w testach.
+        self._detect = detect
+        self._connected = False
+
+    def compose(self):
+        with Vertical(classes="dialog"):
+            yield Static("[b]Połączenie z PPK2[/b]\n"
+                         "Sprawdź, czy Power Profiler Kit II jest podłączony "
+                         "po USB, potem uruchom pomiary.",
+                         classes="dialog-text")
+            yield Static("Napięcie: ustawiane per pomiar (domyślnie 3.0 V, "
+                         "limit 2.0–3.3 V).", classes="dialog-text")
+            yield Static("[#888888]PPK2: niesprawdzony[/]", id="ppk2-status")
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Zapisz", id="save")
-                yield Button("Wyczyść nadpisania", id="clear")
-                yield Button("Anuluj", id="cancel")
+                yield Button("Połącz / sprawdź", id="ppk2_detect")
+                yield Button("Start pomiary", id="ppk2_start", disabled=True)
+                yield Button("Anuluj", id="ppk2_cancel")
 
     def on_button_pressed(self, event):
-        if event.button.id == "cancel":
+        if event.button.id == "ppk2_cancel":
             self.dismiss(None)
-        elif event.button.id == "clear":
-            self.dismiss({})
-        else:
-            self.dismiss(self._collect())
+        elif event.button.id == "ppk2_detect":
+            self._do_detect()
+        elif event.button.id == "ppk2_start" and self._connected:
+            self.dismiss(True)
 
-    def _collect(self):
-        import shlex as _shlex
-        out = {}
-        dur = self.query_one("#o_duration", Input).value.strip()
-        if dur:
-            out["duration"] = dur
-        volt = self.query_one("#o_voltage", Input).value.strip()
-        if volt:
-            out["voltage"] = volt
-        ttype = self.query_one("#o_trigger", Select).value
-        if ttype:
-            out["trigger_type"] = ttype
-            out["trigger_val"] = self.query_one("#o_trigger_val",
-                                                Input).value.strip()
-        rtt = self.query_one("#o_rtt", Select).value
-        if rtt:
-            out["rtt"] = rtt
-        flags = self.query_one("#o_flags", Input).value.strip()
-        if flags:
-            out["build_extra_args"] = _shlex.split(flags)
-        return out
+    def _do_detect(self):
+        status = self.query_one("#ppk2-status", Static)
+        try:
+            if self._detect is not None:
+                port = self._detect()
+            else:
+                from autorun.ppk2 import find_ppk2
+                port = find_ppk2()
+        except Exception as e:
+            self._connected = False
+            # Komunikat błędu może zawierać nawiasy [] – escapujemy, żeby nie
+            # rozjechać znaczników Rich; i wyłączamy WŁAŚCIWY przycisk startu.
+            status.update("[#cc6666]PPK2: nie znaleziono — "
+                          f"{escape(str(e))}[/]")
+            self.query_one("#ppk2_start", Button).disabled = True
+            return
+        self._connected = True
+        status.update(f"PPK2: podłączony ({port})")
+        self.query_one("#ppk2_start", Button).disabled = False
 
 
 class AutoRunScreen(Screen):
@@ -798,6 +943,8 @@ class AutoRunScreen(Screen):
 
     BINDINGS = [("escape", "cancel", "Przerwij")]
 
+    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
     def __init__(self, plan, sample):
         super().__init__()
         self.plan = plan               # gotowy autorun.plan.Plan (z okna)
@@ -807,6 +954,11 @@ class AutoRunScreen(Screen):
         self.live_session = None
         self._viewer_opened = False
         self._done = False
+        # Aktywna zwijana sekcja komendy (build/flash) + jej spinner.
+        self._active_section = None
+        self._active_log = None
+        self._spinner = None
+        self._spin_i = 0
 
     def compose(self):
         yield Static("", id="status")
@@ -826,6 +978,47 @@ class AutoRunScreen(Screen):
         cmds = self.query_one("#cmds")
         cmds.mount(Static(text, classes="note"))
         cmds.scroll_end(animate=False)
+
+    # --- zwijane sekcje komend (build/flash), jak w trybie ręcznym ---
+
+    def _cmd_start(self, title):
+        log = Log(classes="cmd-log")
+        section = Collapsible(log, title=f"{self.SPINNER[0]} {title}",
+                              collapsed=True)
+        cmds = self.query_one("#cmds")
+        cmds.mount(section)
+        cmds.scroll_end(animate=False)
+        self._active_section = section
+        self._active_log = log
+        self._active_title = title
+        self._spin_i = 0
+        self._spinner = self.set_interval(1 / 8, self._tick)
+
+    def _tick(self):
+        if self._active_section is None:
+            return
+        self._spin_i = (self._spin_i + 1) % len(self.SPINNER)
+        self._active_section.title = \
+            f"{self.SPINNER[self._spin_i]} {self._active_title}"
+
+    def _cmd_line(self, text):
+        if self._active_log is not None:
+            self._active_log.write_line(text)
+        else:
+            self.note(f"[#888888]{text}[/]")
+
+    def _cmd_end(self, rc, title):
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+        if self._active_section is not None:
+            if rc == 0:
+                self._active_section.title = f"✓ {title}"
+            else:
+                self._active_section.title = f"✗ {title} — kod {rc}"
+                self._active_section.collapsed = False
+        self._active_section = None
+        self._active_log = None
 
     def action_cancel(self):
         if self._done:
@@ -880,8 +1073,12 @@ class AutoRunScreen(Screen):
                 f"próbek: {d.get('samples'):,}")
         elif ev.kind == "annotation":
             self.note(f"  ⟟ etykieta: {ev.text} @ {ev.data.get('t_s')} s")
+        elif ev.kind == "cmd_start":
+            self._cmd_start(ev.text)
+        elif ev.kind == "cmd_end":
+            self._cmd_end(ev.data.get("rc", 0), ev.data.get("title", ""))
         elif ev.kind == "line":
-            self.note(f"[#888888]{ev.text}[/]")
+            self._cmd_line(ev.text)
         elif ev.kind == "note":
             self.note(ev.text)
         elif ev.kind == "step_done":
@@ -974,8 +1171,6 @@ class PowerTestApp(App):
     .scen-icon:hover { background: #333333; color: $text; }
     .scen-arrow { color: #888888; }
     .scen-del { color: #666666; }
-    .scen-gear { color: #666666; }
-    .scen-gear.has-override { color: $text; text-style: bold; }
 
     /* Przełącznik trybów: same klikalne teksty (bez suwaka, bez
        animacji); aktywna strona pogrubiona i jaśniejsza. */
@@ -986,15 +1181,32 @@ class PowerTestApp(App):
     .mode-label.active { color: $text; text-style: bold; }
     .mode-sep { width: auto; color: #444444; }
 
-    /* Panel konfiguracji trybu autonomicznego. */
-    #auto-config { width: 72; max-width: 100%; border: round #555555;
-                   background: transparent; height: auto; padding: 0 1;
-                   margin-top: 1; }
-    #auto-trig-row, #auto-mode-row { height: auto; }
-    .auto-col { width: 1fr; height: auto; padding-right: 1; }
-    #auto-hint { color: #888888; margin-top: 1; }
-    /* Domyślnie ukryte – _apply_mode() decyduje o widoczności. */
-    .auto-only { display: none; }
+    /* Kreator autonomiczny: karty 'Pomiar N'. */
+    #measurements { width: 72; max-width: 100%; height: auto; }
+    .measurement-card { width: 100%; height: auto; border: round #555555;
+                        background: transparent; padding: 0 1;
+                        margin-bottom: 1; }
+    .card-head { height: 1; }
+    .card-title { width: 1fr; text-style: bold; color: $text; }
+    .card-title:hover { color: #bbbbbb; }
+    .card-del { width: 4; content-align: center middle; color: #666666; }
+    .card-del:hover { background: #333333; color: $text; }
+    .card-body { height: auto; }
+    .card-row { height: auto; }
+    .card-col { width: 1fr; height: auto; padding-right: 1; }
+    .card-delay-on, .card-rtt-on { border: none; background: transparent;
+                     padding: 0; height: 1; width: auto; margin-top: 1; }
+    .card-delay-s, .card-voltage { width: 100%; }
+    .card-rtt-box { height: auto; }
+    /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
+    .card-vs-row { margin-top: 2; }
+    .card-adv { background: transparent; }
+    .card-apply-row { height: auto; }
+    .card-apply, .card-apply-next { min-width: 0; margin: 1 2 1 0; }
+    #add_measurement { min-width: 0; width: 72; max-width: 100%; }
+    /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
+       on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
+       Select zamontowany od razu jako display:none nie tworzy overlaya. */
     #pristine, #reset, #swd_reminder { border: none; background: transparent; padding: 0;
                 height: 1; margin-top: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
@@ -1127,7 +1339,8 @@ class PowerTestApp(App):
         if not self.boards or not self.scenarios:
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
         self.mode = "standard"          # standard | auto
-        self.auto_overrides = {}        # {scenariusz: dict nadpisań kroku}
+        self._card_uid = 0              # licznik kart 'Pomiar N'
+        self._card_template = None      # config dziedziczony przez nowe karty
 
     def compose(self):
         default_prof = self.defaults.get("profile")
@@ -1150,52 +1363,24 @@ class PowerTestApp(App):
             yield Label("Płytka", classes="h")
             yield Select(((b["board"], n) for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
-            yield Label("Scenariusze", classes="h")
-            with Vertical(id="scenarios"):
+            # --- Tryb ręczny: checklista scenariuszy ---
+            yield Label("Scenariusze", classes="h standard-only")
+            with Vertical(id="scenarios", classes="standard-only"):
                 # Wybór i opis to OSOBNE cele kliknięcia: checkbox z pełną
                 # nazwą zaznacza scenariusz, a strzałka za nazwą rozwija
                 # opis (pełną szerokością, z małym wcięciem). Bez wartości
                 # oczekiwanych – te pokazuje dopiero instrukcja pomiaru.
                 for n, s in self.scenarios.items():
                     yield self._scenario_row(n, s)
-            # Panel ustawień pomiaru trybu autonomicznego (domyślne dla
-            # WSZYSTKICH zaznaczonych kroków; ⚙ przy scenariuszu nadpisuje
-            # pojedynczy). Widoczny tylko w trybie autonomicznym.
-            with Vertical(id="auto-config", classes="auto-only"):
-                yield Label("Ustawienia pomiaru (domyślne dla wszystkich "
-                            "kroków)", classes="h")
-                yield Label("Czas pomiaru na krok (np. 30s / 20m / 8h):")
-                yield Input(value="1h", id="auto_duration")
-                with Horizontal(id="auto-trig-row"):
-                    with Vertical(classes="auto-col"):
-                        yield Label("Start pomiaru:")
-                        yield Select([("po czasie [s]", "delay"),
-                                      ("po logu RTT", "rtt")],
-                                     value="delay", allow_blank=False,
-                                     id="auto_trigger")
-                    with Vertical(classes="auto-col"):
-                        yield Label("…wartość (sekundy albo wzorzec logu):")
-                        yield Input(value="20", id="auto_trigger_val")
-                with Horizontal(id="auto-mode-row"):
-                    with Vertical(classes="auto-col"):
-                        yield Label("Konsola RTT:")
-                        yield Select([("off (najniższy szum)", "off"),
-                                      ("trigger", "trigger"),
-                                      ("continuous (etykiety)",
-                                       "continuous")],
-                                     value="off", allow_blank=False,
-                                     id="auto_rtt")
-                    with Vertical(classes="auto-col"):
-                        yield Label("Zapis danych:")
-                        yield Select([("downsampled", "downsampled"),
-                                      ("raw (duże pliki!)", "raw"),
-                                      ("both", "both")],
-                                     value="downsampled", allow_blank=False,
-                                     id="auto_storage")
-                yield Static("[#888888]Kliknij ⚙ przy scenariuszu, aby "
-                             "nadpisać ustawienia dla jednego kroku. "
-                             "Kroki wykonują się w kolejności z listy.[/]",
-                             id="auto-hint")
+            # --- Tryb autonomiczny: kreator kart 'Pomiar N' ---
+            # Kolejność kart = kolejność wykonania. Scenariusz + czas na
+            # wierzchu; start-po-czasie / RTT / napięcie / zapis w zwijanych
+            # ustawieniach zaawansowanych (domyślnie schowane i wyłączone).
+            yield Label("Pomiary", classes="h auto-only")
+            with Vertical(id="measurements", classes="auto-only"):
+                yield MeasurementCard(0, self.scenarios, 1)
+            yield Button("+ Dodaj pomiar", id="add_measurement",
+                         classes="auto-only")
 
             yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
                         classes="h")
@@ -1209,7 +1394,8 @@ class PowerTestApp(App):
                         classes="standard-only")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
-                yield Button("Zaznacz wszystkie", id="select_all")
+                yield Button("Zaznacz wszystkie", id="select_all",
+                             classes="standard-only")
                 yield Button("Dodaj kod", id="add_fw")
                 yield Button("Wyniki", id="results")
                 yield Button("Wyjście", id="quit")
@@ -1226,7 +1412,6 @@ class PowerTestApp(App):
                       id=f"check_{n}"),
                 Horizontal(
                     DescArrow(f"desc_{n}", id=f"arrow_{n}"),
-                    AutoGear(n, id=f"gear_{n}"),
                     DeleteCross(n, id=f"del_{n}"),
                     classes="scen-actions"),
                 classes="scenario-head"),
@@ -1269,6 +1454,12 @@ class PowerTestApp(App):
             self.push_screen(AddScreen(), callback=self._scenario_added)
         elif event.button.id == "results":
             self.push_screen(ResultsScreen())
+        elif event.button.id == "add_measurement":
+            self.add_measurement()
+        elif event.button.has_class("card-apply-next"):
+            self._apply_to_following(event.button)
+        elif event.button.has_class("card-apply"):
+            self._apply_to_all(event.button)
         elif event.button.id == "start":
             self._start()
 
@@ -1292,22 +1483,81 @@ class PowerTestApp(App):
         for w in self.query(".standard-only"):
             w.display = not auto
         self.query_one("#start", Button).label = (
-            "Start (autonomiczny)" if auto else "Start")
+            "Dalej: PPK2 →" if auto else "Start")
 
-    def configure_auto_step(self, name):
-        """⚙ przy scenariuszu: nadpisz ustawienia jego kroku."""
-        def done(result):
-            if result is None:
-                return
-            if result:
-                self.auto_overrides[name] = result
-            else:                       # 'Wyczyść nadpisania'
-                self.auto_overrides.pop(name, None)
-            self.query_one(f"#gear_{name}", AutoGear).set_class(
-                name in self.auto_overrides, "has-override")
-        self.push_screen(AutoStepConfigScreen(
-            name, _label(name, self.scenarios.get(name, {})),
-            self.auto_overrides.get(name)), callback=done)
+    # ---------- karty 'Pomiar N' (kreator autonomiczny) ----------
+
+    def add_measurement(self):
+        """Dodaj kartę pomiaru. Wcześniejsze karty zwijają się do jednego
+        wiersza (widać całą listę), a nowa dziedziczy szablon ustawiony
+        'do następnych' albo config poprzedniej (oprócz scenariusza)."""
+        cards = list(self.query(MeasurementCard))
+        for c in cards:
+            c.set_collapsed(True)
+        cfg = None
+        if self._card_template is not None:
+            cfg = dict(self._card_template)   # szablon 'do następnych' – z czasem
+        elif cards:
+            cfg = dict(cards[-1].get_config())
+            cfg["duration"] = ""              # nowy pomiar: czas pusty
+        if cfg is not None:
+            cfg.pop("scenario", None)      # nowy pomiar: scenariusz do wyboru
+        self._card_uid += 1
+        card = MeasurementCard(self._card_uid, self.scenarios,
+                               len(cards) + 1, cfg)
+        self.query_one("#measurements").mount(card)
+        # Przewiń do nowej karty dopiero PO zamontowaniu (inaczej wymusza
+        # przedwczesny layout Selecta, zanim powstanie jego overlay).
+        self.call_after_refresh(card.scroll_visible, animate=False)
+
+    def remove_measurement(self, uid):
+        cards = list(self.query(MeasurementCard))
+        if len(cards) <= 1:
+            self.notify("Musi zostać co najmniej jeden pomiar.",
+                        severity="warning")
+            return
+        remaining = [c for c in cards if c.uid != uid]
+        for c in cards:
+            if c.uid == uid:
+                c.remove()
+                break
+        # Przenumeruj z listy POZOSTAŁYCH (remove() jest asynchroniczny,
+        # więc ponowne odpytanie drzewa wciąż widzi znikającą kartę).
+        for i, card in enumerate(remaining, 1):
+            card.set_number(i)
+
+    def _refresh_card_titles(self):
+        for card in self.query(MeasurementCard):
+            card._refresh_title()
+
+    def _card_of(self, widget):
+        while widget is not None and not isinstance(widget, MeasurementCard):
+            widget = widget.parent
+        return widget
+
+    def _apply_to_all(self, button):
+        """'Zastosuj do wszystkich' – skopiuj config karty (bez scenariusza)
+        na WSZYSTKIE pozostałe, już istniejące karty."""
+        card = self._card_of(button)
+        if card is None:
+            return
+        cfg = card.get_config()
+        for other in self.query(MeasurementCard):
+            if other is not card:
+                other.apply_shared(cfg)
+        self._refresh_card_titles()
+        self.notify("Zastosowano ustawienia do wszystkich pomiarów.")
+
+    def _apply_to_following(self, button):
+        """'…do następnych' – zapamiętaj config jako szablon; każdy KOLEJNY
+        dodany pomiar dostanie te ustawienia (bez zmiany istniejących)."""
+        card = self._card_of(button)
+        if card is None:
+            return
+        cfg = dict(card.get_config())
+        cfg.pop("scenario", None)
+        self._card_template = cfg
+        self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
 
     def _scenario_added(self, result):
         """Po 'Dodaj firmware': nowy scenariusz od razu na liście
@@ -1332,21 +1582,21 @@ class PowerTestApp(App):
             bool(boxes) and all(box.value for box in boxes), "pressed")
 
     def _start(self):
-        names = [n for n in self.scenarios
-                 if self.query_one(f"#check_{n}", Checkbox).value]
         sample = self.query_one("#sample", Input).value.strip()
         prof_name = self.query_one("#profile", Select).value
-        if not names:
-            self.notify("Zaznacz co najmniej jeden scenariusz.",
-                        severity="error")
-            return
         if not sample:
             self.notify("Podaj egzemplarz płytki (np. 'BTZ #2').",
                         severity="error")
             self.query_one("#sample", Input).focus()
             return
         if self.mode == "auto":
-            self._start_auto(names, sample, prof_name)
+            self._start_auto(sample, prof_name)
+            return
+        names = [n for n in self.scenarios
+                 if self.query_one(f"#check_{n}", Checkbox).value]
+        if not names:
+            self.notify("Zaznacz co najmniej jeden scenariusz.",
+                        severity="error")
             return
         self.push_screen(RunScreen(prof_name, self.boards[prof_name],
                                    names, sample,
@@ -1357,11 +1607,11 @@ class PowerTestApp(App):
                                    swd_reminder=self.query_one(
                                        "#swd_reminder", Checkbox).value))
 
-    def _start_auto(self, names, sample, prof_name):
-        """Zbuduj plan z ustawień okna (domyślne + nadpisania per krok)
-        i uruchom pulpit trybu autonomicznego."""
+    def _start_auto(self, sample, prof_name):
+        """Zbuduj plan z kart, potem ekran połączenia z PPK2; po 'Start'
+        na tamtym ekranie odpal pulpit pomiaru."""
         try:
-            plan = self._build_auto_plan(names, prof_name)
+            plan = self._build_auto_plan(prof_name)
         except ValueError as e:
             self.notify(str(e), severity="error")
             return
@@ -1371,53 +1621,56 @@ class PowerTestApp(App):
             self.notify("Błędy konfiguracji:\n" + "\n".join(errors),
                         severity="error", timeout=8)
             return
-        self.push_screen(AutoRunScreen(plan, sample))
 
-    def _build_auto_plan(self, names, prof_name):
-        """Plan trybu autonomicznego z widgetów okna. Kolejność kroków =
-        kolejność zaznaczonych scenariuszy na liście. Nadpisania per krok
-        (⚙) mają pierwszeństwo nad ustawieniami domyślnymi."""
-        from autorun.plan import (Plan, PlanStep, Storage, Trigger,
-                                  parse_duration)
+        def go(ok):
+            if ok:
+                self.push_screen(AutoRunScreen(plan, sample))
+        self.push_screen(Ppk2ConnectScreen(), callback=go)
 
-        g_dur = self.query_one("#auto_duration", Input).value.strip()
-        g_ttype = self.query_one("#auto_trigger", Select).value
-        g_tval = self.query_one("#auto_trigger_val", Input).value.strip()
-        g_rtt = self.query_one("#auto_rtt", Select).value
-        g_storage = self.query_one("#auto_storage", Select).value
+    def _build_auto_plan(self, prof_name):
+        """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =
+        kolejność kart. Trigger: RTT 'start po logu' > 'start po czasie' >
+        od razu; przy RTT continuous wzorzec staje się auto-etykietą."""
+        from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
+                                  Trigger, parse_duration)
+
         pristine = self.query_one("#pristine", Checkbox).value
-
-        def make_trigger(ttype, tval):
-            if ttype == "rtt":
-                return Trigger(type="rtt", pattern=tval, timeout_s=180.0)
-            try:
-                secs = float((tval or "0").replace(",", "."))
-            except ValueError:
-                raise ValueError(f"Start 'po czasie': '{tval}' nie jest "
-                                 "liczbą sekund.")
-            return Trigger(type="delay", seconds=secs)
-
+        cards = list(self.query(MeasurementCard))
+        if not cards:
+            raise ValueError("Dodaj co najmniej jeden pomiar.")
         steps = []
-        for n in names:
-            o = self.auto_overrides.get(n, {})
-            dur = o.get("duration") or g_dur
+        for card in cards:
+            c = card.get_config()
+            if not c["scenario"]:
+                raise ValueError(f"Pomiar {card.number}: wybierz scenariusz.")
             try:
-                dur_s = parse_duration(dur)
+                dur_s = parse_duration(c["duration"])
             except ValueError as e:
-                raise ValueError(f"{_label(n, self.scenarios[n])}: {e}")
-            ttype = o.get("trigger_type") or g_ttype
-            tval = o.get("trigger_val", g_tval) if "trigger_type" in o \
-                else g_tval
-            rtt = o.get("rtt") or g_rtt
-            # Trigger po logu RTT wymaga włączonej konsoli – podnieś z off.
-            if ttype == "rtt" and rtt == "off":
-                rtt = "trigger"
+                raise ValueError(f"Pomiar {card.number}: {e}")
+            rtt = c["rtt_mode"] if c["rtt_on"] else "off"
+            labels = []
+            if rtt == "trigger":
+                trigger = Trigger(type="rtt", pattern=c["pattern"],
+                                  timeout_s=180.0)
+            else:
+                if c["delay_on"]:
+                    try:
+                        secs = parse_duration(c["delay_s"])
+                    except ValueError:
+                        raise ValueError(
+                            f"Pomiar {card.number}: start po czasie – "
+                            f"'{c['delay_s']}' nie jest czasem (np. 30s).")
+                else:
+                    secs = 0.0
+                trigger = Trigger(type="delay", seconds=secs)
+                if rtt == "continuous" and c["pattern"]:
+                    labels = [LabelRule(pattern=c["pattern"],
+                                        label=c["pattern"])]
             steps.append(PlanStep(
-                scenario=n, duration_s=dur_s, voltage=o.get("voltage", ""),
-                trigger=make_trigger(ttype, tval), rtt=rtt,
-                storage=Storage(mode=g_storage, window_ms=1),
-                build_extra_args=o.get("build_extra_args", []),
-                pristine=pristine))
+                scenario=c["scenario"], duration_s=dur_s,
+                voltage=c["voltage"], trigger=trigger, rtt=rtt,
+                storage=Storage(mode=c["storage"], window_ms=1),
+                labels=labels, pristine=pristine))
         return Plan(name="interfejs", board=prof_name, steps=steps)
 
 

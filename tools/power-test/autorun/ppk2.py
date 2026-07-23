@@ -42,20 +42,34 @@ def check_voltage_mV(mv):
 
 def find_ppk2(port=""):
     """Port szeregowy PPK2: jawnie wskazany albo autodetekcja
-    (PPK2_API.list_devices). Czytelne błędy przy braku/wielu."""
+    (PPK2_API.list_devices). Czytelne błędy przy braku/wielu.
+
+    Uwaga: jedno fizyczne PPK2 wystawia KILKA interfejsów CDC, więc na
+    macOS/Linux pojawia się kilka /dev/... o TYM SAMYM numerze seryjnym.
+    Grupujemy porty po numerze seryjnym, żeby nie brać interfejsów jednego
+    urządzenia za 'kilka PPK2'; przy jednym urządzeniu zwracamy pierwszy
+    (deterministycznie) port."""
     if port:
         return port
     from ppk2_api.ppk2_api import PPK2_API
+    from serial.tools import list_ports
     found = PPK2_API.list_devices()
     if not found:
         raise Ppk2Error(
             "nie znaleziono PPK2. Podłącz Power Profiler Kit II po USB "
             "(port MCU) albo wskaż port w planie: ppk2_port = \"...\"")
-    if len(found) > 1:
+    # Mapa port -> numer seryjny = fizyczne urządzenie (kilka portów o tym
+    # samym serialu to jedno PPK2).
+    serial_of = {p.device: p.serial_number for p in list_ports.comports()}
+    by_device = {}
+    for dev in found:
+        by_device.setdefault(serial_of.get(dev) or dev, []).append(dev)
+    if len(by_device) > 1:
+        reps = sorted(sorted(ports)[0] for ports in by_device.values())
         raise Ppk2Error(
-            f"znaleziono kilka PPK2 ({', '.join(found)}) – wskaż port "
+            f"znaleziono kilka PPK2 ({', '.join(reps)}) – wskaż port "
             "w planie: ppk2_port = \"...\"")
-    return found[0]
+    return sorted(next(iter(by_device.values())))[0]
 
 
 class Ppk2ApiSampler:

@@ -172,6 +172,26 @@ class EngineTest(unittest.TestCase):
                         trigger=planmod.Trigger(type="delay", seconds=0)))
         self.assertEqual(self.sampler.voltage_mV, 3300)
 
+    def test_build_is_just_in_time(self):
+        # Dwa kroki: build kroku 2 musi nastąpić PO zakończeniu pomiaru
+        # kroku 1 (a nie z góry przed wszystkimi pomiarami).
+        plan = planmod.Plan(name="test", board="btz", steps=[
+            planmod.PlanStep(scenario="zwykly", duration_s=0.2,
+                             trigger=planmod.Trigger(type="delay",
+                                                     seconds=0)),
+            planmod.PlanStep(scenario="zrodlowy", duration_s=0.2,
+                             trigger=planmod.Trigger(type="delay",
+                                                     seconds=0))])
+        self._run(plan)
+        seq = [(ev.step, ev.kind, ev.text) for ev in self.events]
+        # pozycja buildu kroku 2 i zakończenia pomiaru kroku 1
+        build2 = next(i for i, (s, k, t) in enumerate(seq)
+                      if s == 2 and k == "state" and t == "build")
+        done1 = next(i for i, (s, k, t) in enumerate(seq)
+                     if s == 1 and k == "step_done")
+        self.assertLess(done1, build2,
+                        "build kroku 2 powinien być po pomiarze kroku 1")
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

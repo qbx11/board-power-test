@@ -93,6 +93,11 @@ class AutoRunner:
         self._plan_log = None
         self._sampler = None
         self._dut_on = False
+        # Dedup katalogów builda MIĘDZY krokami (build just-in-time):
+        # ten sam scenariusz+flagi budowany raz, kolejne wystąpienia
+        # korzystają z gotowego obrazu.
+        self._used_dirs = {}
+        self._done_dirs = {}
 
     # ---------- pomocnicze ----------
 
@@ -128,8 +133,12 @@ class AutoRunner:
         header = f"$ {shlex.join(cmd)}"
         self._log(f"{title}: {header}", files=(log_file,) if log_file
                   else ())
+        # cmd_start/cmd_end obejmują komendę – UI grupuje wyjście w zwijaną
+        # sekcję (jak tryb ręczny), logi lecą zdarzeniami `line` pomiędzy.
+        self._emit("cmd_start", step, name, text=title)
         self._emit("line", step, name, header)
         if self.dry_run:
+            self._emit("cmd_end", step, name, data={"rc": 0, "title": title})
             return 0
         with subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE,
@@ -146,6 +155,7 @@ class AutoRunner:
             if log_file is not None:
                 log_file.flush()
             rc = proc.wait()
+        self._emit("cmd_end", step, name, data={"rc": rc, "title": title})
         self._check_cancel()
         return rc
 
@@ -186,55 +196,44 @@ class AutoRunner:
         used_dirs[build_dir] = fingerprint
         return cmd, build_dir
 
-    def _phase_build(self, workspace):
-        """FAZA 1: buildy wszystkich kroków z góry. Zwraca
-        {indeks_kroku: katalog_builda | None (hex) | BUILD_FAILED}."""
-        built, used_dirs, done_dirs = {}, {}, {}
-        to_build = [(i, s) for i, s in enumerate(self.plan.steps, 1)
-                    if "hex" not in self.scenarios[s.scenario]]
-        self._emit("phase", text=f"FAZA 1/2: budowanie "
-                                 f"{len(to_build)} obraz(ów)")
-        for idx, step in enumerate(self.plan.steps, 1):
-            self._check_cancel()
-            scen = self.scenarios[step.scenario]
-            if "hex" in scen:
-                built[idx] = None
-                self._note(f"krok {idx} ({step.scenario}): gotowy hex "
-                           f"({scen['hex']}) – bez budowania")
-                continue
-            cmd, build_dir = self._build_spec(idx, step, used_dirs)
-            if build_dir in done_dirs:
-                built[idx] = build_dir
-                self._note(f"krok {idx} ({step.scenario}): ten sam obraz "
-                           f"co krok {done_dirs[build_dir]} – bez "
-                           "ponownego builda")
-                continue
-            if (not step.pristine and not self.dry_run
-                    and core.build_up_to_date(build_dir, cmd)):
-                built[idx] = build_dir
-                done_dirs[build_dir] = idx
-                self._note(f"krok {idx} ({step.scenario}): gotowy build "
-                           f"({build_dir}/) – pomijam")
-                continue
-            self._emit("state", idx, step.scenario, "build")
-            rc = self._run_streamed(cmd, workspace,
-                                    f"build {step.scenario}", idx,
-                                    step.scenario)
-            if rc != 0:
-                self._note(f"krok {idx} ({step.scenario}): build padł "
-                           f"(kod {rc})", idx, step.scenario)
-                if self.plan.on_build_error == "abort":
-                    raise AutoRunError(
-                        f"build kroku {idx} ({step.scenario}) zakończony "
-                        f"błędem (kod {rc}); plan ma on_build_error = "
-                        "'abort'")
-                built[idx] = BUILD_FAILED
-                continue
-            if not self.dry_run:
-                core.record_build(build_dir, cmd)
-            built[idx] = build_dir
-            done_dirs[build_dir] = idx
-        return built
+    def _build_step(self, idx, step, workspace):
+        """Zbuduj obraz kroku TUŻ przed jego pomiarem (just-in-time).
+        Zwraca katalog builda, None (gotowy hex) albo BUILD_FAILED (build
+        padł, a polityka to skip). Przy on_build_error='abort' podnosi
+        AutoRunError."""
+        scen = self.scenarios[step.scenario]
+        if "hex" in scen:
+            self._note(f"pomiar {idx} ({step.scenario}): gotowy hex "
+                       f"({scen['hex']}) – bez budowania", idx,
+                       step.scenario)
+            return None
+        cmd, build_dir = self._build_spec(idx, step, self._used_dirs)
+        if build_dir in self._done_dirs:
+            self._note(f"pomiar {idx} ({step.scenario}): ten sam obraz co "
+                       f"pomiar {self._done_dirs[build_dir]} – bez "
+                       "ponownego builda", idx, step.scenario)
+            return build_dir
+        if (not step.pristine and not self.dry_run
+                and core.build_up_to_date(build_dir, cmd)):
+            self._done_dirs[build_dir] = idx
+            self._note(f"pomiar {idx} ({step.scenario}): gotowy build "
+                       f"({build_dir}/) – pomijam", idx, step.scenario)
+            return build_dir
+        self._emit("state", idx, step.scenario, "build")
+        rc = self._run_streamed(cmd, workspace, f"build {step.scenario}",
+                                idx, step.scenario)
+        if rc != 0:
+            self._note(f"pomiar {idx} ({step.scenario}): build padł "
+                       f"(kod {rc})", idx, step.scenario)
+            if self.plan.on_build_error == "abort":
+                raise AutoRunError(
+                    f"build pomiaru {idx} ({step.scenario}) zakończony "
+                    f"błędem (kod {rc}); plan ma on_build_error = 'abort'")
+            return BUILD_FAILED
+        if not self.dry_run:
+            core.record_build(build_dir, cmd)
+        self._done_dirs[build_dir] = idx
+        return build_dir
 
     # ---------- pomiar ----------
 
@@ -423,12 +422,19 @@ class AutoRunner:
 
     # ---------- krok ----------
 
-    def _run_step(self, idx, step, build_dir, workspace):
+    def _run_step(self, idx, step, workspace):
         scen = self.scenarios[step.scenario]
         voltage = self._voltage_for(step)
         self._emit("step_start", idx, step.scenario,
                    data={"duration_s": step.duration_s,
                          "voltage": voltage})
+        # BUILD tuż przed pomiarem (just-in-time). Build padł + skip ->
+        # ten krok jako build_failed (bez flasha/pomiaru); abort podnosi
+        # AutoRunError wyżej.
+        build_dir = self._build_step(idx, step, workspace)
+        if build_dir is BUILD_FAILED:
+            self._emit("state", idx, step.scenario, "build_failed")
+            return StepResult(idx, step.scenario, "build_failed")
         if self.dry_run:
             return self._dry_step(idx, step, scen, voltage, build_dir,
                                   workspace)
@@ -614,25 +620,20 @@ class AutoRunner:
                     self._note(f"workspace NCS: {workspace} "
                                "(build out-of-tree)")
 
-            built = self._phase_build(workspace)
-
-            self._emit("phase", text=f"FAZA 2/2: pomiary "
-                                     f"({len(self.plan.steps)} krok(ów))")
+            # PPK2 otwierany raz na cały przebieg (zasilanie/pomiar); build
+            # go nie używa, więc kolejność build->zasilanie->flash->pomiar
+            # per krok jest bezpieczna.
             if not self.dry_run:
                 self._sampler = self.sampler_factory(self.plan)
                 self._sampler.open()
                 self._note(f"PPK2 otwarty ({getattr(self._sampler, 'port', '?')})")
 
+            self._emit("phase", text=f"Pomiary: {len(self.plan.steps)} "
+                                     "(build każdego kodu tuż przed jego "
+                                     "pomiarem)")
             for idx, step in enumerate(self.plan.steps, 1):
                 self._check_cancel()
-                if built.get(idx) is BUILD_FAILED:
-                    results.append(StepResult(idx, step.scenario,
-                                              "build_failed"))
-                    self._emit("state", idx, step.scenario,
-                               "build_failed")
-                    continue
-                result = self._run_step(idx, step, built.get(idx),
-                                        workspace)
+                result = self._run_step(idx, step, workspace)
                 results.append(result)
                 if result.status == "cancelled":
                     break

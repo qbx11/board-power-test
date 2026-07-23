@@ -93,5 +93,54 @@ class VoltageGuardTest(unittest.TestCase):
         self.assertFalse(s._dut_on)
 
 
+class _FakePort:
+    def __init__(self, device, serial_number):
+        self.device = device
+        self.serial_number = serial_number
+
+
+class FindPpk2Test(unittest.TestCase):
+    """Autodetekcja portu bez sprzętu (podstawiamy list_devices/comports)."""
+
+    def _patch(self, devices, ports):
+        from ppk2_api.ppk2_api import PPK2_API
+        from serial.tools import list_ports
+        self._orig = (PPK2_API.list_devices, list_ports.comports)
+        PPK2_API.list_devices = staticmethod(lambda: list(devices))
+        list_ports.comports = lambda: list(ports)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        from ppk2_api.ppk2_api import PPK2_API
+        from serial.tools import list_ports
+        PPK2_API.list_devices, list_ports.comports = self._orig
+
+    def test_explicit_port_passthrough(self):
+        self.assertEqual(ppk2.find_ppk2("/dev/ttyX"), "/dev/ttyX")
+
+    def test_one_device_two_interfaces(self):
+        # Jedno PPK2 wystawia dwa porty o TYM SAMYM serialu – nie jest to
+        # 'kilka PPK2'; zwracamy jeden, deterministycznie pierwszy.
+        devs = ["/dev/cu.usbmodemAAA4", "/dev/cu.usbmodemAAA2"]
+        ports = [_FakePort("/dev/cu.usbmodemAAA4", "AAA"),
+                 _FakePort("/dev/cu.usbmodemAAA2", "AAA")]
+        self._patch(devs, ports)
+        self.assertEqual(ppk2.find_ppk2(), "/dev/cu.usbmodemAAA2")
+
+    def test_none_found(self):
+        self._patch([], [])
+        with self.assertRaises(ppk2.Ppk2Error):
+            ppk2.find_ppk2()
+
+    def test_two_distinct_devices_error(self):
+        devs = ["/dev/cu.usbmodemAAA2", "/dev/cu.usbmodemBBB2"]
+        ports = [_FakePort("/dev/cu.usbmodemAAA2", "AAA"),
+                 _FakePort("/dev/cu.usbmodemBBB2", "BBB")]
+        self._patch(devs, ports)
+        with self.assertRaises(ppk2.Ppk2Error) as ctx:
+            ppk2.find_ppk2()
+        self.assertIn("kilka PPK2", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
