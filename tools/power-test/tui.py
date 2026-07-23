@@ -42,15 +42,15 @@ import power_test as core
 # 12), monochromatyczna jak reszta interfejsu; pod spodem podpis
 # narzędzia. Statyczny tekst, bez zależności runtime.
 LOGO = """\
-    ▗▄        ▄▄              ▗▖▗▄▄▖                      ▄▖
-    █        █▀▀▌             ▐▌▐▛▀▜▌      ▐▌              █
-    █       ▐▌    ▟█▙  ▟█▙  ▟█▟▌▐▌ ▐▌▝█ █▌▐███  ▟█▙        █
-    █       ▐▌▗▄▖▐▛ ▜▌▐▛ ▜▌▐▛ ▜▌▐███  █▖█  ▐▌  ▐▙▄▟▌       █
-   ▀▙       ▐▌▝▜▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ▐█▛  ▐▌  ▐▛▀▀▘       ▟▀
-    █        █▄▟▌▝█▄█▘▝█▄█▘▝█▄█▌▐▙▄▟▌  █▌  ▐▙▄ ▝█▄▄▌       █
-    █         ▀▀  ▝▀▘  ▝▀▘  ▝▀▝▘▝▀▀▀   █    ▀▀  ▝▀▀        █
-    ▜▄                                █▌                  ▄▛
-[#888888]                b o a r d   p o w e r   t e s t[/]"""
+      ▗▄        ▄▄              ▗▖▗▄▄▖                      ▄▖
+      █        █▀▀▌             ▐▌▐▛▀▜▌      ▐▌              █
+      █       ▐▌    ▟█▙  ▟█▙  ▟█▟▌▐▌ ▐▌▝█ █▌▐███  ▟█▙        █
+      █       ▐▌▗▄▖▐▛ ▜▌▐▛ ▜▌▐▛ ▜▌▐███  █▖█  ▐▌  ▐▙▄▟▌       █
+     ▀▙       ▐▌▝▜▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ▐█▛  ▐▌  ▐▛▀▀▘       ▟▀
+      █        █▄▟▌▝█▄█▘▝█▄█▘▝█▄█▌▐▙▄▟▌  █▌  ▐▙▄ ▝█▄▄▌       █
+      █         ▀▀  ▝▀▘  ▝▀▘  ▝▀▝▘▝▀▀▀   █    ▀▀  ▝▀▀        █
+      ▜▄                                █▌                  ▄▛
+[#888888]                  b o a r d   p o w e r   t e s t[/]"""
 
 
 def _stream(cmd, cwd, on_line, handle=None):
@@ -169,17 +169,19 @@ class CardTitle(Static):
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """Dialog z pytaniem; `no=None` daje pojedynczy przycisk (twardy krok)."""
+    """Dialog z pytaniem; `no=None` daje pojedynczy przycisk (twardy krok).
+    `danger=True` oznacza przycisk 'yes' jako nieodwracalny (czerwony hover)."""
 
-    def __init__(self, text, yes="OK", no="Anuluj"):
+    def __init__(self, text, yes="OK", no="Anuluj", danger=False):
         super().__init__()
-        self.text, self.yes, self.no = text, yes, no
+        self.text, self.yes, self.no, self.danger = text, yes, no, danger
 
     def compose(self):
         with Vertical(classes="dialog"):
             yield Static(self.text, classes="dialog-text")
             with Horizontal(classes="dialog-buttons"):
-                yield Button(self.yes, id="yes")
+                yield Button(self.yes, id="yes",
+                            classes="danger" if self.danger else "")
                 if self.no is not None:
                     yield Button(self.no, id="no")
 
@@ -268,8 +270,8 @@ class FirmwareTree(DirectoryTree):
     to szum przy wskazywaniu firmware'u), bez plików ukrytych.
     Ikony znakowe zamiast emoji – spójnie z monochromatycznym UI."""
 
-    ICON_NODE = "▸ "
-    ICON_NODE_EXPANDED = "▾ "
+    ICON_NODE = "▶ "
+    ICON_NODE_EXPANDED = "▼ "
     ICON_FILE = "· "
 
     def filter_paths(self, paths):
@@ -742,7 +744,7 @@ class MeasurementCard(Vertical):
         c = self._config
         opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
         with Horizontal(classes="card-head"):
-            yield CardTitle(f"▾ Pomiar {self.number}", classes="card-title")
+            yield CardTitle(f"▼ Pomiar {self.number}", classes="card-title")
             yield CardDelete(self.uid)
         # Ciało karty (chowane przy zwinięciu). Selecty MUSZĄ powstać jako
         # widoczne – Select zamontowany od razu jako display:none nie tworzy
@@ -759,7 +761,7 @@ class MeasurementCard(Vertical):
                 sel_kw["value"] = scen0
             yield Select(opts, **sel_kw)
             yield Label("Czas pomiaru (np. 30s / 20m / 8h):")
-            yield Input(value=c.get("duration", ""), placeholder="np. 8h",
+            yield Input(value=c.get("duration", ""), placeholder="np. 20m",
                         classes="card-duration")
             with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
                              classes="card-adv"):
@@ -859,18 +861,18 @@ class MeasurementCard(Vertical):
     def _refresh_title(self):
         title = self.query_one(".card-title", CardTitle)
         if not self.collapsed:
-            title.update(f"▾ Pomiar {self.number}")
+            title.update(f"▼ Pomiar {self.number}")
             return
         scen = self._scenario()
         if not scen:
-            title.update(f"▸ Pomiar {self.number} — (wybierz scenariusz)")
+            title.update(f"▶ Pomiar {self.number} — (wybierz scenariusz)")
             return
         label = _label(scen, self.scenarios.get(scen, {}))
         # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
         dupes = sum(1 for card in self.app.query(MeasurementCard)
                     if card._scenario() == scen)
         suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
-        title.update(f"▸ {label}{suffix}")
+        title.update(f"▶ {label}{suffix}")
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -1076,6 +1078,9 @@ class AutoRunScreen(Screen):
                 self._active_section.collapsed = False
         self._active_section = None
         self._active_log = None
+        # Narzędzia flashujące (J-Link/nrfutil) potrafią pisać wprost do
+        # /dev/tty i zresetować tryb myszy – odnów go, jak w run_west().
+        self.app._reassert_mouse()
 
     def action_cancel(self):
         if self._done:
@@ -1124,7 +1129,7 @@ class AutoRunScreen(Screen):
                 f"({self._run_dir_rel()}/).\n"
                 "Usunąć je i zwolnić miejsce, czy zostawić na dysku?\n"
                 "(Wiersze w reports/pomiary.csv zostają tak czy inaczej.)",
-                yes="Usuń", no="Zostaw"),
+                yes="Usuń", no="Zostaw", danger=True),
             callback=self._discard_decided)
 
     def _discard_decided(self, delete):
@@ -1352,7 +1357,7 @@ class PowerTestApp(App):
        (checkbox ma width:1fr) – stała pozycja niezależnie od długości
        nazwy scenariusza, zamiast kupić się zaraz za tekstem. */
     .scen-actions { width: auto; height: 1; }
-    .scen-icon { width: 4; height: 1; content-align: center middle; }
+    .scen-icon { width: 3; height: 1; content-align: center middle; }
     .scen-icon:hover { background: #333333; color: $text; }
     .scen-arrow { color: #888888; }
     .scen-del { color: #666666; }
@@ -1360,7 +1365,7 @@ class PowerTestApp(App):
     /* Przełącznik trybów: same klikalne teksty (bez suwaka, bez
        animacji); aktywna strona pogrubiona i jaśniejsza. */
     #mode-toggle { height: auto; width: 72; max-width: 100%;
-                   margin-bottom: 1; align: left middle; }
+                   margin-bottom: 1; align: center middle; }
     .mode-label { width: auto; color: #666666; margin: 0 1; }
     .mode-label:hover { color: #999999; }
     .mode-label.active { color: $text; text-style: bold; }
@@ -1374,7 +1379,7 @@ class PowerTestApp(App):
     .card-head { height: 1; }
     .card-title { width: 1fr; text-style: bold; color: $text; }
     .card-title:hover { color: #bbbbbb; }
-    .card-del { width: 4; content-align: center middle; color: #666666; }
+    .card-del { width: 3; content-align: center middle; color: #666666; }
     .card-del:hover { background: #333333; color: $text; }
     .card-body { height: auto; }
     .card-row { height: auto; }
@@ -1421,6 +1426,11 @@ class PowerTestApp(App):
     Button.-active { background: transparent; border: round #aaaaaa; }
     Button.pressed, Button.pressed:hover, Button.pressed:focus {
         background: #333333; border: round #aaaaaa; }
+    /* Akcja nieodwracalna (np. "Usuń") – czerwony hover/focus ostrzega
+       przed kliknięciem, spójnie z jedynym innym wyjątkiem od
+       monochromatycznej palety (błąd PPK2, #cc6666). */
+    Button.danger:hover, Button.danger:focus {
+        border: round #cc6666; color: #cc6666; }
     /* Rząd akcji mieści się dokładnie w obrysie ramek (72 kolumny):
        bez sztucznego min-width przycisków. */
     #actions { margin-top: 1; height: auto; }
@@ -1443,7 +1453,7 @@ class PowerTestApp(App):
     #dongle-log { height: 8; border: round #555555; background: transparent;
                   margin: 0 1; }
     /* Duże okno pomiaru pod logami build/flash. */
-    #measure-panel { height: auto; border: round #888888; margin: 1 1;
+    #measure-panel { height: auto; border: round #555555; margin: 1 1;
                      padding: 1 2; background: transparent; }
     #measure-head { height: 1; color: $text; }
     #measure-row { height: auto; margin-top: 1; }
@@ -1630,7 +1640,7 @@ class PowerTestApp(App):
             f"[b]Usunąć scenariusz „{label}”?[/b]\n\n"
             "Wpis zniknie z scenarios.toml.\n"
             "Zebrane pomiary w reports/pomiary.csv zostają.",
-            yes="Usuń", no="Anuluj"), callback=done)
+            yes="Usuń", no="Anuluj", danger=True), callback=done)
 
     def _remove_scenario(self, name):
         try:
@@ -1787,7 +1797,7 @@ class PowerTestApp(App):
         sample = self.query_one("#sample", Input).value.strip()
         prof_name = self.query_one("#profile", Select).value
         if not sample:
-            self.notify("Podaj egzemplarz płytki (np. 'BTZ #2').",
+            self.notify("Podaj egzemplarz płytki (np. 'nRF54 #1').",
                         severity="error")
             self.query_one("#sample", Input).focus()
             return
