@@ -153,10 +153,15 @@ płytkę na całą noc.
 W interfejsie przełącznik trybów na górze okna zmienia **Pomiar ręczny** na
 **Tryb autonomiczny** (kliknięcie w tekst). Kreator: wybierasz płytkę, potem
 wypełniasz karty **Pomiar 1, 2, …** (scenariusz — domyślnie nic nie wybrane —
-i czas; start-po-czasie oraz konsola RTT są opcjonalne i schowane w zwijanych
-*ustawieniach zaawansowanych* razem z napięciem, liczbą próbek na sekundę
-(1–100000; PPK2 sampluje 100 kS/s, niższe wartości silnik uśrednia) i zapisem
-danych, domyślnie wyłączone). „+ Dodaj pomiar" dodaje kolejną kartę i **zwija poprzednie do
+i czas; start-po-czasie, konsola RTT oraz **monitor dongla (serial)** są
+opcjonalne i schowane w zwijanych *ustawieniach zaawansowanych* razem z
+napięciem, liczbą próbek na sekundę (1–100000; PPK2 sampluje 100 kS/s, niższe
+wartości silnik uśrednia) i zapisem danych, domyślnie wyłączone). Monitor
+dongla czyta logi z osobnego urządzenia USB (np. węzeł Friend na porcie
+`/dev/ttyACM0`, 115200) i pokazuje je **przed i podczas pomiaru**; opcjonalnie
+pomiar startuje dopiero, gdy w logu pojawi się linia **zawierająca** podany
+fragment (np. `Friendship z LPN nawiazany`). Dla triggera „start po czasie"
+po flashu widać **odliczanie** do startu pomiaru. „+ Dodaj pomiar" dodaje kolejną kartę i **zwija poprzednie do
 jednego wiersza** (nazwa scenariusza, numer gdy się powtarza) — klik w wiersz
 rozwija kartę z powrotem, więc łatwo wrócić do wcześniejszego pomiaru w długiej
 liście. „Zastosuj do wszystkich" przepisuje ustawienia karty (bez scenariusza)
@@ -193,8 +198,16 @@ storage  = { mode = "downsampled", window_ms = 1 }
 [[plan.steps]]
 scenario = "mesh-reliability-tester"
 duration = "2h"
-trigger  = { type = "rtt", pattern = "Friend established", timeout = "180s" }  # …albo po logu RTT
+# …albo start po logu RTT (J-Link) …
+trigger  = { type = "rtt", pattern = "Friend established", timeout = "180s" }
 rtt      = "continuous"                      # etykiety z logów RTT na wykresie
+
+[[plan.steps]]
+scenario = "mesh-reliability-tester"
+duration = "2h"
+monitor_port = "/dev/ttyACM0"                # dongiel serial (logi widoczne w trakcie)
+# …albo start, gdy log dongla ZAWIERA fragment (podłańcuch, nie regex):
+trigger  = { type = "serial", pattern = "Friendship z LPN nawiazany", timeout = "180s" }
   [[plan.steps.labels]]
   pattern = "Friend Poll sent"
   label   = "Friend Poll"

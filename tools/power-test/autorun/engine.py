@@ -29,6 +29,7 @@ import power_test as core
 
 from .plan import validate_plan, voltage_to_mV
 from .ppk2 import Ppk2Error
+from .dongle import DongleError, SerialLineReader
 from .rtt import LinePatternMatcher, PylinkRttReader, RttError, \
     jlink_device_for
 from .session import SessionWriter, _atomic_json, new_session_dir
@@ -74,16 +75,71 @@ def default_rtt_factory(profile):
     return PylinkRttReader(jlink_device_for(profile["board"]))
 
 
+def default_serial_factory(port):
+    return SerialLineReader(port)
+
+
+class _SerialMonitor:
+    """Wątek monitora dongla: czyta linie z portu, pokazuje je w UI
+    (zdarzenie 'monitor'), zapisuje do dongle.log i – jeśli podano
+    `trig_sub` – ustawia `hit`, gdy w linii pojawi się ten FRAGMENT
+    (podłańcuch). Żyje przez oczekiwanie na trigger ORAZ cały pomiar."""
+
+    def __init__(self, reader, engine, log_path, idx, scenario, trig_sub):
+        self.reader = reader
+        self.engine = engine
+        self.log_path = log_path
+        self.idx = idx
+        self.scenario = scenario
+        self.trig_sub = trig_sub
+        self.hit = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self.reader.attach()            # może podnieść DongleError
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        with open(self.log_path, "a", encoding="utf-8") as log:
+            while not self._stop.is_set():
+                try:
+                    line = self.reader.readline(timeout_s=0.3)
+                except Exception as e:
+                    self.engine._emit("monitor", self.idx, self.scenario,
+                                      text=f"[monitor dongla przerwany: {e}]")
+                    return
+                if line is None:
+                    continue
+                log.write(line + "\n")
+                log.flush()
+                self.engine._emit("monitor", self.idx, self.scenario,
+                                  text=line)
+                if self.trig_sub and self.trig_sub in line:
+                    self.hit.set()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        try:
+            self.reader.detach()
+        except Exception:
+            pass
+
+
 class AutoRunner:
 
     def __init__(self, plan, manifest, sample, *, sampler_factory=None,
-                 rtt_factory=None, event_cb=None, cancel=None, pause=None,
-                 dry_run=False):
+                 rtt_factory=None, serial_factory=None, event_cb=None,
+                 cancel=None, pause=None, dry_run=False):
         self.plan = plan
         self.manifest = manifest
         self.sample = sample
         self.sampler_factory = sampler_factory or default_sampler_factory
         self.rtt_factory = rtt_factory or default_rtt_factory
+        self.serial_factory = serial_factory or default_serial_factory
         self.event_cb = event_cb or (lambda ev: None)
         self.cancel = cancel or threading.Event()
         # pause: gdy ustawiony, pętla pomiaru wstrzymuje sampler i zamraża
@@ -250,23 +306,47 @@ class AutoRunner:
             self._sampler.dut_power(on)
             self._dut_on = on
 
-    def _wait_trigger(self, idx, step, session_dir, run_log):
+    def _wait_trigger(self, idx, step, session_dir, run_log, monitor=None):
         """Warunek startu pomiaru. Zwraca (czytnik_rtt | None) – przy
         rtt='continuous' połączenie zostaje otwarte na czas pomiaru."""
         trig = step.trigger
         if trig.type == "delay":
             self._emit("state", idx, step.scenario, "trigger",
-                       detail=f"czekam {trig.seconds:g} s")
+                       detail=f"start za {trig.seconds:g} s")
             self._note(f"trigger: delay {trig.seconds:g} s", idx,
                        step.scenario, files=(run_log,))
             if self.dry_run:
                 return None
-            self._sleep_cancellable(trig.seconds)
+            self._countdown(idx, step, trig.seconds)
             if step.rtt != "continuous":
                 return None
             reader = self.rtt_factory(self.profile)
             reader.attach()
             return reader
+
+        if trig.type == "serial":
+            # Czekaj, aż monitor dongla wypisze linię zawierającą fragment.
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"czekam na log dongla: {trig.pattern!r}")
+            self._note(f"trigger: serial fragment={trig.pattern!r} "
+                       f"timeout={trig.timeout_s:g} s", idx, step.scenario,
+                       files=(run_log,))
+            if self.dry_run:
+                return None
+            if monitor is None:
+                raise AutoRunError("trigger serial: monitor dongla nie "
+                                   "wystartował (sprawdź port)")
+            deadline = time.monotonic() + trig.timeout_s
+            while not monitor.hit.is_set():
+                self._check_cancel()
+                if time.monotonic() >= deadline:
+                    raise _TriggerTimeout(
+                        f"fragment {trig.pattern!r} nie pojawił się na logu "
+                        f"dongla w {trig.timeout_s:g} s")
+                time.sleep(0.1)
+            self._note(f"trigger dongla złapany: {trig.pattern!r}", idx,
+                       step.scenario, files=(run_log,))
+            return None
 
         # trigger rtt: czekaj na wzorzec na konsoli RTT
         self._emit("state", idx, step.scenario, "trigger",
@@ -314,6 +394,40 @@ class AutoRunner:
         while time.monotonic() < deadline:
             self._check_cancel()
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+    def _countdown(self, idx, step, seconds):
+        """Odliczanie do startu pomiaru (trigger delay): co ~0.5 s emituje
+        pozostały czas, żeby UI mogło pokazać odliczanie po flashu."""
+        deadline = time.monotonic() + seconds
+        while True:
+            self._check_cancel()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._emit("countdown", idx, step.scenario,
+                       data={"remaining_s": round(remaining, 1)})
+            time.sleep(min(0.5, remaining))
+
+    def _start_monitor(self, idx, step, session_dir):
+        """Uruchom monitor dongla, jeśli krok podał `monitor_port`. Gdy port
+        jest źródłem triggera, brak monitora to błąd kroku; przy monitorze
+        'tylko do podglądu' porażka otwarcia nie przerywa pomiaru."""
+        if not step.monitor_port or self.dry_run:
+            return None
+        trig_sub = (step.trigger.pattern
+                    if step.trigger.type == "serial" else "")
+        mon = _SerialMonitor(self.serial_factory(step.monitor_port), self,
+                             session_dir / "dongle.log", idx, step.scenario,
+                             trig_sub)
+        try:
+            mon.start()
+        except DongleError as e:
+            if step.trigger.type == "serial":
+                raise AutoRunError(f"monitor dongla: {e}")
+            self._emit("monitor", idx, step.scenario,
+                       text=f"[monitor dongla niedostępny: {e}]")
+            return None
+        return mon
 
     def _do_pause(self, sampler, writer, idx, step):
         """Pauza pomiaru (Stop w UI): zatrzymaj sampler i zamroź oś czasu,
@@ -498,6 +612,7 @@ class AutoRunner:
                                   workspace)
         session_dir = new_session_dir(self.run_dir, step.scenario)
         run_log = open(session_dir / "run.log", "a", encoding="utf-8")
+        monitor = None
         try:
             # Zasilanie z PPK2 (source meter) – płytka musi mieć prąd,
             # żeby J-Link mógł ją w ogóle zaprogramować. Twardy limit
@@ -531,8 +646,11 @@ class AutoRunner:
                 self._sampler.dut_power(True)
                 self._dut_on = True
 
+            # Monitor dongla (jeśli podano port) startuje PRZED oknem
+            # triggera i żyje przez cały pomiar – logi widać przed i podczas.
+            monitor = self._start_monitor(idx, step, session_dir)
             rtt_reader = self._wait_trigger(idx, step, session_dir,
-                                            run_log)
+                                            run_log, monitor)
 
             self._emit("state", idx, step.scenario, "measure")
             self._emit("session", idx, step.scenario,
@@ -585,6 +703,8 @@ class AutoRunner:
             return StepResult(idx, step.scenario, "error", session_dir,
                               error=str(e))
         finally:
+            if monitor is not None:
+                monitor.stop()
             run_log.close()
 
     def _dry_step(self, idx, step, scen, voltage, build_dir, workspace):

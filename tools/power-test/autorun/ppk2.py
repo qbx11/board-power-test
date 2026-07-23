@@ -146,10 +146,20 @@ class Ppk2ApiSampler:
         time.sleep(0.3)
 
     def start(self):
+        # WYRÓWNANIE strumienia: PPK2 nadaje ciągłe próbki po 4 bajty, a
+        # get_samples() trzyma ciągłość przez `remainder`. Zaległe bajty
+        # (ogon metadanych / poprzedniej sesji) albo niepełna reszta po
+        # stop() przesunęłyby próbki o 1–3 bajty = KOMPLETNIE błędne odczyty.
+        # Dlatego przed startem czyścimy bufor portu i zerujemy remainder.
+        ser = getattr(self._ppk2, "ser", None)
+        if ser is not None:
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+        self._ppk2.remainder = {"sequence": b"", "len": 0}
         self._ppk2.start_measuring()
         self._measuring = True
-        time.sleep(0.05)
-        self._ppk2.get_data()      # odrzuć pierwszy, śmieciowy bufor
 
     def read(self):
         """Nowe próbki [µA] od poprzedniego read() (może być pusto –

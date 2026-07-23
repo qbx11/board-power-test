@@ -11,7 +11,7 @@ import time
 import unittest
 
 from common import FakeEnv
-from fakes import FakeRttReader, FakeSampler
+from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
 import power_test as core
 from autorun import plan as planmod
@@ -244,6 +244,54 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta["sample_rate"], 100)      # 2000 / 20
         # ~0.5 s * 100 S/s ≈ 50 próbek (a nie ~1000 przy 2000 S/s).
         self.assertLessEqual(abs(results[0].summary["samples"] - 50), 6)
+
+    def test_serial_trigger_fires_and_streams(self):
+        # Monitor dongla: linie lecą jako 'monitor', a pomiar startuje, gdy
+        # linia ZAWIERA fragment triggera (podłańcuch, nie regex).
+        serial = FakeSerialReader([
+            (0.02, "[00:00:01.000] <inf> node_friend: boot"),
+            (0.06, "[00:00:08.379] <inf> node_friend: "
+                   "Friendship z LPN nawiazany")])
+        plan = _plan(scenario="zwykly", duration_s=0.15,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="Friendship z LPN "
+                                             "nawiazany", timeout_s=5))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        results = runner.run()
+        self.assertEqual(results[0].status, "done")
+        mon = [ev.text for ev in self.events if ev.kind == "monitor"]
+        self.assertTrue(any("Friendship z LPN nawiazany" in m for m in mon))
+        # Fragment logu zapisany do dongle.log sesji.
+        dlog = (results[0].session_dir / "dongle.log").read_text()
+        self.assertIn("node_friend", dlog)
+
+    def test_serial_trigger_timeout_skips(self):
+        serial = FakeSerialReader([(0.01, "nic ciekawego")])
+        plan = _plan(scenario="zwykly", duration_s=0.1,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="NigdyNie",
+                                             timeout_s=0.3))
+        plan.on_step_error = "skip"
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        results = runner.run()
+        self.assertEqual(results[0].status, "trigger_timeout")
+
+    def test_delay_emits_countdown(self):
+        self._run(_plan(scenario="zwykly", duration_s=0.1,
+                        trigger=planmod.Trigger(type="delay", seconds=1)))
+        cd = [ev for ev in self.events if ev.kind == "countdown"]
+        self.assertTrue(cd)
+        self.assertIn("remaining_s", cd[0].data)
 
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
