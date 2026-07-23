@@ -84,7 +84,7 @@ board = "btz"
 [[plan.steps]]
 scenario = "app"
 duration = "2h"
-voltage = "1.8"
+voltage = "2.5"
 trigger = { type = "rtt", pattern = "Ready", timeout = "60s" }
 rtt = "continuous"
 storage = { mode = "both", window_ms = 2 }
@@ -95,7 +95,7 @@ label = "Friend Poll"
 """)
         plan = planmod.load_plan(p)
         step = plan.steps[0]
-        self.assertEqual(step.voltage, "1.8")
+        self.assertEqual(step.voltage, "2.5")
         self.assertEqual(step.trigger.type, "rtt")
         self.assertEqual(step.trigger.timeout_s, 60)
         self.assertEqual(step.storage.mode, "both")
@@ -168,6 +168,24 @@ class ValidateTest(unittest.TestCase):
                          steps=[planmod.PlanStep("reset_only", 30)]),
             MANIFEST)
         self.assertTrue(any("profil" in e for e in errs))
+
+    def test_voltage_out_of_range_rejected(self):
+        for bad in ("5.0", "1.5", "3.4", "0"):
+            errs = planmod.validate_plan(
+                self._plan(voltage=bad), MANIFEST)
+            self.assertTrue(any("napięcie" in e for e in errs),
+                            f"powinien odrzucić {bad}")
+
+    def test_voltage_in_range_ok(self):
+        for good in ("2.0", "3.0", "3.3"):
+            errs = planmod.validate_plan(
+                self._plan(voltage=good), MANIFEST)
+            self.assertEqual(errs, [], f"powinien przyjąć {good}")
+
+    def test_voltage_from_defaults_validated(self):
+        # Krok bez napięcia spada na wbudowany domyślny "3.0" V (w zakresie).
+        errs = planmod.validate_plan(self._plan(), MANIFEST)
+        self.assertFalse(any("napięcie" in e for e in errs))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 
 [defaults]
 profile  = "btz"   # domyślny profil płytki (patrz [boards.*])
-voltage  = "3.0"   # napięcie źródła PPK2 [V] – wyświetlane i zapisywane do CSV
+voltage  = "3.0"   # napięcie źródła PPK2 [V]; w trybie autonomicznym TWARDY limit 2.0–3.3 V
 settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
 
 # --- Profile płytek -----------------------------------------
@@ -81,7 +81,9 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 
 # --- Własne scenariusze (custom) ----------------------------
 # Skopiuj wpis i zmień flagi; własny conf/overlay wrzuć do
-# scenarios/custom/. Napięcie można nadpisać per scenariusz.
+# scenarios/custom/. Napięcie można nadpisać per scenariusz
+# (tryb autonomiczny: TWARDY limit 2.0–3.3 V – wartości spoza zakresu
+# są odrzucane przed startem, żeby nie uszkodzić płytki).
 #
 # [scenarios.moj_test]
 # description = "System OFF + własny overlay z wyłączonym regulatorem X"
@@ -91,7 +93,7 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 #   "-DDTC_OVERLAY_FILE=scenarios/custom/moj_test.overlay",
 # ]
 # expected    = "..."
-# voltage     = "1.8"
+# voltage     = "3.0"
 
 # --- Własny firmware zespołu --------------------------------
 # Dwa dodatkowe warianty wpisu (wykluczają się nawzajem i z powyższym):

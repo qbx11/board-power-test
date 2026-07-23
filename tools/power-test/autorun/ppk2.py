@@ -14,11 +14,30 @@ import time
 
 import numpy as np
 
+from .plan import VOLTAGE_MAX_MV, VOLTAGE_MIN_MV
+
 SAMPLE_RATE = 100_000     # PPK2 sampluje stałe 100 kS/s
 
 
 class Ppk2Error(RuntimeError):
     pass
+
+
+def check_voltage_mV(mv):
+    """Twardy strażnik napięcia [VOLTAGE_MIN_MV, VOLTAGE_MAX_MV] tuż przed
+    komendą do PPK2 – OSTATNIA linia obrony przed podaniem groźnego
+    napięcia na płytkę (biblioteka ppk2-api klampuje dopiero do 5000 mV).
+    Zwraca int mV albo Ppk2Error; nigdy nie klampuje po cichu."""
+    try:
+        mv = int(mv)
+    except (TypeError, ValueError):
+        raise Ppk2Error(f"napięcie '{mv}' nie jest liczbą mV")
+    if not (VOLTAGE_MIN_MV <= mv <= VOLTAGE_MAX_MV):
+        raise Ppk2Error(
+            f"ODMOWA: napięcie {mv} mV poza bezpiecznym zakresem "
+            f"{VOLTAGE_MIN_MV}–{VOLTAGE_MAX_MV} mV – nie podaję na płytkę "
+            "(twardy limit ochrony sprzętu)")
+    return mv
 
 
 def find_ppk2(port=""):
@@ -50,6 +69,8 @@ class Ppk2ApiSampler:
         self._port_hint = port
         self._ppk2 = None
         self._measuring = False
+        self._dut_on = False
+        self._last_voltage_mv = None
 
     def open(self):
         from ppk2_api.ppk2_api import PPK2_API
@@ -60,15 +81,30 @@ class Ppk2ApiSampler:
             # dekodowanie próbek nie działa.
             self._ppk2.get_modifiers()
             self._ppk2.use_source_meter()
+            # BEZPIECZNY STAN STARTOWY: najpierw odetnij zasilanie DUT,
+            # potem ustaw napięcie na dolny bezpieczny limit. Dzięki temu
+            # żaden kod nie poda na płytkę nieznanego napięcia (np.
+            # pozostałego z poprzedniej sesji PPK2) – silnik i tak nadpisze
+            # je właściwą wartością przed włączeniem zasilania.
+            self._ppk2.toggle_DUT_power("OFF")
+            self._dut_on = False
+            self.set_voltage(VOLTAGE_MIN_MV)
+        except Ppk2Error:
+            raise
         except Exception as e:
             raise Ppk2Error(f"nie mogę otworzyć PPK2 na '{port}': {e}")
         self.port = port
 
     def set_voltage(self, millivolts):
-        self._ppk2.set_source_voltage(int(millivolts))
+        # Twardy limit PRZED komendą do urządzenia – gdyby walidacja planu
+        # została ominięta, i tak nie podamy groźnego napięcia na płytkę.
+        mv = check_voltage_mV(millivolts)
+        self._ppk2.set_source_voltage(mv)
+        self._last_voltage_mv = mv
 
     def dut_power(self, on):
         self._ppk2.toggle_DUT_power("ON" if on else "OFF")
+        self._dut_on = bool(on)
         # Chwila na ustabilizowanie zasilania płytki.
         time.sleep(0.3)
 
@@ -97,7 +133,16 @@ class Ppk2ApiSampler:
             return
         try:
             self.stop()
-            self.dut_power(False)
+            self.dut_power(False)      # ODETNIJ zasilanie płytki
         except Exception:
             pass               # sprzątanie po błędzie – nie maskuj oryginału
+        # Jawnie zwolnij port szeregowy: ppk2-api nie ma metody close/
+        # disconnect (port zamyka dopiero __del__/GC), a bez tego kolejne
+        # otwarcie PPK2 potrafi trafić na zajęty port.
+        try:
+            ser = getattr(self._ppk2, "ser", None)
+            if ser is not None:
+                ser.close()
+        except Exception:
+            pass
         self._ppk2 = None

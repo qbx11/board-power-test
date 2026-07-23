@@ -155,6 +155,23 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta["state"], "cancelled")
         self.assertGreater(meta["summary"]["samples"], 0)
 
+    def test_dangerous_voltage_aborts_before_hardware(self):
+        # Napięcie poza twardym limitem: plan pada na walidacji, ZANIM
+        # cokolwiek trafi na płytkę (sampler nie dostaje set_voltage).
+        from autorun.engine import AutoRunError
+        plan = _plan(voltage="5.0",
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        with self.assertRaises(AutoRunError) as ctx:
+            self._run(plan)
+        self.assertIn("napięcie", str(ctx.exception))
+        self.assertIsNone(self.sampler.voltage_mV)   # nic nie ustawiono
+
+    def test_safe_voltage_reaches_sampler(self):
+        # W zakresie: napięcie zostaje przeliczone na mV i podane samplerowi.
+        self._run(_plan(voltage="3.3",
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        self.assertEqual(self.sampler.voltage_mV, 3300)
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

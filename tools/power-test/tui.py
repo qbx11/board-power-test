@@ -732,7 +732,7 @@ class AutoStepConfigScreen(ModalScreen):
             yield Label("Czas pomiaru (np. 30s / 20m / 8h):")
             yield Input(value=o.get("duration", ""),
                         placeholder="domyślny", id="o_duration")
-            yield Label("Napięcie PPK2 [V]:")
+            yield Label("Napięcie PPK2 [V] (dozwolone 2.0–3.3):")
             yield Input(value=o.get("voltage", ""),
                         placeholder="domyślne (z manifestu)", id="o_voltage")
             yield Label("Start pomiaru:")

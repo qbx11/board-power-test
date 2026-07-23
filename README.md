@@ -77,7 +77,7 @@ cmake_args  = [
   "-DDTC_OVERLAY_FILE=scenarios/custom/moj_test.overlay",
 ]
 expected    = "~0.5 uA"     # tylko wyświetlane
-voltage     = "1.8"         # opc. napięcie [V]
+voltage     = "3.0"         # opc. napięcie [V]; tryb autonom.: limit 2.0–3.3 V
 ```
 
 Tryby snu (flaga `-DCONFIG_<...>=y`, jeden na obraz):
@@ -169,7 +169,7 @@ board = "btz"
 [[plan.steps]]
 scenario = "reset_only"
 duration = "8h"                             # ile mierzyć: "45s"/"20m"/"8h"/sekundy
-voltage  = "3.0"                            # napięcie źródła PPK2
+voltage  = "3.0"                            # napięcie źródła PPK2 (limit 2.0–3.3 V)
 trigger  = { type = "delay", seconds = 20 } # start pomiaru 20 s po flashu…
 rtt      = "off"
 storage  = { mode = "downsampled", window_ms = 1 }

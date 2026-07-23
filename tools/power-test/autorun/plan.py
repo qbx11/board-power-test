@@ -17,7 +17,36 @@ RTT_MODES = ("off", "trigger", "continuous")
 STORAGE_MODES = ("downsampled", "raw", "both")
 ERROR_POLICIES = ("skip", "abort")
 
+# --- TWARDY limit napięcia źródła PPK2 podawanego na testowaną płytkę ---
+# PPK2 fizycznie potrafi 800–5000 mV (a biblioteka ppk2-api klampuje
+# dopiero do 5000 mV), więc bez własnego ograniczenia dałoby się podać
+# na płytkę np. 5 V i ją zniszczyć. Trzymamy bezpieczny zakres dla
+# układów nRF: minimum 2.0 V, maksimum 3.3 V (włącznie). Limit jest
+# egzekwowany DWUKROTNIE: przy walidacji planu (błąd przed startem) i w
+# sterowniku PPK2 (autorun/ppk2.py) tuż przed komendą do urządzenia.
+VOLTAGE_MIN_MV = 2000
+VOLTAGE_MAX_MV = 3300
+
 _DUR_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([smh])", re.IGNORECASE)
+
+
+def voltage_to_mV(value):
+    """Napięcie ('3.3' / '3,3' / 3.3) -> mV (int), z TWARDYM ograniczeniem
+    do [VOLTAGE_MIN_MV, VOLTAGE_MAX_MV] włącznie. ValueError przy złym
+    formacie albo poza zakresem – nigdy nie klampujemy po cichu, bo to
+    napięcie ląduje na fizycznej płytce."""
+    try:
+        volts = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"napięcie '{value}' nie jest liczbą "
+                         "(podaj np. '3.0')")
+    mv = round(volts * 1000)
+    if not (VOLTAGE_MIN_MV <= mv <= VOLTAGE_MAX_MV):
+        raise ValueError(
+            f"napięcie {volts:g} V poza dozwolonym zakresem "
+            f"{VOLTAGE_MIN_MV / 1000:g}–{VOLTAGE_MAX_MV / 1000:g} V "
+            "(twardy limit ochrony testowanej płytki)")
+    return mv
 
 
 def parse_duration(value):
@@ -232,6 +261,16 @@ def validate_plan(plan, manifest):
                 shlex.split(step.build_cmd)
             except ValueError as e:
                 errors.append(f"{who}: build_cmd nie parsuje się: {e}")
+        # Napięcie źródła PPK2: sprawdź EFEKTYWNĄ wartość (krok ->
+        # scenariusz -> [defaults]) tak, jak liczy ją silnik – twardy
+        # limit ochrony płytki. Odrzucamy przed startem przebiegu.
+        eff_voltage = (step.voltage or scen.get("voltage")
+                       or manifest.get("defaults", {}).get("voltage",
+                                                           "3.0"))
+        try:
+            voltage_to_mV(eff_voltage)
+        except ValueError as e:
+            errors.append(f"{who}: {e}")
     return errors
 
 

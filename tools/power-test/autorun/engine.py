@@ -24,7 +24,8 @@ from pathlib import Path
 
 import power_test as core
 
-from .plan import validate_plan
+from .plan import validate_plan, voltage_to_mV
+from .ppk2 import Ppk2Error
 from .rtt import LinePatternMatcher, PylinkRttReader, RttError, \
     jlink_device_for
 from .session import SessionWriter, _atomic_json, new_session_dir
@@ -435,12 +436,17 @@ class AutoRunner:
         run_log = open(session_dir / "run.log", "a", encoding="utf-8")
         try:
             # Zasilanie z PPK2 (source meter) – płytka musi mieć prąd,
-            # żeby J-Link mógł ją w ogóle zaprogramować.
+            # żeby J-Link mógł ją w ogóle zaprogramować. Twardy limit
+            # napięcia: set_voltage odmówi (i podnosi wyjątek) PRZED
+            # włączeniem zasilania, więc groźne napięcie nigdy nie trafi
+            # na płytkę. Błąd zamieniamy na AutoRunError (polityka kroku).
             self._emit("state", idx, step.scenario, "power",
                        detail=f"{voltage} V")
             if not self.dry_run:
-                self._sampler.set_voltage(
-                    round(float(voltage.replace(",", ".")) * 1000))
+                try:
+                    self._sampler.set_voltage(voltage_to_mV(voltage))
+                except (ValueError, Ppk2Error) as e:
+                    raise AutoRunError(f"napięcie źródła PPK2: {e}")
                 self._ensure_dut_power(True)
 
             self._emit("state", idx, step.scenario, "flash")

@@ -23,7 +23,7 @@ ppk2_port    = ""          # pusto = autodetekcja; wpisz port, gdy masz kilka PP
 [[plan.steps]]
 scenario = "reset_only"
 duration = "8h"                             # "45s" / "20m" / "8h" / "1h30m" / liczba sekund
-voltage  = "3.0"                            # napięcie źródła PPK2 [V]
+voltage  = "3.0"                            # napięcie źródła PPK2 [V] – TWARDY limit 2.0–3.3 V
 trigger  = { type = "delay", seconds = 20 } # zacznij mierzyć 20 s po flashu/resecie
 rtt      = "off"                            # patrz "Tryby RTT" niżej – do minimów snu ZAWSZE off
 storage  = { mode = "downsampled", window_ms = 1 }  # min/avg/max co 1 ms (piki nie giną)
