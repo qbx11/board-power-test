@@ -42,15 +42,15 @@ import power_test as core
 # 12), monochromatyczna jak reszta interfejsu; pod spodem podpis
 # narzędzia. Statyczny tekst, bez zależności runtime.
 LOGO = """\
-    ▗▄        ▄▄              ▗▖▗▄▄▖                      ▄▖
-    █        █▀▀▌             ▐▌▐▛▀▜▌      ▐▌              █
-    █       ▐▌    ▟█▙  ▟█▙  ▟█▟▌▐▌ ▐▌▝█ █▌▐███  ▟█▙        █
-    █       ▐▌▗▄▖▐▛ ▜▌▐▛ ▜▌▐▛ ▜▌▐███  █▖█  ▐▌  ▐▙▄▟▌       █
-   ▀▙       ▐▌▝▜▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ▐█▛  ▐▌  ▐▛▀▀▘       ▟▀
-    █        █▄▟▌▝█▄█▘▝█▄█▘▝█▄█▌▐▙▄▟▌  █▌  ▐▙▄ ▝█▄▄▌       █
-    █         ▀▀  ▝▀▘  ▝▀▘  ▝▀▝▘▝▀▀▀   █    ▀▀  ▝▀▀        █
-    ▜▄                                █▌                  ▄▛
-[#888888]                b o a r d   p o w e r   t e s t[/]"""
+      ▗▄        ▄▄              ▗▖▗▄▄▖                      ▄▖
+      █        █▀▀▌             ▐▌▐▛▀▜▌      ▐▌              █
+      █       ▐▌    ▟█▙  ▟█▙  ▟█▟▌▐▌ ▐▌▝█ █▌▐███  ▟█▙        █
+      █       ▐▌▗▄▖▐▛ ▜▌▐▛ ▜▌▐▛ ▜▌▐███  █▖█  ▐▌  ▐▙▄▟▌       █
+     ▀▙       ▐▌▝▜▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ▐█▛  ▐▌  ▐▛▀▀▘       ▟▀
+      █        █▄▟▌▝█▄█▘▝█▄█▘▝█▄█▌▐▙▄▟▌  █▌  ▐▙▄ ▝█▄▄▌       █
+      █         ▀▀  ▝▀▘  ▝▀▘  ▝▀▝▘▝▀▀▀   █    ▀▀  ▝▀▀        █
+      ▜▄                                █▌                  ▄▛
+[#888888]                  b o a r d   p o w e r   t e s t[/]"""
 
 
 def _stream(cmd, cwd, on_line, handle=None):
@@ -1360,7 +1360,7 @@ class PowerTestApp(App):
     /* Przełącznik trybów: same klikalne teksty (bez suwaka, bez
        animacji); aktywna strona pogrubiona i jaśniejsza. */
     #mode-toggle { height: auto; width: 72; max-width: 100%;
-                   margin-bottom: 1; align: left middle; }
+                   margin-bottom: 1; align: center middle; }
     .mode-label { width: auto; color: #666666; margin: 0 1; }
     .mode-label:hover { color: #999999; }
     .mode-label.active { color: $text; text-style: bold; }
