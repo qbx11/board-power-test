@@ -285,6 +285,11 @@ class EngineTest(unittest.TestCase):
             event_cb=self.events.append, cancel=threading.Event())
         results = runner.run()
         self.assertEqual(results[0].status, "trigger_timeout")
+        # Monitor pokazuje się JUŻ podczas czekania na trigger (nagłówek +
+        # linie), nawet gdy trigger nigdy nie padnie.
+        mon = [ev for ev in self.events if ev.kind == "monitor"]
+        self.assertTrue(mon)
+        self.assertTrue(any("monitor dongla" in ev.text for ev in mon))
 
     def test_delay_emits_countdown(self):
         self._run(_plan(scenario="zwykly", duration_s=0.1,

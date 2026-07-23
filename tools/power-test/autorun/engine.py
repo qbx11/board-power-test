@@ -29,7 +29,7 @@ import power_test as core
 
 from .plan import validate_plan, voltage_to_mV
 from .ppk2 import Ppk2Error
-from .dongle import DongleError, SerialLineReader
+from .dongle import DEFAULT_BAUD, DongleError, SerialLineReader
 from .rtt import LinePatternMatcher, PylinkRttReader, RttError, \
     jlink_device_for
 from .session import SessionWriter, _atomic_json, new_session_dir
@@ -427,6 +427,11 @@ class AutoRunner:
             self._emit("monitor", idx, step.scenario,
                        text=f"[monitor dongla niedostępny: {e}]")
             return None
+        # Nagłówek od razu odsłania panel monitora – logi widać JUŻ podczas
+        # czekania na trigger, zanim padnie pierwsza linia z dongla.
+        self._emit("monitor", idx, step.scenario,
+                   text=f"[monitor dongla: {step.monitor_port} @ "
+                        f"{DEFAULT_BAUD}]")
         return mon
 
     def _do_pause(self, sampler, writer, idx, step):
