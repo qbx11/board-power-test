@@ -26,6 +26,7 @@ duration = "8h"                             # "45s" / "20m" / "8h" / "1h30m" / l
 voltage  = "3.0"                            # napięcie źródła PPK2 [V] – TWARDY limit 2.0–3.3 V
 trigger  = { type = "delay", seconds = 20 } # zacznij mierzyć 20 s po flashu/resecie
 rtt      = "off"                            # patrz "Tryby RTT" niżej – do minimów snu ZAWSZE off
+sample_rate = 1000                          # próbki/s: 1/10/100/1000/10000/100000 (PPK2=100k, reszta = uśrednianie)
 storage  = { mode = "downsampled", window_ms = 1 }  # min/avg/max co 1 ms (piki nie giną)
 power_cycle = true                          # OFF/ON po flashu = czysty zimny start
 

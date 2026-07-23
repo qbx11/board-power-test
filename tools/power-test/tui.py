@@ -795,6 +795,12 @@ class MeasurementCard(Vertical):
                                       ("both", "both")],
                                      value=c.get("storage", "downsampled"),
                                      allow_blank=False, classes="card-storage")
+                yield Label("Próbki na sekundę:")
+                yield Select([("100000 (max)", 100000), ("10000", 10000),
+                              ("1000", 1000), ("100", 100), ("10", 10),
+                              ("1", 1)],
+                             value=c.get("sample_rate", 100000),
+                             allow_blank=False, classes="card-rate")
             with Horizontal(classes="card-apply-row"):
                 yield Button("Zastosuj do wszystkich", classes="card-apply")
                 yield Button("Zastosuj do następnych",
@@ -866,6 +872,7 @@ class MeasurementCard(Vertical):
             "pattern": self.query_one(".card-pattern", Input).value.strip(),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
+            "sample_rate": self.query_one(".card-rate", Select).value,
         }
 
     def apply_shared(self, cfg):
@@ -878,6 +885,7 @@ class MeasurementCard(Vertical):
         self.query_one(".card-pattern", Input).value = cfg["pattern"]
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
+        self.query_one(".card-rate", Select).value = cfg["sample_rate"]
         self._sync_advanced()
 
 
@@ -950,10 +958,11 @@ class AutoRunScreen(Screen):
         self.plan = plan               # gotowy autorun.plan.Plan (z okna)
         self.sample = sample
         self.cancel = threading.Event()
+        self.pause = threading.Event()  # Stop/Wznów pomiaru (pauza)
         self.run_dir = None
         self.live_session = None
-        self._viewer_opened = False
         self._done = False
+        self._n_steps = len(plan.steps)
         # Aktywna zwijana sekcja komendy (build/flash) + jej spinner.
         self._active_section = None
         self._active_log = None
@@ -962,16 +971,27 @@ class AutoRunScreen(Screen):
 
     def compose(self):
         yield Static("", id="status")
-        yield Static("", id="live")
-        with Horizontal(id="auto-head"):
-            yield Static("Postęp i logi", id="cmds-title")
-            yield Button("Otwórz wykres", id="open_viewer", disabled=True)
+        # Tabelka zakończonych pomiarów (na górze) – wypełnia się po każdym
+        # kroku, a jego okna build/flash znikają.
+        yield DataTable(id="results", zebra_stripes=False,
+                        cursor_type="none")
+        yield Static("Budowanie i wgrywanie", id="cmds-title")
         yield VerticalScroll(id="cmds")
+        # Duże okno pomiaru POD logami build/flash.
+        with Vertical(id="measure-panel"):
+            yield Static("", id="measure-head")
+            with Horizontal(id="measure-row"):
+                yield Static("", id="measure-avg")
+                yield Static("", id="measure-remain")
+            yield Static("", id="measure-inst")
+            yield Button("Stop", id="stop_measure")
         yield Static("Esc — przerwij (sesja zostaje zapisana)", id="hint")
 
     def on_mount(self):
-        self.query_one("#live", Static).update(
-            "[#888888]czekam na start pomiaru…[/]")
+        table = self.query_one("#results", DataTable)
+        table.add_columns("#", "Scenariusz", "Średni", "Min", "Max", "Czas")
+        table.display = False          # pokaże się z pierwszym wynikiem
+        self.query_one("#measure-panel").display = False
         self.flow()
 
     def note(self, text):
@@ -1029,12 +1049,39 @@ class AutoRunScreen(Screen):
             "Przerywam po bieżącym odczycie… (Esc jeszcze raz = powrót)")
 
     def on_button_pressed(self, event):
-        if event.button.id == "open_viewer":
-            target = self.live_session or self.run_dir
-            if target:
-                core.launch_viewer([target],
-                                   live=bool(self.live_session),
-                                   interactive=False)
+        if event.button.id == "stop_measure":
+            self._toggle_pause()
+
+    def _toggle_pause(self):
+        """Stop = pauza pomiaru i czasu; drugi klik = wznów ten sam pomiar."""
+        btn = self.query_one("#stop_measure", Button)
+        if self.pause.is_set():
+            self.pause.clear()
+            btn.label = "Stop"
+        else:
+            self.pause.set()
+            btn.label = "Wznów"
+
+    @staticmethod
+    def _fmt_uA(uA):
+        """Prąd w czytelnej jednostce: nA / µA / mA / A."""
+        if uA is None:
+            return "—"
+        a = abs(uA)
+        if a < 1:
+            return f"{uA * 1000:.1f} nA"
+        if a < 1000:
+            return f"{uA:.1f} µA"
+        if a < 1e6:
+            return f"{uA / 1000:.3f} mA"
+        return f"{uA / 1e6:.3f} A"
+
+    @staticmethod
+    def _fmt_time(s):
+        s = max(0, int(round(s)))
+        h, r = divmod(s, 3600)
+        m, sec = divmod(r, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
     # --- most zdarzenia silnika -> UI (wołane z wątku) ---
 
@@ -1055,22 +1102,17 @@ class AutoRunScreen(Screen):
             detail = ev.data.get("detail", "")
             status.update(f"krok {ev.step} · {ev.name} · {label}"
                           + (f" ({detail})" if detail else ""))
+            if ev.text == "measure":
+                self._start_measure_panel(ev.step, ev.name)
         elif ev.kind == "session":
+            # Wykres (osobne okno) chwilowo wyłączony – zajmiemy się później.
             self.live_session = ev.data.get("dir")
-            btn = self.query_one("#open_viewer", Button)
-            btn.disabled = False
-            if not self._viewer_opened and core.viewer_deps_present():
-                # Pierwsza sesja: otwórz wykres na żywo automatycznie.
-                core.launch_viewer([self.live_session], live=True,
-                                   interactive=False)
-                self._viewer_opened = True
         elif ev.kind == "live":
-            d = ev.data
-            avg = d.get("avg_uA")
-            self.query_one("#live", Static).update(
-                f"prąd: [b]{avg if avg is not None else '—'} µA[/b]   "
-                f"czas: {d.get('elapsed_s')}/{d.get('duration_s')} s   "
-                f"próbek: {d.get('samples'):,}")
+            self._update_measure(ev)
+        elif ev.kind == "paused":
+            self._set_paused(ev, True)
+        elif ev.kind == "resumed":
+            self._set_paused(ev, False)
         elif ev.kind == "annotation":
             self.note(f"  ⟟ etykieta: {ev.text} @ {ev.data.get('t_s')} s")
         elif ev.kind == "cmd_start":
@@ -1082,12 +1124,61 @@ class AutoRunScreen(Screen):
         elif ev.kind == "note":
             self.note(ev.text)
         elif ev.kind == "step_done":
-            d = ev.data
-            self.note(f"[b]krok {ev.step} {ev.name}[/b]: śr "
-                      f"{d.get('avg_uA')} µA (min {d.get('min_uA')}, "
-                      f"max {d.get('max_uA')})")
+            self._finish_step(ev)
         elif ev.kind == "plan_done":
             self._finish(ev)
+
+    # --- duże okno pomiaru + tabelka wyników ---
+
+    def _start_measure_panel(self, step, name):
+        panel = self.query_one("#measure-panel")
+        panel.display = True
+        self.pause.clear()
+        self.query_one("#stop_measure", Button).label = "Stop"
+        self.query_one("#measure-head", Static).update(
+            f"[b]POMIAR[/b] · krok {step}/{self._n_steps} · {name}")
+        self.query_one("#measure-avg", Static).update("[b]—[/b]")
+        self.query_one("#measure-remain", Static).update("")
+        self.query_one("#measure-inst", Static).update("")
+
+    def _update_measure(self, ev):
+        d = ev.data
+        remain = max(0.0, (d.get("duration_s") or 0) - (d.get("elapsed_s") or 0))
+        self.query_one("#measure-avg", Static).update(
+            f"[b]{self._fmt_uA(d.get('avg_uA'))}[/b]")
+        self.query_one("#measure-remain", Static).update(
+            f"pozostało [b]{self._fmt_time(remain)}[/b]")
+        self.query_one("#measure-inst", Static).update(
+            f"[#888888]teraz {self._fmt_uA(d.get('inst_uA'))} · "
+            f"próbek {d.get('samples', 0):,}[/]")
+
+    def _set_paused(self, ev, paused):
+        head = self.query_one("#measure-head", Static)
+        btn = self.query_one("#stop_measure", Button)
+        if paused:
+            d = ev.data
+            step, name = ev.step, ev.name
+            head.update(f"[b]PAUZA[/b] · krok {step}/{self._n_steps} · {name}"
+                        f"  (śr {self._fmt_uA(d.get('avg_uA'))})")
+            btn.label = "Wznów"
+        else:
+            head.update(f"[b]POMIAR[/b] · krok {ev.step}/{self._n_steps} · "
+                        f"{ev.name}")
+            btn.label = "Stop"
+
+    def _finish_step(self, ev):
+        """Po pomiarze: usuń okna build/flash tego kroku i dopisz wynik do
+        tabelki na górze."""
+        d = ev.data
+        self.query_one("#cmds").remove_children()
+        table = self.query_one("#results", DataTable)
+        table.display = True
+        table.add_row(str(ev.step), ev.name,
+                      self._fmt_uA(d.get("avg_uA")),
+                      self._fmt_uA(d.get("min_uA")),
+                      self._fmt_uA(d.get("max_uA")),
+                      self._fmt_time(d.get("duration_s") or 0))
+        self.query_one("#measure-panel").display = False
 
     def _finish(self, ev):
         self._done = True
@@ -1096,7 +1187,7 @@ class AutoRunScreen(Screen):
             status.update("Przerwano. Sesje zapisane.")
         else:
             status.update("Zakończono plan.")
-        self.query_one("#live", Static).update("")
+        self.query_one("#measure-panel").display = False
         if self.run_dir:
             rel = Path(self.run_dir)
             try:
@@ -1117,7 +1208,8 @@ class AutoRunScreen(Screen):
         try:
             manifest = core.load_manifest()
             runner = AutoRunner(self.plan, manifest, self.sample,
-                                event_cb=emit, cancel=self.cancel)
+                                event_cb=emit, cancel=self.cancel,
+                                pause=self.pause)
             runner.run()
         except AutoRunError as e:
             self.app.call_from_thread(self._fail, str(e))
@@ -1241,17 +1333,26 @@ class PowerTestApp(App):
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
-    #live { background: transparent; padding: 0 1; height: 1;
-            color: #aaaaaa; }
-    #auto-head { height: auto; padding: 0 1; margin-top: 1; }
-    #auto-head Button { min-width: 0; }
-    #cmds-head { height: auto; padding: 0 1; margin-top: 1; }
-    #cmds-title { width: 1fr; height: 3; color: #777777;
-                  content-align: left middle; padding: 0 1; }
-    #cmds-head Button { min-width: 0; }
+    /* Tabelka zakończonych pomiarów (na górze). */
+    #results { background: transparent; height: auto; max-height: 12;
+               margin: 1 1 0 1; }
+    #results > .datatable--header { background: transparent;
+                                    color: #888888; text-style: none; }
+    #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
+    #cmds { padding: 0 1; height: auto; max-height: 22; }
+    /* Duże okno pomiaru pod logami build/flash. */
+    #measure-panel { height: auto; border: round #888888; margin: 1 1;
+                     padding: 1 2; background: transparent; }
+    #measure-head { height: 1; color: $text; }
+    #measure-row { height: auto; margin-top: 1; }
+    #measure-avg { width: 1fr; height: 2; text-style: bold;
+                   content-align: left middle; }
+    #measure-remain { width: 1fr; height: 2; content-align: right middle;
+                      color: #aaaaaa; }
+    #measure-inst { height: 1; color: #888888; }
+    #stop_measure { min-width: 12; margin-top: 1; }
     #hint { background: transparent; color: #777777; padding: 0 1;
             height: 1; dock: bottom; }
-    #cmds { padding: 0 1; }
     .note { color: $text; padding: 0 1; }
     Collapsible { background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text; }
@@ -1669,6 +1770,7 @@ class PowerTestApp(App):
             steps.append(PlanStep(
                 scenario=c["scenario"], duration_s=dur_s,
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
+                sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
                 labels=labels, pristine=pristine))
         return Plan(name="interfejs", board=prof_name, steps=steps)

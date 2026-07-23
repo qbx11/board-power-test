@@ -154,8 +154,9 @@ W interfejsie przełącznik trybów na górze okna zmienia **Pomiar ręczny** na
 **Tryb autonomiczny** (kliknięcie w tekst). Kreator: wybierasz płytkę, potem
 wypełniasz karty **Pomiar 1, 2, …** (scenariusz — domyślnie nic nie wybrane —
 i czas; start-po-czasie oraz konsola RTT są opcjonalne i schowane w zwijanych
-*ustawieniach zaawansowanych* razem z napięciem i zapisem danych, domyślnie
-wyłączone). „+ Dodaj pomiar" dodaje kolejną kartę i **zwija poprzednie do
+*ustawieniach zaawansowanych* razem z napięciem, liczbą próbek na sekundę
+(1–100000; PPK2 sampluje 100 kS/s, niższe wartości silnik uśrednia) i zapisem
+danych, domyślnie wyłączone). „+ Dodaj pomiar" dodaje kolejną kartę i **zwija poprzednie do
 jednego wiersza** (nazwa scenariusza, numer gdy się powtarza) — klik w wiersz
 rozwija kartę z powrotem, więc łatwo wrócić do wcześniejszego pomiaru w długiej
 liście. „Zastosuj do wszystkich" przepisuje ustawienia karty (bez scenariusza)
@@ -163,7 +164,12 @@ na wszystkie istniejące pomiary; „…do następnych" zapamiętuje je jako sza
 dla każdego **kolejno dodawanego** pomiaru. Kolejność kart = kolejność
 wykonania. „Dalej → PPK2" otwiera ekran połączenia (wykrycie PPK2), a „Start"
 uruchamia przebieg: **każdy kod buduje się i wgrywa tuż przed swoim pomiarem**
-(nie wszystkie z góry), po czym leci pomiar i podgląd wykresu na żywo.
+(nie wszystkie z góry). Pulpit pokazuje logi build/flash, a pod nimi **duże
+okno pomiaru**: średni prąd na żywo w czytelnej jednostce (nA/µA/mA/A), obok
+czas pozostały do końca, oraz przycisk **Stop** (pauza pomiaru i czasu; „Wznów"
+kontynuuje ten sam pomiar). Po każdym pomiarze jego okna build/flash znikają,
+a wynik (średni/min/max, czas) trafia do tabelki na górze — potem rusza kolejny
+build. Osobne okno wykresu jest chwilowo wyłączone.
 
 Z CLI (albo do powtarzalnych, wersjonowanych przebiegów) ten sam pomiar opisuje
 **plan** w `plans/<nazwa>.toml` (wzór: `plans/nocny.example.toml`). Plan to
@@ -181,6 +187,7 @@ duration = "8h"                             # ile mierzyć: "45s"/"20m"/"8h"/sek
 voltage  = "3.0"                            # napięcie źródła PPK2 (limit 2.0–3.3 V)
 trigger  = { type = "delay", seconds = 20 } # start pomiaru 20 s po flashu…
 rtt      = "off"
+sample_rate = 1000                          # próbki/s: 1/10/100/1000/10000/100000
 storage  = { mode = "downsampled", window_ms = 1 }
 
 [[plan.steps]]

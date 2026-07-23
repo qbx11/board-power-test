@@ -192,6 +192,59 @@ class EngineTest(unittest.TestCase):
         self.assertLess(done1, build2,
                         "build kroku 2 powinien być po pomiarze kroku 1")
 
+    def test_live_has_cumulative_and_instant(self):
+        # Pomiar dość długi (wall > 1 s), żeby padł co najmniej jeden 'live';
+        # sprawdzamy, że niesie i średnią skumulowaną, i chwilową.
+        self._run(_plan(scenario="zwykly", duration_s=1.2,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        live = [ev for ev in self.events if ev.kind == "live"]
+        self.assertTrue(live)
+        self.assertIn("avg_uA", live[-1].data)
+        self.assertIn("inst_uA", live[-1].data)
+
+    def test_pause_and_resume(self):
+        # Stop (pause) tuż po starcie pomiaru, po chwili wznów – pomiar
+        # dokańcza się, a silnik zgłasza 'paused' i 'resumed'.
+        pause = threading.Event()
+        plan = _plan(scenario="zwykly", duration_s=0.3,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind == "state" and ev.text == "measure":
+                def seq():
+                    pause.set()
+                    time.sleep(0.2)
+                    pause.clear()
+                threading.Thread(target=seq, daemon=True).start()
+
+        rtt = FakeRttReader()
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: rtt,
+            event_cb=watcher, cancel=threading.Event(), pause=pause)
+        results = runner.run()
+        self.assertEqual(results[0].status, "done")
+        kinds = [ev.kind for ev in self.events]
+        self.assertIn("paused", kinds)
+        self.assertIn("resumed", kinds)
+        # W trakcie pauzy sampler był zatrzymany i wznowiony.
+        self.assertGreaterEqual(self.sampler.log.count("stop"), 2)
+
+    def test_sample_rate_decimates(self):
+        # sample_rate < sprzętowego (FakeSampler=2000) -> decymacja: sesja
+        # zapisana w wybranej częstotliwości, mniej próbek.
+        import json
+        results = self._run(_plan(
+            scenario="zwykly", duration_s=0.5, sample_rate=100,
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["sample_rate"], 100)      # 2000 / 20
+        # ~0.5 s * 100 S/s ≈ 50 próbek (a nie ~1000 przy 2000 S/s).
+        self.assertLessEqual(abs(results[0].summary["samples"] - 50), 6)
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

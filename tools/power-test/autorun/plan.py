@@ -15,6 +15,9 @@ from pathlib import Path
 
 RTT_MODES = ("off", "trigger", "continuous")
 STORAGE_MODES = ("downsampled", "raw", "both")
+# Dozwolone częstotliwości próbkowania [próbki/s]. PPK2 sampluje sprzętowo
+# 100 kS/s; niższe wartości silnik uzyskuje przez uśrednianie (decymację).
+SAMPLE_RATES = (1, 10, 100, 1000, 10000, 100000)
 ERROR_POLICIES = ("skip", "abort")
 
 # --- TWARDY limit napięcia źródła PPK2 podawanego na testowaną płytkę ---
@@ -104,6 +107,7 @@ class PlanStep:
     voltage: str = ""            # puste = z manifestu (scenariusz/defaults)
     trigger: Trigger = field(default_factory=Trigger)
     rtt: str = "off"
+    sample_rate: int = 100000    # próbki/s (decymacja z 100 kS/s PPK2)
     storage: Storage = field(default_factory=Storage)
     build_extra_args: list = field(default_factory=list)
     build_cmd: str = ""          # pełny override komendy builda (shlex)
@@ -146,6 +150,7 @@ def _step_from_toml(raw, idx):
         voltage=str(raw.get("voltage", "")),
         trigger=trigger,
         rtt=raw.get("rtt", "off"),
+        sample_rate=int(raw.get("sample_rate", 100000)),
         storage=storage,
         build_extra_args=list(raw.get("build_extra_args", [])),
         build_cmd=raw.get("build_cmd", ""),
@@ -221,6 +226,9 @@ def validate_plan(plan, manifest):
                           "dozwolone: " + " | ".join(STORAGE_MODES))
         if step.storage.window_ms < 1:
             errors.append(f"{who}: storage.window_ms musi być >= 1")
+        if step.sample_rate not in SAMPLE_RATES:
+            errors.append(f"{who}: sample_rate = {step.sample_rate} – "
+                          "dozwolone: " + ", ".join(map(str, SAMPLE_RATES)))
         if step.trigger.type not in ("delay", "rtt"):
             errors.append(f"{who}: trigger.type = '{step.trigger.type}' – "
                           "dozwolone: delay | rtt")
