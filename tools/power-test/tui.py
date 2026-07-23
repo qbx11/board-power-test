@@ -1355,7 +1355,7 @@ class PowerTestApp(App):
        (checkbox ma width:1fr) – stała pozycja niezależnie od długości
        nazwy scenariusza, zamiast kupić się zaraz za tekstem. */
     .scen-actions { width: auto; height: 1; }
-    .scen-icon { width: 4; height: 1; content-align: center middle; }
+    .scen-icon { width: 3; height: 1; content-align: center middle; }
     .scen-icon:hover { background: #333333; color: $text; }
     .scen-arrow { color: #888888; }
     .scen-del { color: #666666; }
@@ -1377,7 +1377,7 @@ class PowerTestApp(App):
     .card-head { height: 1; }
     .card-title { width: 1fr; text-style: bold; color: $text; }
     .card-title:hover { color: #bbbbbb; }
-    .card-del { width: 4; content-align: center middle; color: #666666; }
+    .card-del { width: 3; content-align: center middle; color: #666666; }
     .card-del:hover { background: #333333; color: $text; }
     .card-body { height: auto; }
     .card-row { height: auto; }
