@@ -385,10 +385,12 @@ class AutoRunner:
                     # Zerwany odczyt USB: do 3 restartów pomiaru, potem
                     # polityka kroku.
                     errors += 1
+                    if errors > 3:
+                        raise AutoRunError(
+                            f"PPK2 nie odpowiada po 3 próbach ({e}). Zamknij "
+                            "nRF Connect / Power Profiler i sprawdź kabel USB")
                     self._note(f"błąd odczytu PPK2 ({e}) – restart "
                                f"pomiaru {errors}/3", idx, step.scenario)
-                    if errors > 3:
-                        raise AutoRunError(f"PPK2 nie odpowiada: {e}")
                     try:
                         sampler.stop()
                         sampler.start()

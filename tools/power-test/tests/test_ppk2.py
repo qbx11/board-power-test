@@ -93,6 +93,46 @@ class VoltageGuardTest(unittest.TestCase):
         self.assertFalse(s._dut_on)
 
 
+class _CalPPK2:
+    """Atrapa do testu _load_calibration: get_modifiers() zwraca None
+    (porażka odczytu metadanych) dopóki nie minie `succeed_after` prób;
+    ok=False = nigdy się nie udaje."""
+
+    def __init__(self, succeed_after=0, ok=True):
+        self.calls = 0
+        self.succeed_after = succeed_after
+        self.ok = ok
+        self.ser = _FakeSerial()
+        self.ser.reset_input_buffer = lambda: None
+
+    def get_modifiers(self):
+        self.calls += 1
+        if not self.ok:
+            return None
+        return True if self.calls > self.succeed_after else None
+
+
+class LoadCalibrationTest(unittest.TestCase):
+    def setUp(self):
+        # bez realnego czekania między próbami
+        self._sleep = ppk2.time.sleep
+        ppk2.time.sleep = lambda *_: None
+        self.addCleanup(lambda: setattr(ppk2.time, "sleep", self._sleep))
+
+    def test_retries_then_succeeds(self):
+        s = ppk2.Ppk2ApiSampler()
+        s._ppk2 = _CalPPK2(succeed_after=3)
+        s._load_calibration()                 # nie rzuca
+        self.assertGreaterEqual(s._ppk2.calls, 4)
+
+    def test_never_calibrated_raises(self):
+        s = ppk2.Ppk2ApiSampler()
+        s._ppk2 = _CalPPK2(ok=False)
+        with self.assertRaises(ppk2.Ppk2Error) as ctx:
+            s._load_calibration()
+        self.assertIn("kalibrac", str(ctx.exception))
+
+
 class _FakePort:
     def __init__(self, device, serial_number):
         self.device = device

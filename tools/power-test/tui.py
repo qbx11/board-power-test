@@ -902,10 +902,7 @@ class Ppk2ConnectScreen(ModalScreen):
 
     def compose(self):
         with Vertical(classes="dialog"):
-            yield Static("[b]Połączenie z PPK2[/b]\n"
-                         "Sprawdź, czy Power Profiler Kit II jest podłączony "
-                         "po USB, potem uruchom pomiary.",
-                         classes="dialog-text")
+            yield Static("[b]Połączenie z PPK2[/b]", classes="dialog-text")
             yield Static("Napięcie: ustawiane per pomiar (domyślnie 3.0 V, "
                          "limit 2.0–3.3 V).", classes="dialog-text")
             yield Static("[#888888]PPK2: niesprawdzony[/]", id="ppk2-status")
@@ -975,7 +972,6 @@ class AutoRunScreen(Screen):
         # kroku, a jego okna build/flash znikają.
         yield DataTable(id="results", zebra_stripes=False,
                         cursor_type="none")
-        yield Static("Budowanie i wgrywanie", id="cmds-title")
         yield VerticalScroll(id="cmds")
         # Duże okno pomiaru POD logami build/flash.
         with Vertical(id="measure-panel"):
@@ -1089,18 +1085,15 @@ class AutoRunScreen(Screen):
         status = self.query_one("#status", Static)
         if ev.kind == "plan_start":
             self.run_dir = ev.data.get("run_dir")
-            self.note(f"[b]Plan {ev.text}[/b] – {ev.data.get('steps')} "
-                      "krok(ów)")
         elif ev.kind == "phase":
-            status.update(ev.text)
-            self.note(f"[b]{ev.text}[/b]")
+            pass                                  # bez śmieci w widoku budowania
         elif ev.kind == "state":
             label = {"build": "budowanie", "power": "zasilanie",
                      "flash": "wgrywanie", "trigger": "czekam na trigger",
                      "measure": "POMIAR", "build_failed": "build padł"
                      }.get(ev.text, ev.text)
             detail = ev.data.get("detail", "")
-            status.update(f"krok {ev.step} · {ev.name} · {label}"
+            status.update(f"{ev.name} · {label}"
                           + (f" ({detail})" if detail else ""))
             if ev.text == "measure":
                 self._start_measure_panel(ev.step, ev.name)
@@ -1122,7 +1115,7 @@ class AutoRunScreen(Screen):
         elif ev.kind == "line":
             self._cmd_line(ev.text)
         elif ev.kind == "note":
-            self.note(ev.text)
+            pass          # notatki silnika nie zaśmiecają widoku budowania
         elif ev.kind == "step_done":
             self._finish_step(ev)
         elif ev.kind == "plan_done":
@@ -1483,8 +1476,7 @@ class PowerTestApp(App):
             yield Button("+ Dodaj pomiar", id="add_measurement",
                          classes="auto-only")
 
-            yield Label("Egzemplarz płytki (trafia do dziennika CSV)",
-                        classes="h")
+            yield Label("Egzemplarz płytki", classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
             yield Check("Wymuś pełny rebuild (gotowe buildy są "
                         "normalnie pomijane)", value=False, id="pristine")
