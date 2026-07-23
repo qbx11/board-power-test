@@ -91,9 +91,10 @@ class Ppk2ApiSampler:
         port = find_ppk2(self._port_hint)
         try:
             self._ppk2 = PPK2_API(port)
-            # Modyfikatory kalibracyjne z urządzenia – bez nich
-            # dekodowanie próbek nie działa.
-            self._ppk2.get_modifiers()
+            # Modyfikatory kalibracyjne z urządzenia – BEZ nich dekodowanie
+            # liczy prąd z domyślnych, błędnych stałych (odczyt zawyżony
+            # o rzędy wielkości, np. mA zamiast µA).
+            self._load_calibration()
             self._ppk2.use_source_meter()
             # BEZPIECZNY STAN STARTOWY: najpierw odetnij zasilanie DUT,
             # potem ustaw napięcie na dolny bezpieczny limit. Dzięki temu
@@ -108,6 +109,28 @@ class Ppk2ApiSampler:
         except Exception as e:
             raise Ppk2Error(f"nie mogę otworzyć PPK2 na '{port}': {e}")
         self.port = port
+
+    def _load_calibration(self):
+        """Niezawodne wczytanie modyfikatorów kalibracji. Odczyt metadanych
+        w ppk2-api bywa wyścigowy (szuka 'END' w 5 próbach), a przy porażce
+        get_modifiers() zwraca None i BIBLIOTEKA CICHO zostaje przy domyślnych,
+        błędnych stałych. Czyścimy bufor, ponawiamy, a trwały brak kalibracji
+        traktujemy jak twardy błąd (lepiej nie mierzyć niż mierzyć źle)."""
+        ser = getattr(self._ppk2, "ser", None)
+        last = None
+        for _ in range(15):
+            try:
+                if ser is not None:
+                    ser.reset_input_buffer()
+                if self._ppk2.get_modifiers():      # True dopiero po sparsie
+                    return
+            except Exception as e:                  # port jeszcze niegotowy
+                last = e
+            time.sleep(0.2)
+        raise Ppk2Error(
+            "nie udało się wczytać kalibracji PPK2 (metadata). Odłącz PPK2 od "
+            "nRF Connect / Power Profiler (zajmuje port) i podłącz ponownie"
+            + (f" [{last}]" if last else ""))
 
     def set_voltage(self, millivolts):
         # Twardy limit PRZED komendą do urządzenia – gdyby walidacja planu
