@@ -151,10 +151,19 @@ zmierzyć pobór prądu przez zadany czas i narysować wykres. Można zostawić
 płytkę na całą noc.
 
 W interfejsie przełącznik trybów na górze okna zmienia **Pomiar ręczny** na
-**Tryb autonomiczny**. Wtedy zaznaczasz scenariusze do przetestowania i ustawiasz
-pomiar wprost w oknie (czas na krok, warunek startu, konsola RTT, zapis danych);
-⚙ przy scenariuszu nadpisuje ustawienia pojedynczego kroku (czas, napięcie,
-trigger, flagi kompilacji). Kroki wykonują się w kolejności z listy.
+**Tryb autonomiczny** (kliknięcie w tekst). Kreator: wybierasz płytkę, potem
+wypełniasz karty **Pomiar 1, 2, …** (scenariusz — domyślnie nic nie wybrane —
+i czas; start-po-czasie oraz konsola RTT są opcjonalne i schowane w zwijanych
+*ustawieniach zaawansowanych* razem z napięciem i zapisem danych, domyślnie
+wyłączone). „+ Dodaj pomiar" dodaje kolejną kartę i **zwija poprzednie do
+jednego wiersza** (nazwa scenariusza, numer gdy się powtarza) — klik w wiersz
+rozwija kartę z powrotem, więc łatwo wrócić do wcześniejszego pomiaru w długiej
+liście. „Zastosuj do wszystkich" przepisuje ustawienia karty (bez scenariusza)
+na wszystkie istniejące pomiary; „…do następnych" zapamiętuje je jako szablon
+dla każdego **kolejno dodawanego** pomiaru. Kolejność kart = kolejność
+wykonania. „Dalej → PPK2" otwiera ekran połączenia (wykrycie PPK2), a „Start"
+uruchamia przebieg: **każdy kod buduje się i wgrywa tuż przed swoim pomiarem**
+(nie wszystkie z góry), po czym leci pomiar i podgląd wykresu na żywo.
 
 Z CLI (albo do powtarzalnych, wersjonowanych przebiegów) ten sam pomiar opisuje
 **plan** w `plans/<nazwa>.toml` (wzór: `plans/nocny.example.toml`). Plan to
