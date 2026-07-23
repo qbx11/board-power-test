@@ -38,21 +38,19 @@ from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
 
 import power_test as core
 
-# Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (figlet
-# „ANSI Shadow”), monochromatyczna jak reszta interfejsu; pod spodem
-# podpis narzędzia. Statyczny tekst, bez zależności runtime.
+# Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (Small Mono
+# 12), monochromatyczna jak reszta interfejsu; pod spodem podpis
+# narzędzia. Statyczny tekst, bez zależności runtime.
 LOGO = """\
-╭──────────────────────────────────────────────────────────────────────╮
-
-  ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗████████╗███████╗
- ██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝╚══██╔══╝██╔════╝
- ██║  ███╗██║   ██║██║   ██║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗
- ██║   ██║██║   ██║██║   ██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝
- ╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║      ██║   ███████╗
-  ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝      ╚═╝   ╚══════╝
-
-[#888888]                    b o a r d   p o w e r   t e s t[/]
-╰──────────────────────────────────────────────────────────────────────╯"""
+    ▗▄        ▄▄              ▗▖▗▄▄▖                      ▄▖
+    █        █▀▀▌             ▐▌▐▛▀▜▌      ▐▌              █
+    █       ▐▌    ▟█▙  ▟█▙  ▟█▟▌▐▌ ▐▌▝█ █▌▐███  ▟█▙        █
+    █       ▐▌▗▄▖▐▛ ▜▌▐▛ ▜▌▐▛ ▜▌▐███  █▖█  ▐▌  ▐▙▄▟▌       █
+   ▀▙       ▐▌▝▜▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌ ▐█▛  ▐▌  ▐▛▀▀▘       ▟▀
+    █        █▄▟▌▝█▄█▘▝█▄█▘▝█▄█▌▐▙▄▟▌  █▌  ▐▙▄ ▝█▄▄▌       █
+    █         ▀▀  ▝▀▘  ▝▀▘  ▝▀▝▘▝▀▀▀   █    ▀▀  ▝▀▀        █
+    ▜▄                                █▌                  ▄▛
+[#888888]                b o a r d   p o w e r   t e s t[/]"""
 
 
 def _stream(cmd, cwd, on_line, handle=None):
