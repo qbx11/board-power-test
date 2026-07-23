@@ -1076,6 +1076,9 @@ class AutoRunScreen(Screen):
                 self._active_section.collapsed = False
         self._active_section = None
         self._active_log = None
+        # Narzędzia flashujące (J-Link/nrfutil) potrafią pisać wprost do
+        # /dev/tty i zresetować tryb myszy – odnów go, jak w run_west().
+        self.app._reassert_mouse()
 
     def action_cancel(self):
         if self._done:
