@@ -122,6 +122,13 @@ class ValidateTest(unittest.TestCase):
                                      MANIFEST)
         self.assertTrue(any("nieznany scenariusz" in e for e in errs))
 
+    def test_bad_sample_rate(self):
+        errs = planmod.validate_plan(self._plan(sample_rate=500), MANIFEST)
+        self.assertTrue(any("sample_rate" in e for e in errs))
+        # Dozwolona wartość przechodzi.
+        self.assertEqual(
+            planmod.validate_plan(self._plan(sample_rate=1000), MANIFEST), [])
+
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(
             scenario="reset_only", duration_s=30,

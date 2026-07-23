@@ -101,6 +101,12 @@ class SessionWriter:
         osobno w `gaps`."""
         return self.samples_written / self.sample_rate
 
+    @property
+    def avg_uA(self):
+        """Skumulowana średnia prądu od początku pomiaru (µA) albo None."""
+        return (self._sum / self.samples_written
+                if self.samples_written else None)
+
     def write_samples(self, samples):
         arr = np.asarray(samples, np.float32)
         if not len(arr):

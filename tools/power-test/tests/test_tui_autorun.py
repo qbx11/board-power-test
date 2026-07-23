@@ -14,7 +14,7 @@ from fakes import FakeRttReader, FakeSampler
 import tui
 from autorun import engine as eng
 from autorun import ppk2 as ppk2mod
-from textual.widgets import Input, Select, Static
+from textual.widgets import DataTable, Input, Select, Static
 
 
 class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
@@ -183,11 +183,28 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Zakończono",
                           str(app.screen.query_one("#status", Static)
                               .render()))
+            # Wynik trafił do tabelki na górze (jeden zakończony pomiar).
+            table = app.screen.query_one("#results", DataTable)
+            self.assertEqual(table.row_count, 1)
+            # Okna build/flash (zwijane sekcje) sprzątnięte po pomiarze
+            # (remove_children jest asynchroniczne – dajemy cykl pompy).
+            await pilot.pause()
+            from textual.widgets import Collapsible
+            self.assertEqual(
+                len(app.screen.query_one("#cmds").query(Collapsible)), 0)
         import csv
         with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["scenariusz"], "zwykly")
+
+    def test_fmt_uA_autoscale(self):
+        f = tui.AutoRunScreen._fmt_uA
+        self.assertEqual(f(1500), "1.500 mA")     # 1500 µA -> 1.5 mA
+        self.assertEqual(f(0.5), "500.0 nA")
+        self.assertTrue(f(250).endswith("µA"))
+        self.assertTrue(f(2_000_000).endswith(" A"))
+        self.assertEqual(f(None), "—")
 
     async def test_new_measurement_duration_empty(self):
         # Nowy pomiar startuje z pustym czasem (bez szablonu nie dziedziczy),
@@ -243,6 +260,20 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].duration_s, 30)
             self.assertEqual(plan.steps[0].trigger.type, "delay")
             self.assertEqual(plan.steps[0].trigger.seconds, 0)  # start od razu
+            self.assertEqual(plan.steps[0].sample_rate, 100000)  # domyślnie max
+
+    async def test_sample_rate_in_plan(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            card.query_one(".card-rate", Select).value = 1000
+            await pilot.pause()
+            plan = app._build_auto_plan("btz")
+            self.assertEqual(plan.steps[0].sample_rate, 1000)
 
 
 if __name__ == "__main__":

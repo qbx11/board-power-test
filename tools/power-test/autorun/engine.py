@@ -13,12 +13,15 @@
 # Przerwanie = threading.Event `cancel` – sprawdzany we wszystkich
 # pętlach; przerwany pomiar jest domykany (częściowa sesja zostaje).
 
+import math
 import re
 import shlex
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 
@@ -74,7 +77,7 @@ def default_rtt_factory(profile):
 class AutoRunner:
 
     def __init__(self, plan, manifest, sample, *, sampler_factory=None,
-                 rtt_factory=None, event_cb=None, cancel=None,
+                 rtt_factory=None, event_cb=None, cancel=None, pause=None,
                  dry_run=False):
         self.plan = plan
         self.manifest = manifest
@@ -83,6 +86,9 @@ class AutoRunner:
         self.rtt_factory = rtt_factory or default_rtt_factory
         self.event_cb = event_cb or (lambda ev: None)
         self.cancel = cancel or threading.Event()
+        # pause: gdy ustawiony, pętla pomiaru wstrzymuje sampler i zamraża
+        # czas (oś próbek) do czasu wyczyszczenia – Stop/Wznów w UI.
+        self.pause = pause or threading.Event()
         self.dry_run = dry_run
 
         self.defaults = manifest.get("defaults", {})
@@ -309,12 +315,44 @@ class AutoRunner:
             self._check_cancel()
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
+    def _do_pause(self, sampler, writer, idx, step):
+        """Pauza pomiaru (Stop w UI): zatrzymaj sampler i zamroź oś czasu,
+        czekaj na wznowienie albo cancel. Płytka zostaje zasilona – to ten
+        sam pomiar. Zwraca czas trwania pauzy (do korekty rozliczania
+        zgubionych próbek po wznowieniu)."""
+        paused_at = time.monotonic()
+        try:
+            sampler.stop()
+        except Exception:
+            pass
+        avg = writer.avg_uA
+        writer.update_status("paused", None)
+        self._emit("paused", idx, step.scenario, data={
+            "avg_uA": round(avg, 3) if avg is not None else None,
+            "elapsed_s": round(writer.elapsed_s, 1),
+            "duration_s": step.duration_s})
+        while self.pause.is_set():
+            self._check_cancel()
+            time.sleep(0.1)
+        try:
+            sampler.start()
+        except Exception:
+            pass
+        self._emit("resumed", idx, step.scenario)
+        return time.monotonic() - paused_at
+
     def _measure(self, idx, step, writer, rtt_reader):
         """Pętla pomiaru: czytaj PPK2, karm sesję, raportuj na żywo.
         Koniec, gdy zbierzemy próbki warte duration_s (oś danych) albo
         cancel. Wątek RTT (continuous) stawia auto-etykiety równolegle."""
         sampler = self._sampler
-        target = step.duration_s * sampler.sample_rate
+        # Decymacja 100 kS/s -> wybrana częstotliwość (writer.sample_rate):
+        # uśredniamy grupy po `decim` próbek, resztę przenosimy między
+        # odczytami, żeby granice grup się nie rozjeżdżały.
+        eff_rate = writer.sample_rate
+        decim = max(1, round(sampler.sample_rate / eff_rate))
+        target = step.duration_s * eff_rate
+        decim_rest = np.empty(0, np.float32)
         stop_rtt = threading.Event()
         rtt_thread = None
         if rtt_reader is not None:
@@ -335,6 +373,11 @@ class AutoRunner:
         try:
             while writer.samples_written < target:
                 self._check_cancel()
+                if self.pause.is_set():
+                    expected_base += self._do_pause(
+                        sampler, writer, idx, step)
+                    last_data = last_status = time.monotonic()
+                    continue
                 time.sleep(READ_INTERVAL_S)
                 try:
                     chunk = sampler.read()
@@ -353,6 +396,22 @@ class AutoRunner:
                         pass
                     continue
                 now = time.monotonic()
+                # Żywotność PPK2 sprawdzamy po SUROWYCH próbkach (decymacja
+                # do niskiej częstotliwości i tak oddaje dane rzadko).
+                if len(chunk):
+                    last_data = now
+                elif now - last_data > STALL_TIMEOUT_S:
+                    raise AutoRunError(
+                        f"PPK2 nie przysłał żadnych próbek przez "
+                        f"{STALL_TIMEOUT_S:g} s – zerwane połączenie?")
+                if decim > 1:
+                    buf = np.concatenate([decim_rest,
+                                          np.asarray(chunk, np.float32)])
+                    full = len(buf) // decim
+                    decim_rest = buf[full * decim:]
+                    chunk = (buf[:full * decim].reshape(full, decim)
+                             .mean(axis=1).astype(np.float32)
+                             if full else np.empty(0, np.float32))
                 if len(chunk):
                     over = writer.samples_written + len(chunk) - target
                     if over > 0:
@@ -360,25 +419,22 @@ class AutoRunner:
                     writer.write_samples(chunk)
                     sec_sum += float(chunk.sum())
                     sec_n += len(chunk)
-                    last_data = now
-                elif now - last_data > STALL_TIMEOUT_S:
-                    raise AutoRunError(
-                        f"PPK2 nie przysłał żadnych próbek przez "
-                        f"{STALL_TIMEOUT_S:g} s – zerwane połączenie?")
                 if now - last_status >= 1.0:
                     # Rozliczenie zgubionych próbek: ile powinno przyjść
-                    # wg zegara vs ile przyszło (nadwyżka deficytu ponad
-                    # już zgłoszoną trafia do meta.gaps).
-                    expected = (now - expected_base) * sampler.sample_rate
+                    # wg zegara vs ile przyszło (w jednostkach efektywnej
+                    # częstotliwości; nadwyżka deficytu -> meta.gaps).
+                    expected = (now - expected_base) * eff_rate
                     deficit = int(expected - writer.samples_written
                                   - reported_deficit)
-                    if deficit > sampler.sample_rate * 0.2:
+                    if deficit > eff_rate * 0.2:
                         writer.record_gap(deficit)
                         reported_deficit += deficit
-                    avg = sec_sum / sec_n if sec_n else None
-                    writer.update_status("measuring", avg)
+                    inst = sec_sum / sec_n if sec_n else None
+                    avg = writer.avg_uA           # skumulowana od startu
+                    writer.update_status("measuring", inst)
                     self._emit("live", idx, step.scenario, data={
-                        "avg_uA": round(avg, 3) if avg else None,
+                        "avg_uA": round(avg, 3) if avg is not None else None,
+                        "inst_uA": round(inst, 3) if inst is not None else None,
                         "elapsed_s": round(writer.elapsed_s, 1),
                         "duration_s": step.duration_s,
                         "samples": writer.samples_written})
@@ -479,14 +535,21 @@ class AutoRunner:
             self._emit("state", idx, step.scenario, "measure")
             self._emit("session", idx, step.scenario,
                        data={"dir": str(session_dir), "live": True})
+            hw_rate = (self._sampler.sample_rate
+                       if not self.dry_run else 100_000)
+            # Efektywna częstotliwość = sprzętowa / decymacja; okno bazowe
+            # tieru dobrane tak, by miało >= 1 próbkę (przy niskich rate).
+            decim = max(1, round(hw_rate / step.sample_rate))
+            eff_rate = hw_rate // decim
+            window_ms = max(step.storage.window_ms,
+                            math.ceil(1000 / eff_rate))
             writer = SessionWriter(
                 session_dir,
                 meta=self._session_meta(idx, step, scen, voltage,
                                         build_dir),
-                sample_rate=(self._sampler.sample_rate
-                             if not self.dry_run else 100_000),
+                sample_rate=eff_rate,
                 storage_mode=step.storage.mode,
-                window_ms=step.storage.window_ms)
+                window_ms=window_ms)
             if self.dry_run:
                 summary = writer.finalize("done")
                 return StepResult(idx, step.scenario, "done",
