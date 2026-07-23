@@ -11,6 +11,7 @@
 # podłączony debugger dodaje własny prąd. Tryby (pole `rtt` w planie)
 # i ich kompromisy są opisane w plans/nocny.example.toml.
 
+import os
 import re
 import time
 
@@ -69,6 +70,13 @@ class PylinkRttReader:
             raise RttError("brak biblioteki 'pylink-square' – uruchom "
                            "przez `board-power-test` (launcher instaluje "
                            "zależności) albo: pip install pylink-square")
+        # pylink ładuje bibliotekę J-Link w NASZYM procesie (omija child_env
+        # z power_test), a J-Link EDU/EDU Mini wyświetliłby wtedy dialog GUI
+        # "terms of use". Bez DISPLAY/WAYLAND J-Link idzie headless i sam
+        # przyjmuje domyślną opcję – zdejmujemy je na czas otwierania sesji
+        # i przywracamy w finally, żeby nie namieszać w środowisku apki.
+        saved_display = {k: os.environ.pop(k, None)
+                         for k in ("DISPLAY", "WAYLAND_DISPLAY")}
         try:
             self._jlink = pylink.JLink()
             self._jlink.open(serial_no=self.serial_no)
@@ -82,6 +90,10 @@ class PylinkRttReader:
                 "Sprawdź: kabel SWD wpięty? J-Link Software zainstalowane "
                 "(pylink używa biblioteki SEGGER)? firmware ma włączone "
                 "CONFIG_USE_SEGGER_RTT?")
+        finally:
+            for k, v in saved_display.items():
+                if v is not None:
+                    os.environ[k] = v
         # RTT potrzebuje chwili na znalezienie control blocku w RAM.
         time.sleep(0.5)
 
