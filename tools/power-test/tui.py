@@ -169,17 +169,19 @@ class CardTitle(Static):
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """Dialog z pytaniem; `no=None` daje pojedynczy przycisk (twardy krok)."""
+    """Dialog z pytaniem; `no=None` daje pojedynczy przycisk (twardy krok).
+    `danger=True` oznacza przycisk 'yes' jako nieodwracalny (czerwony hover)."""
 
-    def __init__(self, text, yes="OK", no="Anuluj"):
+    def __init__(self, text, yes="OK", no="Anuluj", danger=False):
         super().__init__()
-        self.text, self.yes, self.no = text, yes, no
+        self.text, self.yes, self.no, self.danger = text, yes, no, danger
 
     def compose(self):
         with Vertical(classes="dialog"):
             yield Static(self.text, classes="dialog-text")
             with Horizontal(classes="dialog-buttons"):
-                yield Button(self.yes, id="yes")
+                yield Button(self.yes, id="yes",
+                            classes="danger" if self.danger else "")
                 if self.no is not None:
                     yield Button(self.no, id="no")
 
@@ -1127,7 +1129,7 @@ class AutoRunScreen(Screen):
                 f"({self._run_dir_rel()}/).\n"
                 "Usunąć je i zwolnić miejsce, czy zostawić na dysku?\n"
                 "(Wiersze w reports/pomiary.csv zostają tak czy inaczej.)",
-                yes="Usuń", no="Zostaw"),
+                yes="Usuń", no="Zostaw", danger=True),
             callback=self._discard_decided)
 
     def _discard_decided(self, delete):
@@ -1424,6 +1426,11 @@ class PowerTestApp(App):
     Button.-active { background: transparent; border: round #aaaaaa; }
     Button.pressed, Button.pressed:hover, Button.pressed:focus {
         background: #333333; border: round #aaaaaa; }
+    /* Akcja nieodwracalna (np. "Usuń") – czerwony hover/focus ostrzega
+       przed kliknięciem, spójnie z jedynym innym wyjątkiem od
+       monochromatycznej palety (błąd PPK2, #cc6666). */
+    Button.danger:hover, Button.danger:focus {
+        border: round #cc6666; color: #cc6666; }
     /* Rząd akcji mieści się dokładnie w obrysie ramek (72 kolumny):
        bez sztucznego min-width przycisków. */
     #actions { margin-top: 1; height: auto; }
@@ -1633,7 +1640,7 @@ class PowerTestApp(App):
             f"[b]Usunąć scenariusz „{label}”?[/b]\n\n"
             "Wpis zniknie z scenarios.toml.\n"
             "Zebrane pomiary w reports/pomiary.csv zostają.",
-            yes="Usuń", no="Anuluj"), callback=done)
+            yes="Usuń", no="Anuluj", danger=True), callback=done)
 
     def _remove_scenario(self, name):
         try:
