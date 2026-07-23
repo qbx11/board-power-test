@@ -33,6 +33,7 @@ from textual import work
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.theme import Theme
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
                              DirectoryTree, Input, Label, Log, Select, Static)
 
@@ -1320,6 +1321,19 @@ class AutoRunScreen(Screen):
         self.note("[b]Plan przerwany błędem.[/b] Esc = powrót.")
 
 
+# Szare tło (zamiast domyślnej czerni Textuala) - neutralne odcienie szarości,
+# spójne z resztą monochromatycznej palety aplikacji.
+GRAY_THEME = Theme(
+    name="power-test-gray",
+    primary="#888888",
+    foreground="#cccccc",
+    background="#2b2b2b",
+    surface="#333333",
+    panel="#3a3a3a",
+    dark=True,
+)
+
+
 class PowerTestApp(App):
     TITLE = "board-power-test"
     ENABLE_COMMAND_PALETTE = False  # bez przycisku/skrótu palety komend
@@ -1654,6 +1668,8 @@ class PowerTestApp(App):
         self.notify(f"Usunięto scenariusz '{name}' z scenarios.toml.")
 
     def on_mount(self):
+        self.register_theme(GRAY_THEME)
+        self.theme = GRAY_THEME.name
         self._apply_mode()
 
     def on_button_pressed(self, event):
