@@ -128,3 +128,13 @@ source      = "../NCS-Projects/blinky-advanced"
 [scenarios.mesh-reliability-tester]
 description = "Aplikacja z ../mesh-reliability-tester (build przez west)."
 source      = "../mesh-reliability-tester"
+
+[scenarios.lpn]
+label       = "LPN"
+description = "Aplikacja z ../Projekt-BLE-Mesh-Friend/app/apps/lpn (build przez west)."
+source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn"
+
+[scenarios.lpn_mock]
+label       = "LPN MOCK"
+description = "LPN, który wysyła fake-owe pomiary temperatury"
+source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_mock"
