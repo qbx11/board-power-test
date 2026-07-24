@@ -414,24 +414,61 @@ class AddScreen(ModalScreen):
 
 
 class ResultsScreen(ModalScreen):
-    """Podgląd dziennika pomiarów (reports/pomiary.csv)."""
+    """Podgląd dziennika pomiarów (reports/pomiary.csv), filtrowany do
+    bieżącego trybu: w trybie autonomicznym pokazuje tylko pomiary
+    autonomiczne (mają zapisaną sesję), w ręcznym – tylko ręczne. Każdy tryb
+    dostaje kolumny właściwe dla siebie (autonomiczny: seria/parametr/min/max/
+    czas; ręczny: klasyczne pola z 'oczekiwane')."""
+
+    # Wiersz autonomiczny odróżniamy po zapisanej ścieżce sesji (tryb ręczny
+    # nigdy jej nie ustawia). pomiar_id/parametr/wartosc mówią, który pomiar
+    # z serii (sweep) miał jaką wartość flagi build.
+    MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
+                   "prad_uA", "oczekiwane", "uwagi"]
+    AUTO_COLS = ["data", "pomiar_id", "scenariusz", "parametr", "wartosc",
+                 "napiecie_V", "prad_uA", "czas_s"]
+    # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
+    # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
+    # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
+    _TWO_DP = ("prad_uA", "czas_s")
+
+    def __init__(self, mode=None):
+        super().__init__()
+        self._mode = mode
+
+    @staticmethod
+    def _fmt_cell(col, value):
+        if col in ResultsScreen._TWO_DP and value not in ("", None):
+            try:
+                return f"{float(value):.2f}"
+            except (TypeError, ValueError):
+                return value
+        return value
 
     def compose(self):
         with Vertical(classes="dialog results"):
-            yield Static("[b]Zebrane pomiary[/b] – reports/pomiary.csv")
+            yield Static("", id="results-title")
             yield DataTable()
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Zamknij", id="close")
 
     def on_mount(self):
+        mode = self._mode or getattr(self.app, "mode", None)
+        auto = mode == "auto"
+        which = "tryb autonomiczny" if auto else "tryb ręczny"
+        self.query_one("#results-title", Static).update(
+            f"[b]Zebrane pomiary — {which}[/b] · reports/pomiary.csv")
+        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
         table = self.query_one(DataTable)
-        cols = ["data", "egzemplarz", "scenariusz", "napiecie_V",
-                "prad_uA", "oczekiwane", "uwagi"]
         table.add_columns(*cols)
-        if core.CSV_PATH.is_file():
-            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    table.add_row(*(row.get(c, "") for c in cols))
+        if not core.CSV_PATH.is_file():
+            return
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if bool(row.get("sesja")) != auto:
+                    continue          # wiersz z innego trybu – pomiń
+                table.add_row(*(self._fmt_cell(c, row.get(c, ""))
+                                for c in cols))
 
     def on_button_pressed(self, event):
         self.dismiss()
@@ -1504,10 +1541,14 @@ class PowerTestApp(App):
        monochromatycznej palety (błąd PPK2, #cc6666). */
     Button.danger:hover, Button.danger:focus {
         border: round #cc6666; color: #cc6666; }
-    /* Rząd akcji mieści się dokładnie w obrysie ramek (72 kolumny):
-       bez sztucznego min-width przycisków. */
-    #actions { margin-top: 1; height: auto; }
-    #actions Button { margin-right: 2; min-width: 0; }
+    /* Rząd akcji ma taką samą szerokość jak reszta panelu (72 kolumny,
+       jak #scenarios / #mode-toggle / #measurements) – przyciski
+       zachowują naturalną szerokość, a odstępy między nimi (spacery
+       1fr) rosną, żeby rozłożyć je równomiernie na tej szerokości
+       zamiast kupić się po lewej stronie. */
+    #actions { margin-top: 1; height: auto; width: 72; max-width: 100%; }
+    #actions Button { min-width: 0; }
+    .actions-gap { width: 1fr; height: 1; }
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
@@ -1519,12 +1560,15 @@ class PowerTestApp(App):
     /* Opcjonalny zapis surowych danych sesji – pod tabelą wyników. */
     #save_results { margin: 1 1 0 1; min-width: 18; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
-    #cmds { padding: 0 1; height: auto; max-height: 22; }
-    /* Monitor dongla (serial) – logi przed i podczas pomiaru. */
-    #dongle-panel { height: auto; }
+    #cmds { padding: 0 1; height: auto; }
+    /* Monitor dongla (serial) – logi przed i podczas pomiaru. Panel
+       wypełnia wolną wysokość (1fr) i jest jedynym przewijanym obszarem
+       w środku ekranu – dzięki temu sam Screen nie musi się przewijać i
+       nie pojawia się drugi (pionowy) suwak tuż obok suwaka logu. */
+    #dongle-panel { height: 1fr; }
     #dongle-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
-    #dongle-log { height: 8; border: round #555555; background: transparent;
-                  margin: 0 1; }
+    #dongle-log { height: 1fr; min-height: 8; border: round #555555;
+                  background: transparent; margin: 0 1; overflow-x: auto; }
     /* Duże okno pomiaru pod logami build/flash. */
     #measure-panel { height: auto; border: round #555555; margin: 1 1;
                      padding: 1 2; background: transparent; }
@@ -1543,7 +1587,7 @@ class PowerTestApp(App):
     CollapsibleTitle { color: $text; }
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
     .cmd-log { height: 14; border: round #555555; background: transparent;
-               margin: 0 1 1 2; }
+               margin: 0 1 1 2; overflow-x: auto; }
     /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
        skopiowania. */
     .mem-report { height: auto; width: auto; max-width: 100%;
@@ -1566,7 +1610,10 @@ class PowerTestApp(App):
     .dialog-text { margin-bottom: 1; }
     .dialog-buttons { margin-top: 1; height: auto; }
     .dialog-buttons Button { margin-right: 2; }
-    .results DataTable { height: 18; background: transparent; }
+    /* Podgląd wyników szerszy niż zwykłe dialogi – mieści komplet kolumn
+       (seria/parametr/min/max) bez poziomego scrolla na typowym terminalu. */
+    .dialog.results { width: 96%; max-width: 100%; }
+    .results DataTable { height: 18; width: 100%; background: transparent; }
     #current-row { height: auto; }
     #current-row #current { width: 32; }
     #current-row #unit { width: 12; margin-left: 2; }
@@ -1679,10 +1726,14 @@ class PowerTestApp(App):
                         classes="standard-only")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
+                yield Static(classes="actions-gap")
                 yield Button("Zaznacz wszystkie", id="select_all",
                              classes="standard-only")
+                yield Static(classes="actions-gap standard-only")
                 yield Button("Dodaj kod", id="add_fw")
-                yield Button("Wyniki", id="results")
+                yield Static(classes="actions-gap")
+                yield Button("Wyniki", id="results_btn")
+                yield Static(classes="actions-gap")
                 yield Button("Wyjście", id="quit")
 
     def _scenario_row(self, n, s, value=False):
@@ -1737,8 +1788,8 @@ class PowerTestApp(App):
                 box.value = True
         elif event.button.id == "add_fw":
             self.push_screen(AddScreen(), callback=self._scenario_added)
-        elif event.button.id == "results":
-            self.push_screen(ResultsScreen())
+        elif event.button.id == "results_btn":
+            self.push_screen(ResultsScreen(self.mode))
         elif event.button.id == "add_measurement":
             self.add_measurement()
         elif event.button.has_class("card-apply-next"):

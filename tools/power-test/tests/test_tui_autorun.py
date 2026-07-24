@@ -239,6 +239,48 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
 
+    async def test_results_screen_filtered_by_mode(self):
+        # Dziennik z jednym wierszem ręcznym (bez sesji) i jednym
+        # autonomicznym (z sesją). "Wyniki" pokazują tylko wiersze bieżącego
+        # trybu, z kolumnami właściwymi dla trybu.
+        manual = {c: "" for c in core.CSV_FIELDS}
+        manual.update({"data": "2026-01-01 10:00", "scenariusz": "zwykly",
+                       "prad_uA": "0.9"})
+        auto = {c: "" for c in core.CSV_FIELDS}
+        auto.update({"data": "2026-01-02 10:00", "scenariusz": "lpn",
+                     "prad_uA": "20.5", "pomiar_id": "1.1",
+                     "parametr": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                     "wartosc": "10", "prad_min_uA": "-0.1",
+                     "prad_max_uA": "180000", "czas_s": "120",
+                     "sesja": "reports/sessions/run/x"})
+        core.append_row(manual, verbose=False)
+        core.append_row(auto, verbose=False)
+
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 50)) as pilot:
+            app.push_screen(tui.ResultsScreen("standard"))
+            await pilot.pause()
+            table = app.screen.query_one(DataTable)
+            self.assertEqual(table.row_count, 1)          # tylko ręczny
+            self.assertEqual(len(table.columns),
+                             len(tui.ResultsScreen.MANUAL_COLS))
+            app.pop_screen()
+            await pilot.pause()
+            app.push_screen(tui.ResultsScreen("auto"))
+            await pilot.pause()
+            table = app.screen.query_one(DataTable)
+            self.assertEqual(table.row_count, 1)          # tylko autonomiczny
+            self.assertEqual(len(table.columns),
+                             len(tui.ResultsScreen.AUTO_COLS))
+            # min/max prądu nie są pokazywane w tabeli.
+            self.assertNotIn("prad_min_uA", tui.ResultsScreen.AUTO_COLS)
+            self.assertNotIn("prad_max_uA", tui.ResultsScreen.AUTO_COLS)
+            # prąd i czas z dokładnością do 2 miejsc po przecinku.
+            cells = list(table.get_row_at(0))
+            cols = tui.ResultsScreen.AUTO_COLS
+            self.assertEqual(cells[cols.index("prad_uA")], "20.50")
+            self.assertEqual(cells[cols.index("czas_s")], "120.00")
+
     def test_sweep_str_and_step_label(self):
         S = tui.AutoRunScreen
         self.assertEqual(S._sweep_str(None), "")
