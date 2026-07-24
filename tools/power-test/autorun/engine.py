@@ -64,6 +64,7 @@ class StepResult:
     session_dir: Path = None
     summary: dict = field(default_factory=dict)
     error: str = ""
+    label: str = ""            # "N.M" dla serii; puste = użyj index
 
 
 def default_sampler_factory(plan):
@@ -160,6 +161,10 @@ class AutoRunner:
         # korzystają z gotowego obrazu.
         self._used_dirs = {}
         self._done_dirs = {}
+        # Kontekst bieżącego kroku (dla etykiet "N.M" i wartości sweepa):
+        # ustawiany na starcie _run_step, doklejany do zdarzeń w _emit.
+        self._cur_label = ""
+        self._cur_sweep = None
 
     # ---------- pomocnicze ----------
 
@@ -168,6 +173,13 @@ class AutoRunner:
         pojedynczymi kwargami (detail=...) – oba trafiają do EngineEvent.data."""
         payload = dict(data or {})
         payload.update(extra)
+        # Zdarzenia kroku (step != 0) niosą etykietę wyświetlaną ("N.M" dla
+        # serii, inaczej numer) i – jeśli krok jest z serii – parę
+        # parametr/wartość, żeby UI mogło je pokazać bez znajomości planu.
+        if step:
+            payload.setdefault("label", self._cur_label or str(step))
+            if self._cur_sweep:
+                payload.setdefault("sweep", self._cur_sweep)
         self.event_cb(EngineEvent(kind, step, name, text, payload))
 
     def _log(self, text, files=()):
@@ -602,6 +614,11 @@ class AutoRunner:
     def _run_step(self, idx, step, workspace):
         scen = self.scenarios[step.scenario]
         voltage = self._voltage_for(step)
+        # Kontekst dla _emit: etykieta "N.M" (albo numer) i para sweepa.
+        self._cur_label = step.label or str(idx)
+        self._cur_sweep = ({"param": step.sweep_param,
+                            "value": step.sweep_value}
+                           if step.sweep_param else None)
         self._emit("step_start", idx, step.scenario,
                    data={"duration_s": step.duration_s,
                          "voltage": voltage})
@@ -729,8 +746,12 @@ class AutoRunner:
 
     def _session_meta(self, idx, step, scen, voltage, build_dir):
         return {"plan": self.plan.name, "step": idx,
+                "step_label": step.label or str(idx),
                 "scenario": step.scenario,
                 "label": scen.get("label", step.scenario),
+                "sweep": ({"param": step.sweep_param,
+                           "value": step.sweep_value}
+                          if step.sweep_param else None),
                 "flags": core.scenario_flags(scen)
                 + (" " + " ".join(step.build_extra_args)
                    if step.build_extra_args else ""),
@@ -764,11 +785,20 @@ class AutoRunner:
         row = core.make_row(step.scenario, scen, self.profile,
                             self.sample, voltage, summary["avg_uA"],
                             note or f"autorun: plan {self.plan.name}")
+        # scenario_flags() nie zna build_extra_args (są per krok, nie w
+        # manifeście) – dokładamy je, żeby kolumna 'flagi' oddawała
+        # faktycznie zbudowany obraz (bez tego wartość sweepa ginie w CSV).
+        if step.build_extra_args:
+            extra = " ".join(step.build_extra_args)
+            row["flagi"] = f"{row['flagi']} {extra}".strip()
         row.update({
             "prad_min_uA": summary["min_uA"],
             "prad_max_uA": summary["max_uA"],
             "czas_s": summary["duration_s"],
-            "sesja": str(Path(session_dir).relative_to(core.ROOT))})
+            "sesja": str(Path(session_dir).relative_to(core.ROOT)),
+            "pomiar_id": step.label,
+            "parametr": step.sweep_param,
+            "wartosc": step.sweep_value})
         core.append_row(row, verbose=False)
 
     # ---------- przebieg ----------
@@ -824,6 +854,7 @@ class AutoRunner:
             for idx, step in enumerate(self.plan.steps, 1):
                 self._check_cancel()
                 result = self._run_step(idx, step, workspace)
+                result.label = step.label or str(idx)
                 results.append(result)
                 if result.status == "cancelled":
                     break

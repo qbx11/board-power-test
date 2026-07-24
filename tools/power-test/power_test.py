@@ -68,9 +68,12 @@ CSV_PATH = ROOT / "reports" / "pomiary.csv"
 # (autorun): min/max prądu, czas pomiaru i ścieżka sesji z wykresem.
 # Wiersze ręczne zostawiają nowe pola puste – ensure_csv_schema()
 # dopisuje brakujące kolumny do starego pliku bez utraty danych.
+# pomiar_id/parametr/wartosc wypełnia tryb autonomiczny dla serii (sweep):
+# etykieta "N.M" oraz sweepowany symbol Kconfig i jego wartość.
 CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
                    "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
-CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja"]
+CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja",
+                      "pomiar_id", "parametr", "wartosc"]
 CSV_FIELDS = CSV_BASE_FIELDS + CSV_AUTORUN_FIELDS
 
 
@@ -862,8 +865,8 @@ def cmd_report(args):
         rows = list(csv.DictReader(f))
     if not rows:
         die("plik pomiarów jest pusty")
-    cols = ["data", "egzemplarz", "scenariusz", "napiecie_V",
-            "prad_uA", "oczekiwane", "uwagi"]
+    cols = ["data", "egzemplarz", "scenariusz", "parametr", "wartosc",
+            "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
     print_table(tuple(cols), [tuple(r.get(c, "") for c in cols) for r in rows])
     print(f"\n({len(rows)} pomiarów; pełne dane, w tym flagi builda: "
           f"{CSV_PATH.relative_to(ROOT)})")
@@ -938,7 +941,7 @@ def cmd_autorun(args):
     for r in results:
         avg = r.summary.get("avg_uA")
         extra = f"śr {avg} µA" if avg is not None else (r.error or "")
-        print(f"  krok {r.index} {r.scenario}: {r.status}"
+        print(f"  krok {r.label or r.index} {r.scenario}: {r.status}"
               + (f" – {extra}" if extra else ""))
     if not args.dry_run:
         print(f"\nSesje z wykresami: {runner.run_dir.relative_to(ROOT)}/\n"

@@ -213,5 +213,78 @@ class ValidateTest(unittest.TestCase):
         self.assertFalse(any("napięcie" in e for e in errs))
 
 
+class SweepTest(unittest.TestCase):
+    def test_normalize_param(self):
+        for raw in ("CONFIG_LPN_SENSOR_INTERVAL_S",
+                    "LPN_SENSOR_INTERVAL_S",
+                    "-DCONFIG_LPN_SENSOR_INTERVAL_S"):
+            self.assertEqual(planmod.normalize_sweep_param(raw),
+                             "CONFIG_LPN_SENSOR_INTERVAL_S")
+
+    def test_normalize_param_bad(self):
+        for bad in ("", "  ", "123abc", "ma spacje", "CONFIG=x"):
+            with self.assertRaises(ValueError):
+                planmod.normalize_sweep_param(bad)
+
+    def test_parse_values(self):
+        self.assertEqual(planmod.parse_sweep_values("1, 2, 5"),
+                         ["1", "2", "5"])
+        self.assertEqual(planmod.parse_sweep_values("10 20  30"),
+                         ["10", "20", "30"])
+        # duplikaty zdjęte, kolejność pierwszych wystąpień zachowana
+        self.assertEqual(planmod.parse_sweep_values("5, 1, 5, 2"),
+                         ["5", "1", "2"])
+        self.assertEqual(planmod.parse_sweep_values([1, 2, 3]),
+                         ["1", "2", "3"])
+
+    def test_parse_values_empty(self):
+        for bad in ("", "  ", ",,", []):
+            with self.assertRaises(ValueError):
+                planmod.parse_sweep_values(bad)
+
+    def test_expand_sweep(self):
+        base = dict(scenario="app", duration_s=600,
+                    build_extra_args=["-DCONFIG_LOG=n"])
+        steps = planmod.expand_sweep(
+            2, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+        self.assertEqual([s.label for s in steps], ["2.1", "2.2", "2.3"])
+        self.assertTrue(all(s.scenario == "app" for s in steps))
+        self.assertTrue(all(s.duration_s == 600 for s in steps))
+        self.assertTrue(all(
+            s.sweep_param == "CONFIG_LPN_SENSOR_INTERVAL_S" for s in steps))
+        self.assertEqual([s.sweep_value for s in steps], ["1", "5", "10"])
+        # Flaga serii doklejona ZA istniejącymi build_extra_args bazy.
+        self.assertEqual(steps[1].build_extra_args,
+                         ["-DCONFIG_LOG=n",
+                          "-DCONFIG_LPN_SENSOR_INTERVAL_S=5"])
+
+    def test_expand_sweep_validates(self):
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(1, "zły param", "1", dict(scenario="app",
+                                                           duration_s=1))
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(1, "CONFIG_X", "", dict(scenario="app",
+                                                         duration_s=1))
+
+    def test_expanded_steps_validate_against_manifest(self):
+        # Kroki z ekspansji są zwykłymi PlanStep – przechodzą walidację
+        # planu tak jak ręczne kroki z build_extra_args.
+        base = dict(scenario="app", duration_s=60)
+        steps = planmod.expand_sweep(1, "CONFIG_LPN_SENSOR_INTERVAL_S",
+                                     "1, 2", base)
+        plan = planmod.Plan(name="t", board="btz", steps=steps)
+        self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
+
+    def test_sweep_on_hex_scenario_rejected(self):
+        # Sweep (build_extra_args) na scenariuszu 'hex' -> błąd walidacji,
+        # z etykietą kroku "N.M".
+        base = dict(scenario="gotowy", duration_s=60)
+        steps = planmod.expand_sweep(3, "CONFIG_X", "1, 2", base)
+        errs = planmod.validate_plan(
+            planmod.Plan(name="t", board="btz", steps=steps), MANIFEST)
+        self.assertTrue(any("hex" in e for e in errs))
+        self.assertTrue(any("3.1" in e or "3.2" in e for e in errs))
+
+
 if __name__ == "__main__":
     unittest.main()
