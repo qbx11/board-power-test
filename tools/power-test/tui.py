@@ -414,24 +414,61 @@ class AddScreen(ModalScreen):
 
 
 class ResultsScreen(ModalScreen):
-    """Podgląd dziennika pomiarów (reports/pomiary.csv)."""
+    """Podgląd dziennika pomiarów (reports/pomiary.csv), filtrowany do
+    bieżącego trybu: w trybie autonomicznym pokazuje tylko pomiary
+    autonomiczne (mają zapisaną sesję), w ręcznym – tylko ręczne. Każdy tryb
+    dostaje kolumny właściwe dla siebie (autonomiczny: seria/parametr/min/max/
+    czas; ręczny: klasyczne pola z 'oczekiwane')."""
+
+    # Wiersz autonomiczny odróżniamy po zapisanej ścieżce sesji (tryb ręczny
+    # nigdy jej nie ustawia). pomiar_id/parametr/wartosc mówią, który pomiar
+    # z serii (sweep) miał jaką wartość flagi build.
+    MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
+                   "prad_uA", "oczekiwane", "uwagi"]
+    AUTO_COLS = ["data", "pomiar_id", "scenariusz", "parametr", "wartosc",
+                 "napiecie_V", "prad_uA", "czas_s"]
+    # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
+    # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
+    # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
+    _TWO_DP = ("prad_uA", "czas_s")
+
+    def __init__(self, mode=None):
+        super().__init__()
+        self._mode = mode
+
+    @staticmethod
+    def _fmt_cell(col, value):
+        if col in ResultsScreen._TWO_DP and value not in ("", None):
+            try:
+                return f"{float(value):.2f}"
+            except (TypeError, ValueError):
+                return value
+        return value
 
     def compose(self):
         with Vertical(classes="dialog results"):
-            yield Static("[b]Zebrane pomiary[/b] – reports/pomiary.csv")
+            yield Static("", id="results-title")
             yield DataTable()
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Zamknij", id="close")
 
     def on_mount(self):
+        mode = self._mode or getattr(self.app, "mode", None)
+        auto = mode == "auto"
+        which = "tryb autonomiczny" if auto else "tryb ręczny"
+        self.query_one("#results-title", Static).update(
+            f"[b]Zebrane pomiary — {which}[/b] · reports/pomiary.csv")
+        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
         table = self.query_one(DataTable)
-        cols = ["data", "egzemplarz", "scenariusz", "napiecie_V",
-                "prad_uA", "oczekiwane", "uwagi"]
         table.add_columns(*cols)
-        if core.CSV_PATH.is_file():
-            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    table.add_row(*(row.get(c, "") for c in cols))
+        if not core.CSV_PATH.is_file():
+            return
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if bool(row.get("sesja")) != auto:
+                    continue          # wiersz z innego trybu – pomiń
+                table.add_row(*(self._fmt_cell(c, row.get(c, ""))
+                                for c in cols))
 
     def on_button_pressed(self, event):
         self.dismiss()
@@ -1573,7 +1610,10 @@ class PowerTestApp(App):
     .dialog-text { margin-bottom: 1; }
     .dialog-buttons { margin-top: 1; height: auto; }
     .dialog-buttons Button { margin-right: 2; }
-    .results DataTable { height: 18; background: transparent; }
+    /* Podgląd wyników szerszy niż zwykłe dialogi – mieści komplet kolumn
+       (seria/parametr/min/max) bez poziomego scrolla na typowym terminalu. */
+    .dialog.results { width: 96%; max-width: 100%; }
+    .results DataTable { height: 18; width: 100%; background: transparent; }
     #current-row { height: auto; }
     #current-row #current { width: 32; }
     #current-row #unit { width: 12; margin-left: 2; }
@@ -1749,7 +1789,7 @@ class PowerTestApp(App):
         elif event.button.id == "add_fw":
             self.push_screen(AddScreen(), callback=self._scenario_added)
         elif event.button.id == "results_btn":
-            self.push_screen(ResultsScreen())
+            self.push_screen(ResultsScreen(self.mode))
         elif event.button.id == "add_measurement":
             self.add_measurement()
         elif event.button.has_class("card-apply-next"):

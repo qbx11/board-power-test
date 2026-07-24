@@ -782,9 +782,15 @@ class AutoRunner:
                     note=""):
         if not summary.get("samples"):
             return
+        # Domyślna 'uwaga': plan + (dla serii) sweepowany parametr i jego
+        # wartość, żeby kolumna niosła treść nawet w widokach bez kolumn
+        # parametr/wartosc.
+        note_default = f"autorun: plan {self.plan.name}"
+        if step.sweep_param:
+            note_default += f" · {step.sweep_param}={step.sweep_value}"
         row = core.make_row(step.scenario, scen, self.profile,
                             self.sample, voltage, summary["avg_uA"],
-                            note or f"autorun: plan {self.plan.name}")
+                            note or note_default)
         # scenario_flags() nie zna build_extra_args (są per krok, nie w
         # manifeście) – dokładamy je, żeby kolumna 'flagi' oddawała
         # faktycznie zbudowany obraz (bez tego wartość sweepa ginie w CSV).
