@@ -198,6 +198,59 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["scenariusz"], "zwykly")
 
+    async def test_sweep_card_expands_to_steps(self):
+        # Karta z włączoną serią rozwija się na wiele kroków "N.M", każdy
+        # z inną flagą -DCONFIG_...=<wartość>, wspólny (stały) czas.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "10m"
+            card.query_one(".card-sweep-on", tui.Check).value = True
+            card.query_one(".card-sweep-param", Input).value = \
+                "CONFIG_LPN_SENSOR_INTERVAL_S"
+            card.query_one(".card-sweep-values", Input).value = "1, 5, 10"
+            await pilot.pause()
+            plan = app._build_auto_plan("btz")
+            self.assertEqual(len(plan.steps), 3)
+            self.assertEqual([s.label for s in plan.steps],
+                             ["1.1", "1.2", "1.3"])
+            self.assertTrue(all(s.scenario == "zwykly" for s in plan.steps))
+            self.assertTrue(all(s.duration_s == 600 for s in plan.steps))
+            self.assertEqual([s.sweep_value for s in plan.steps],
+                             ["1", "5", "10"])
+            self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=5",
+                          plan.steps[1].build_extra_args)
+
+    async def test_sweep_empty_values_raise(self):
+        # Seria włączona bez wartości -> czytelny błąd (blokuje start planu).
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "10m"
+            card.query_one(".card-sweep-on", tui.Check).value = True
+            card.query_one(".card-sweep-values", Input).value = ""
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
+
+    def test_sweep_str_and_step_label(self):
+        S = tui.AutoRunScreen
+        self.assertEqual(S._sweep_str(None), "")
+        self.assertEqual(
+            S._sweep_str({"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                          "value": "5"}),
+            "LPN_SENSOR_INTERVAL_S=5")
+        ev = type("E", (), {"data": {"label": "1.2"}, "step": 1})()
+        self.assertEqual(S._step_label(ev), "1.2")
+        ev2 = type("E", (), {"data": {}, "step": 3})()
+        self.assertEqual(S._step_label(ev2), "3")
+
     def test_fmt_uA_autoscale(self):
         f = tui.AutoRunScreen._fmt_uA
         self.assertEqual(f(1500), "1.500 mA")     # 1500 µA -> 1.5 mA

@@ -765,6 +765,25 @@ class MeasurementCard(Vertical):
                         classes="card-duration")
             with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
                              classes="card-adv"):
+                # Seria (sweep): jedna karta -> wiele pomiarów "N.1, N.2, …",
+                # każdy budowany z inną flagą -DCONFIG_...=<wartość>. Pola
+                # pojawiają się po włączeniu.
+                yield Check("Seria: sweep parametru (jedna karta = wiele "
+                            "pomiarów)",
+                            value=c.get("sweep_on", False),
+                            classes="card-sweep-on")
+                with Vertical(classes="card-sweep-box"):
+                    yield Label("Parametr (symbol Kconfig):")
+                    yield Input(
+                        value=c.get("sweep_param",
+                                    "CONFIG_LPN_SENSOR_INTERVAL_S"),
+                        placeholder="CONFIG_LPN_SENSOR_INTERVAL_S",
+                        classes="card-sweep-param")
+                    yield Label("Wartości (po przecinku lub spacji):")
+                    yield Input(value=c.get("sweep_values", ""),
+                                placeholder="1, 2, 5, 10, 20, 30, 60, 120, "
+                                            "300, 600",
+                                classes="card-sweep-values")
                 # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
                 yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
                             value=c.get("delay_on", False),
@@ -837,6 +856,8 @@ class MeasurementCard(Vertical):
         event.stop()
 
     def _sync_advanced(self):
+        self.query_one(".card-sweep-box").display = \
+            self.query_one(".card-sweep-on", Checkbox).value
         self.query_one(".card-delay-s").display = \
             self.query_one(".card-delay-on", Checkbox).value
         self.query_one(".card-rtt-box").display = \
@@ -872,7 +893,22 @@ class MeasurementCard(Vertical):
         dupes = sum(1 for card in self.app.query(MeasurementCard)
                     if card._scenario() == scen)
         suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
-        title.update(f"▶ {label}{suffix}")
+        title.update(f"▶ {label}{suffix}{self._sweep_title()}")
+
+    def _sweep_title(self):
+        """Dopisek do tytułu zwiniętej karty, gdy włączona seria (sweep):
+        ' · sweep CONFIG_… ×M'. Pusty, gdy sweep wyłączony."""
+        try:
+            if not self.query_one(".card-sweep-on", Checkbox).value:
+                return ""
+            param = self.query_one(".card-sweep-param", Input).value.strip()
+            raw = self.query_one(".card-sweep-values", Input).value
+            n = len(raw.replace(",", " ").split())
+        except Exception:
+            return ""
+        if not n:
+            return " · sweep (brak wartości)"
+        return f" · sweep {param or '?'} ×{n}"
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -883,6 +919,11 @@ class MeasurementCard(Vertical):
     def get_config(self):
         return {
             "scenario": self._scenario(),
+            "sweep_on": self.query_one(".card-sweep-on", Checkbox).value,
+            "sweep_param":
+                self.query_one(".card-sweep-param", Input).value.strip(),
+            "sweep_values":
+                self.query_one(".card-sweep-values", Input).value.strip(),
             "duration": self.query_one(".card-duration", Input).value.strip(),
             "delay_on": self.query_one(".card-delay-on", Checkbox).value,
             "delay_s": self.query_one(".card-delay-s", Input).value.strip(),
@@ -903,6 +944,9 @@ class MeasurementCard(Vertical):
 
     def apply_shared(self, cfg):
         """Ustaw wszystko OPRÓCZ scenariusza (dla 'Zastosuj do wszystkich')."""
+        self.query_one(".card-sweep-on", Checkbox).value = cfg["sweep_on"]
+        self.query_one(".card-sweep-param", Input).value = cfg["sweep_param"]
+        self.query_one(".card-sweep-values", Input).value = cfg["sweep_values"]
         self.query_one(".card-duration", Input).value = cfg["duration"]
         self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
         self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
@@ -1026,7 +1070,8 @@ class AutoRunScreen(Screen):
 
     def on_mount(self):
         table = self.query_one("#results", DataTable)
-        table.add_columns("#", "Scenariusz", "Średni", "Max", "Czas")
+        table.add_columns("#", "Scenariusz", "Parametr", "Średni", "Max",
+                          "Czas")
         table.display = False          # pokaże się z pierwszym wynikiem
         self.query_one("#measure-panel").display = False
         self.query_one("#dongle-panel").display = False
@@ -1168,6 +1213,21 @@ class AutoRunScreen(Screen):
         m, sec = divmod(r, 60)
         return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
+    @staticmethod
+    def _step_label(ev):
+        """Etykieta kroku do wyświetlenia: 'N.M' dla serii, inaczej numer."""
+        return ev.data.get("label") or str(ev.step)
+
+    @staticmethod
+    def _sweep_str(sweep):
+        """Para parametr=wartość serii do pokazania (bez prefiksu CONFIG_);
+        pusto, gdy krok nie jest z serii."""
+        if not sweep:
+            return ""
+        param = (sweep.get("param") or "").removeprefix("CONFIG_")
+        value = sweep.get("value") or ""
+        return f"{param}={value}" if param else ""
+
     # --- most zdarzenia silnika -> UI (wołane z wątku) ---
 
     def _on_event(self, ev):
@@ -1177,15 +1237,20 @@ class AutoRunScreen(Screen):
         elif ev.kind == "phase":
             pass                                  # bez śmieci w widoku budowania
         elif ev.kind == "state":
-            label = {"build": "budowanie", "power": "zasilanie",
-                     "flash": "wgrywanie", "trigger": "czekam na trigger",
-                     "measure": "POMIAR", "build_failed": "build padł"
-                     }.get(ev.text, ev.text)
+            state_label = {"build": "budowanie", "power": "zasilanie",
+                           "flash": "wgrywanie",
+                           "trigger": "czekam na trigger",
+                           "measure": "POMIAR", "build_failed": "build padł"
+                           }.get(ev.text, ev.text)
             detail = ev.data.get("detail", "")
-            status.update(f"{ev.name} · {label}"
+            sweep = self._sweep_str(ev.data.get("sweep"))
+            head = f"Pomiar {self._step_label(ev)} · {ev.name}"
+            if sweep:
+                head += f" ({sweep})"
+            status.update(f"{head} · {state_label}"
                           + (f" ({detail})" if detail else ""))
             if ev.text == "measure":
-                self._start_measure_panel(ev.step, ev.name)
+                self._start_measure_panel(ev)
         elif ev.kind == "session":
             # Wykres (osobne okno) chwilowo wyłączony – zajmiemy się później.
             self.live_session = ev.data.get("dir")
@@ -1218,13 +1283,17 @@ class AutoRunScreen(Screen):
 
     # --- duże okno pomiaru + tabelka wyników ---
 
-    def _start_measure_panel(self, step, name):
+    def _start_measure_panel(self, ev):
         panel = self.query_one("#measure-panel")
         panel.display = True
         self.pause.clear()
         self.query_one("#stop_measure", Button).label = "Stop"
-        self.query_one("#measure-head", Static).update(
-            f"[b]POMIAR[/b] · krok {step}/{self._n_steps} · {name}")
+        sweep = self._sweep_str(ev.data.get("sweep"))
+        head = (f"[b]POMIAR[/b] · Pomiar {self._step_label(ev)}/"
+                f"{self._n_steps} · {ev.name}")
+        if sweep:
+            head += f" · {sweep}"
+        self.query_one("#measure-head", Static).update(head)
         self.query_one("#measure-avg", Static).update("[b]—[/b]")
         self.query_one("#measure-remain", Static).update("")
         self.query_one("#measure-inst", Static).update("")
@@ -1249,15 +1318,16 @@ class AutoRunScreen(Screen):
     def _set_paused(self, ev, paused):
         head = self.query_one("#measure-head", Static)
         btn = self.query_one("#stop_measure", Button)
+        sweep = self._sweep_str(ev.data.get("sweep"))
+        tail = f" · {sweep}" if sweep else ""
+        base = (f"Pomiar {self._step_label(ev)}/{self._n_steps} · "
+                f"{ev.name}{tail}")
         if paused:
-            d = ev.data
-            step, name = ev.step, ev.name
-            head.update(f"[b]PAUZA[/b] · krok {step}/{self._n_steps} · {name}"
-                        f"  (śr {self._fmt_uA(d.get('avg_uA'))})")
+            head.update(f"[b]PAUZA[/b] · {base}"
+                        f"  (śr {self._fmt_uA(ev.data.get('avg_uA'))})")
             btn.label = "Wznów"
         else:
-            head.update(f"[b]POMIAR[/b] · krok {ev.step}/{self._n_steps} · "
-                        f"{ev.name}")
+            head.update(f"[b]POMIAR[/b] · {base}")
             btn.label = "Stop"
 
     def _finish_step(self, ev):
@@ -1267,7 +1337,8 @@ class AutoRunScreen(Screen):
         self.query_one("#cmds").remove_children()
         table = self.query_one("#results", DataTable)
         table.display = True
-        table.add_row(str(ev.step), ev.name,
+        table.add_row(self._step_label(ev), ev.name,
+                      self._sweep_str(d.get("sweep")) or "—",
                       self._fmt_uA(d.get("avg_uA")),
                       self._fmt_uA(d.get("max_uA")),
                       self._fmt_time(d.get("duration_s") or 0))
@@ -1384,12 +1455,14 @@ class PowerTestApp(App):
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-delay-on, .card-rtt-on, .card-serial-on, .card-serial-trig-on {
+    .card-sweep-on, .card-delay-on, .card-rtt-on, .card-serial-on,
+    .card-serial-trig-on {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
+    .card-sweep-param, .card-sweep-values { width: 100%; }
     .card-serial-port, .card-serial-pattern { width: 100%; }
-    .card-rtt-box, .card-serial-box { height: auto; }
+    .card-rtt-box, .card-serial-box, .card-sweep-box { height: auto; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
@@ -1845,7 +1918,7 @@ class PowerTestApp(App):
         > 'start po czasie' > od razu; przy RTT continuous wzorzec staje się
         auto-etykietą."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
-                                  Trigger, parse_duration)
+                                  Trigger, expand_sweep, parse_duration)
 
         pristine = self.query_one("#pristine", Checkbox).value
         cards = list(self.query(MeasurementCard))
@@ -1882,12 +1955,23 @@ class PowerTestApp(App):
                 trigger = Trigger(type="delay", seconds=secs)
             else:
                 trigger = Trigger(type="delay", seconds=0.0)
-            steps.append(PlanStep(
+            base = dict(
                 scenario=c["scenario"], duration_s=dur_s,
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
-                labels=labels, pristine=pristine))
+                labels=labels, pristine=pristine)
+            if c.get("sweep_on"):
+                # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
+                # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
+                try:
+                    steps.extend(expand_sweep(
+                        card.number, c["sweep_param"], c["sweep_values"],
+                        base))
+                except ValueError as e:
+                    raise ValueError(f"Pomiar {card.number}: {e}")
+            else:
+                steps.append(PlanStep(label=str(card.number), **base))
         return Plan(name="interfejs", board=prof_name, steps=steps)
 
 

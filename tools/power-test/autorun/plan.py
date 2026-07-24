@@ -115,6 +115,70 @@ class PlanStep:
     pristine: bool = False
     power_cycle: bool = True
     labels: list = field(default_factory=list)
+    # --- seria (sweep): jeden "Pomiar N" rozbity na "Pomiar N.M" ---
+    label: str = ""              # etykieta w UI/CSV ("N.M"); puste = numer kroku
+    sweep_param: str = ""        # symbol Kconfig serii, np. CONFIG_LPN_SENSOR_INTERVAL_S
+    sweep_value: str = ""        # wartość tej serii (do wyników), np. "5"
+
+
+# ------------------------------------------------------------
+#  Seria pomiarów (sweep): jedna karta "Pomiar N" z parametrem i listą
+#  wartości -> N osobnych kroków "Pomiar N.1 … N.M", każdy budowany z inną
+#  flagą -DCONFIG_...=<wartość>. Silnik nadaje każdej kombinacji flag własny
+#  katalog builda, więc obrazy się nie nadpisują (engine._build_spec).
+# ------------------------------------------------------------
+
+_SWEEP_PARAM_RE = re.compile(r"^(?:-D)?(?:CONFIG_)?([A-Za-z][A-Za-z0-9_]*)$")
+
+
+def normalize_sweep_param(param):
+    """Nazwa parametru serii -> kanoniczny symbol Kconfig 'CONFIG_XXX'.
+    Przyjmuje 'CONFIG_FOO', 'FOO' albo '-DCONFIG_FOO'. ValueError, gdy nie
+    wygląda na symbol Kconfig."""
+    m = _SWEEP_PARAM_RE.match(str(param).strip())
+    if not m:
+        raise ValueError(
+            f"parametr serii '{param}' nie wygląda na symbol Kconfig "
+            "(np. CONFIG_LPN_SENSOR_INTERVAL_S)")
+    return "CONFIG_" + m.group(1)
+
+
+def parse_sweep_values(raw):
+    """'1, 2, 5' / '1 2 5' -> ['1','2','5'] (kolejność zachowana, duplikaty
+    zdjęte zachowując pierwsze wystąpienie). Lista też dozwolona.
+    ValueError, gdy po odrzuceniu pustych nic nie zostaje."""
+    if isinstance(raw, (list, tuple)):
+        tokens = [str(t).strip() for t in raw]
+    else:
+        tokens = re.split(r"[,\s]+", str(raw).strip())
+    seen, out = set(), []
+    for t in tokens:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    if not out:
+        raise ValueError("lista wartości serii jest pusta")
+    return out
+
+
+def expand_sweep(number, param, values, base):
+    """Rozwiń jedną serię (karta 'Pomiar N' z sweepem) na listę PlanStep –
+    po jednym kroku na wartość. Każdy krok dostaje flagę -DCONFIG_...=<v>
+    doklejoną do build_extra_args, etykietę 'N.M' oraz zapamiętaną parę
+    (parametr, wartość) do raportu. `base` = wspólne pola PlanStep (scenario,
+    duration_s, trigger, rtt, ...); pola build_extra_args/label/sweep_* z
+    `base` są ignorowane (ustawiamy je per wartość). ValueError przy pustej
+    liście albo złym parametrze."""
+    symbol = normalize_sweep_param(param)
+    vals = parse_sweep_values(values)
+    base_extra = list(base.get("build_extra_args", []))
+    common = {k: v for k, v in base.items()
+              if k not in ("build_extra_args", "label",
+                           "sweep_param", "sweep_value")}
+    return [PlanStep(build_extra_args=base_extra + [f"-D{symbol}={v}"],
+                     label=f"{number}.{j}", sweep_param=symbol,
+                     sweep_value=v, **common)
+            for j, v in enumerate(vals, 1)]
 
 
 @dataclass
@@ -214,7 +278,7 @@ def validate_plan(plan, manifest):
     profile = boards.get(prof_name, {})
 
     for i, step in enumerate(plan.steps, 1):
-        who = f"krok {i} ({step.scenario or '?'})"
+        who = f"krok {step.label or i} ({step.scenario or '?'})"
         scen = scenarios.get(step.scenario)
         if scen is None:
             errors.append(f"{who}: nieznany scenariusz '{step.scenario}'. "

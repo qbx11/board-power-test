@@ -298,6 +298,57 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(cd)
         self.assertIn("remaining_s", cd[0].data)
 
+    def test_sweep_distinct_builds_and_csv(self):
+        # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość
+        # budowana do OSOBNEGO katalogu, a wartość parametru trafia do CSV.
+        base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        steps = planmod.expand_sweep(
+            1, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+        results = self._run(planmod.Plan(name="serie", board="btz",
+                                         steps=steps))
+        self.assertEqual([r.status for r in results], ["done"] * 3)
+        self.assertEqual([r.label for r in results], ["1.1", "1.2", "1.3"])
+
+        build_dirs = []
+        for c in self.env.commands():
+            if c.startswith("west build"):
+                parts = c.split()
+                build_dirs.append(parts[parts.index("-d") + 1])
+        self.assertEqual(len(build_dirs), 3)
+        self.assertEqual(len(set(build_dirs)), 3,
+                         "każda wartość powinna mieć własny katalog builda")
+
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([r["pomiar_id"] for r in rows], ["1.1", "1.2", "1.3"])
+        self.assertTrue(all(r["parametr"] == "CONFIG_LPN_SENSOR_INTERVAL_S"
+                            for r in rows))
+        self.assertEqual([r["wartosc"] for r in rows], ["1", "5", "10"])
+        self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=1", rows[0]["flagi"])
+
+    def test_sweep_meta_and_events(self):
+        import json
+        base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        # Parametr bez prefiksu CONFIG_ też jest akceptowany (normalizacja).
+        steps = planmod.expand_sweep(
+            1, "LPN_SENSOR_INTERVAL_S", ["2", "8"], base)
+        results = self._run(planmod.Plan(name="serie", board="btz",
+                                         steps=steps))
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["step_label"], "1.1")
+        self.assertEqual(meta["sweep"],
+                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                          "value": "2"})
+        self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=2", meta["flags"])
+        measure = [ev for ev in self.events
+                   if ev.kind == "state" and ev.text == "measure"]
+        self.assertEqual(measure[0].data.get("label"), "1.1")
+        self.assertEqual(measure[0].data.get("sweep"),
+                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                          "value": "2"})
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

@@ -42,6 +42,25 @@ Płytkę wybiera się z listy profili nad scenariuszami; nowy profil (target
 budowania, ewentualny overlay sprzętowy) dodaje się wpisem w
 `scenarios.toml`.
 
+## Serie pomiarów (sweep parametru)
+
+W trybie autonomicznym każda karta **„Pomiar N"** może być **serią**: w
+ustawieniach zaawansowanych włącz *„Seria: sweep parametru"*, podaj symbol
+Kconfig (np. `CONFIG_LPN_SENSOR_INTERVAL_S`) i listę wartości
+(`1, 2, 5, 10, 20, 30, 60, 120, 300, 600`). Jedna karta rozwija się wtedy na
+osobne pomiary **„Pomiar N.1, N.2, …"** — każdy budowany z inną flagą
+`-DCONFIG_...=<wartość>` (osobny obraz, obrazy się nie nadpisują), mierzony
+niezależnie i zapisany jako **osobny wiersz** w dzienniku. Kolumny
+`parametr`/`wartosc` (oraz `pomiar_id` = „N.M") mówią, której wartości dotyczy
+dany pomiar; wszystkie kroki serii dostają ten sam czas i warunek startu co
+karta.
+
+Żeby flaga działała, parametr musi być **symbolem Kconfig** w budowanej
+aplikacji (nie `#define`). Przykład: aplikacje `lpn`/`lpn_mock` mają
+`CONFIG_LPN_SENSOR_INTERVAL_S` (interwał wysyłki temperatury do Frienda,
+domyślnie 10 s) — dodawanie kolejnych parametrów to wpis w `Kconfig` aplikacji
++ odczyt przez `CONFIG_...` w kodzie.
+
 ## Wyniki
 
 Każdy pomiar trafia do wspólnego dziennika `reports/pomiary.csv` — przycisk
