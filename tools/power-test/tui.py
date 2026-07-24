@@ -1519,12 +1519,15 @@ class PowerTestApp(App):
     /* Opcjonalny zapis surowych danych sesji – pod tabelą wyników. */
     #save_results { margin: 1 1 0 1; min-width: 18; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
-    #cmds { padding: 0 1; height: auto; max-height: 22; }
-    /* Monitor dongla (serial) – logi przed i podczas pomiaru. */
-    #dongle-panel { height: auto; }
+    #cmds { padding: 0 1; height: auto; }
+    /* Monitor dongla (serial) – logi przed i podczas pomiaru. Panel
+       wypełnia wolną wysokość (1fr) i jest jedynym przewijanym obszarem
+       w środku ekranu – dzięki temu sam Screen nie musi się przewijać i
+       nie pojawia się drugi (pionowy) suwak tuż obok suwaka logu. */
+    #dongle-panel { height: 1fr; }
     #dongle-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
-    #dongle-log { height: 8; border: round #555555; background: transparent;
-                  margin: 0 1; }
+    #dongle-log { height: 1fr; min-height: 8; border: round #555555;
+                  background: transparent; margin: 0 1; overflow-x: auto; }
     /* Duże okno pomiaru pod logami build/flash. */
     #measure-panel { height: auto; border: round #555555; margin: 1 1;
                      padding: 1 2; background: transparent; }
@@ -1543,7 +1546,7 @@ class PowerTestApp(App):
     CollapsibleTitle { color: $text; }
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
     .cmd-log { height: 14; border: round #555555; background: transparent;
-               margin: 0 1 1 2; }
+               margin: 0 1 1 2; overflow-x: auto; }
     /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
        skopiowania. */
     .mem-report { height: auto; width: auto; max-width: 100%;
