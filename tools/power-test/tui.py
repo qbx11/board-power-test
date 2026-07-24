@@ -1504,10 +1504,14 @@ class PowerTestApp(App):
        monochromatycznej palety (błąd PPK2, #cc6666). */
     Button.danger:hover, Button.danger:focus {
         border: round #cc6666; color: #cc6666; }
-    /* Rząd akcji mieści się dokładnie w obrysie ramek (72 kolumny):
-       bez sztucznego min-width przycisków. */
-    #actions { margin-top: 1; height: auto; }
-    #actions Button { margin-right: 2; min-width: 0; }
+    /* Rząd akcji ma taką samą szerokość jak reszta panelu (72 kolumny,
+       jak #scenarios / #mode-toggle / #measurements) – przyciski
+       zachowują naturalną szerokość, a odstępy między nimi (spacery
+       1fr) rosną, żeby rozłożyć je równomiernie na tej szerokości
+       zamiast kupić się po lewej stronie. */
+    #actions { margin-top: 1; height: auto; width: 72; max-width: 100%; }
+    #actions Button { min-width: 0; }
+    .actions-gap { width: 1fr; height: 1; }
 
     #status { background: transparent; padding: 0 1; height: 1;
               text-style: bold; }
@@ -1682,10 +1686,14 @@ class PowerTestApp(App):
                         classes="standard-only")
             with Horizontal(id="actions"):
                 yield Button("Start", id="start")
+                yield Static(classes="actions-gap")
                 yield Button("Zaznacz wszystkie", id="select_all",
                              classes="standard-only")
+                yield Static(classes="actions-gap standard-only")
                 yield Button("Dodaj kod", id="add_fw")
-                yield Button("Wyniki", id="results")
+                yield Static(classes="actions-gap")
+                yield Button("Wyniki", id="results_btn")
+                yield Static(classes="actions-gap")
                 yield Button("Wyjście", id="quit")
 
     def _scenario_row(self, n, s, value=False):
@@ -1740,7 +1748,7 @@ class PowerTestApp(App):
                 box.value = True
         elif event.button.id == "add_fw":
             self.push_screen(AddScreen(), callback=self._scenario_added)
-        elif event.button.id == "results":
+        elif event.button.id == "results_btn":
             self.push_screen(ResultsScreen())
         elif event.button.id == "add_measurement":
             self.add_measurement()
