@@ -14,7 +14,7 @@ from pathlib import Path
 from common import FakeEnv, core  # noqa: F401  (core: patchowane stałe)
 
 import tui
-from textual.widgets import Checkbox, Input, Static
+from textual.widgets import Checkbox, Input, Select, Static
 
 
 class TuiHarness(unittest.IsolatedAsyncioTestCase):
@@ -411,6 +411,112 @@ class TuiRemoveTests(TuiHarness):
             await pilot.pause()
             self.assertIn("zrodlowy", tui.core.load_manifest()["scenarios"])
             self.assertTrue(app.query("#row_zrodlowy"))
+
+
+class TuiScenariosDialogTests(TuiHarness):
+    """Okienko „Scenariusze" – lista wpisów z manifestu w trybie
+    autonomicznym (w ręcznym ta sama lista stoi wprost na ekranie)."""
+
+    async def open_dialog(self, pilot):
+        await pilot.click("#mode-label-auto")
+        await pilot.pause()
+        await pilot.click("#scenarios_btn")
+        await self.wait_until(pilot,
+                              lambda a: isinstance(a.screen,
+                                                   tui.ScenariosScreen),
+                              msg="okienko Scenariusze")
+
+    async def test_przycisk_tylko_w_trybie_autonomicznym(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            self.assertFalse(app.query_one("#scenarios_btn").display)
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            self.assertTrue(app.query_one("#scenarios_btn").display)
+
+    async def test_lista_rozwijanie_opisu_i_zamkniecie(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.open_dialog(pilot)
+            self.assertEqual(len(app.screen.query(".scenario-row")),
+                             len(app.scenarios))
+            desc = app.screen.query_one("#desc_zwykly", Static)
+            self.assertFalse(desc.has_class("shown"))
+            await pilot.click("#arrow_zwykly")
+            await pilot.pause()
+            self.assertTrue(desc.has_class("shown"))
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, tui.ScenariosScreen)
+
+    async def test_usuniecie_z_okienka(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.open_dialog(pilot)
+            await pilot.click("#del_zrodlowy")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.ConfirmScreen),
+                                  msg="potwierdzenie usunięcia")
+            await pilot.click("#yes")
+            await self.wait_until(
+                pilot,
+                lambda a: isinstance(a.screen, tui.ScenariosScreen)
+                and not a.screen.query("#row_zrodlowy"),
+                msg="zniknięcie wiersza w okienku")
+            self.assertNotIn("zrodlowy", app.scenarios)
+            self.assertNotIn("zrodlowy",
+                             tui.core.load_manifest()["scenarios"])
+            # …i z listy trybu ręcznego pod spodem
+            self.assertFalse(app._main_screen().query("#row_zrodlowy"))
+
+    async def test_nie_usuwa_scenariusza_wybranego_w_karcie(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = app.query_one(tui.MeasurementCard)
+            card.query_one(".card-scenario", Select).value = "zrodlowy"
+            await pilot.pause()
+            await pilot.click("#scenarios_btn")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.ScenariosScreen),
+                                  msg="okienko Scenariusze")
+            await pilot.click("#del_zrodlowy")
+            await pilot.pause(0.2)
+            # bez pytania o potwierdzenie – okienko i wpis zostają
+            self.assertIsInstance(app.screen, tui.ScenariosScreen)
+            self.assertIn("zrodlowy", tui.core.load_manifest()["scenarios"])
+            self.assertIn("Pomiar 1", app._scenario_in_use("zrodlowy"))
+
+    async def test_nie_usuwa_scenariusza_zaznaczonego_w_trybie_recznym(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            app.query_one("#check_zrodlowy", Checkbox).value = True
+            await pilot.pause()
+            await self.open_dialog(pilot)
+            await pilot.click("#del_zrodlowy")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ScenariosScreen)
+            self.assertIn("zrodlowy", tui.core.load_manifest()["scenarios"])
+            self.assertIn("zaznaczony", app._scenario_in_use("zrodlowy"))
+
+    async def test_nie_usuwa_ostatniego_scenariusza(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.open_dialog(pilot)
+            keep = "zwykly"
+            for name in [n for n in app.scenarios if n != keep]:
+                tui.core.remove_scenario(name)
+                app.scenarios.pop(name)
+                app.screen.remove_row(name)
+            await pilot.pause()
+            await pilot.click(f"#del_{keep}")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, tui.ScenariosScreen)
+            self.assertIn(keep, tui.core.load_manifest()["scenarios"])
+            self.assertIn("ostatni scenariusz", app._scenario_in_use(keep))
 
 
 class TuiRunTests(TuiHarness):

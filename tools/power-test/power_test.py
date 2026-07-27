@@ -345,18 +345,18 @@ def add_scenario(path_str, name=None, label=None, description=None,
     return name, entry
 
 
-def remove_scenario(name):
-    """Usuń wpis [scenarios.<name>] z scenarios.toml. Operacja tekstowa
+def _strip_scenario_block(path, name):
+    """Wytnij blok [scenarios.<name>] z pliku manifestu. Operacja tekstowa
     (a nie przepisanie sparsowanego TOML-a), żeby komentarze i
-    formatowanie reszty manifestu zostały nietknięte."""
-    if name not in load_manifest().get("scenarios", {}):
-        raise ValueError(f"scenariusz '{name}' nie istnieje w manifeście")
-    lines = MANIFEST_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
+    formatowanie reszty pliku zostały nietknięte. Zwraca True, jeśli wpis
+    w tym pliku faktycznie był (plik zapisujemy tylko wtedy)."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     header = re.compile(rf"^\s*\[scenarios\.{re.escape(name)}\]\s*(#.*)?$")
     any_section = re.compile(r"^\s*\[")
-    out, i = [], 0
+    out, i, found = [], 0, False
     while i < len(lines):
         if header.match(lines[i]):
+            found = True
             i += 1
             while i < len(lines) and not any_section.match(lines[i]):
                 i += 1
@@ -367,7 +367,27 @@ def remove_scenario(name):
         else:
             out.append(lines[i])
             i += 1
-    MANIFEST_PATH.write_text("".join(out), encoding="utf-8")
+    if found:
+        path.write_text("".join(out), encoding="utf-8")
+    return found
+
+
+def remove_scenario(name):
+    """Usuń wpis [scenarios.<name>] z manifestu. Scenariusz może pochodzić
+    z scenarios.toml albo z prywatnego scenarios.local.toml (a przy
+    nadpisaniu – z obu naraz), więc czyścimy oba pliki; inaczej wpis
+    „usunięty” z jednego wracałby przy następnym starcie."""
+    if name not in load_manifest().get("scenarios", {}):
+        raise ValueError(f"scenariusz '{name}' nie istnieje w manifeście")
+    local = MANIFEST_PATH.with_name(LOCAL_MANIFEST_NAME)
+    found = _strip_scenario_block(MANIFEST_PATH, name)
+    if local.is_file():
+        found |= _strip_scenario_block(local, name)
+    if not found:
+        raise ValueError(
+            f"scenariusz '{name}' nie jest osobnym wpisem "
+            f"[scenarios.{name}] – usuń go ręcznie z "
+            f"{MANIFEST_PATH.name}")
 
 
 # ------------------------------------------------------------
