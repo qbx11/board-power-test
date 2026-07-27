@@ -10,3 +10,8 @@ __pycache__/
 reports/sessions/
 plans/*.toml
 !plans/*.example.toml
+# Prywatny manifest scenariuszy (własne/cudze wpisy `source`) – scala się
+# na wierzch scenarios.toml, ale zostaje lokalny.
+scenarios.local.toml
+# Dziennik pomiarów – dane lokalne, nie trzymamy ich na remote.
+reports/pomiary.csv

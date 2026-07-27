@@ -796,7 +796,7 @@ class RunScreen(Screen):
             await self.app.push_screen_wait(ConfirmScreen(
                 f"[b]Zakończono.[/b] Zapisane pomiary "
                 f"({self.sample}):\n\n{summary}\n\n"
-                "Dziennik: reports/pomiary.csv (commituj do repo!)",
+                "Dziennik: reports/pomiary.csv (lokalny, poza repo).",
                 yes="OK", no=None))
             if self.app.screen is self:   # Esc mógł już zdjąć ekran
                 self.app.pop_screen()

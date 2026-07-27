@@ -121,20 +121,7 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # hex         = "../moj-projekt/build/zephyr/zephyr.hex"
 # expected    = "..."
 
-[scenarios.mesh-reliability-tester]
-description = "Aplikacja z ../mesh-reliability-tester (build przez west)."
-source      = "../mesh-reliability-tester"
-
-# Parametr sterowalny flagą build (Kconfig aplikacji, nie #define):
-#   CONFIG_LPN_SENSOR_INTERVAL_S – interwał wysyłki temperatury do Frienda [s]
-#     (domyślnie 10). Idealny do SERII (sweep) w trybie autonomicznym:
-#     jedna karta "Pomiar N" -> "Pomiar N.1, N.2, …", każdy z inną wartością.
-[scenarios.lpn]
-label       = "LPN"
-description = "Aplikacja z ../Projekt-BLE-Mesh-Friend/app/apps/lpn (build przez west)."
-source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn"
-
-[scenarios.lpn_mock]
-label       = "LPN MOCK"
-description = "LPN, który wysyła fake-owe pomiary temperatury"
-source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_mock"
+# --- Prywatne scenariusze (poza gitem) ----------------------
+# Wpisy, których NIE chcesz trzymać na remote (np. cudze aplikacje
+# `source` z sąsiednich repo), umieść w scenarios.local.toml – ten plik
+# jest w .gitignore i scala się na wierzch tego manifestu przy starcie.
