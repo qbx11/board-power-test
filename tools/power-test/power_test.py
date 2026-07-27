@@ -62,6 +62,11 @@ import tomllib  # noqa: E402  (import po sprawdzeniu wersji, celowo)
 # Katalog projektu: dwa poziomy nad tym plikiem (tools/power-test/..)
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "scenarios.toml"
+# Prywatny manifest lokalny (poza gitem) – scala się na wierzch tego
+# współdzielonego przy każdym wczytaniu. Ścieżkę liczymy od MANIFEST_PATH
+# w load_manifest(), żeby testy podmieniające MANIFEST_PATH nie sięgały do
+# prawdziwego repo.
+LOCAL_MANIFEST_NAME = "scenarios.local.toml"
 CSV_PATH = ROOT / "reports" / "pomiary.csv"
 # Kolumny dziennika. Pierwsze dziewięć to schemat historyczny (pomiar
 # ręczny z Power Profilera); cztery ostatnie dokłada tryb autonomiczny
@@ -95,9 +100,25 @@ def load_manifest():
         die(f"brak manifestu {MANIFEST_PATH}")
     try:
         with open(MANIFEST_PATH, "rb") as f:
-            return tomllib.load(f)
+            manifest = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         die(f"scenarios.toml nie parsuje się: {e}")
+    # Prywatny manifest lokalny (poza gitem): scala się na wierzch – tabele
+    # (scenarios/boards/defaults) są łączone po kluczach, więc plik lokalny
+    # dokłada własne scenariusze albo nadpisuje pojedyncze wpisy.
+    local = MANIFEST_PATH.with_name(LOCAL_MANIFEST_NAME)
+    if local.is_file():
+        try:
+            with open(local, "rb") as f:
+                overlay = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            die(f"{LOCAL_MANIFEST_NAME} nie parsuje się: {e}")
+        for key, val in overlay.items():
+            if isinstance(val, dict) and isinstance(manifest.get(key), dict):
+                manifest[key].update(val)
+            else:
+                manifest[key] = val
+    return manifest
 
 
 def child_env():

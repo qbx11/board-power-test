@@ -66,6 +66,9 @@ def _stream(cmd, cwd, on_line, handle=None):
                           env=core.child_env()) as proc:
         if handle is not None:
             handle["proc"] = proc
+            # Esc mógł paść, zanim proces powstał – ubij go od razu.
+            if handle.get("abort") and proc.poll() is None:
+                proc.terminate()
         ui_alive = True
         for line in proc.stdout:
             if ui_alive:
@@ -474,12 +477,16 @@ class ResultsScreen(ModalScreen):
         self.dismiss()
 
 
+class _Aborted(Exception):
+    """Esc w trakcie komendy: użytkownik przerwał przebieg (to nie błąd)."""
+
+
 class RunScreen(Screen):
     """Przebieg: FAZA 1 buduje wszystkie obrazy, FAZA 2 – flash + pomiar.
     Każda komenda to zwijana sekcja: tytuł = preview, rozwija się
     klikiem albo automatycznie przy błędzie."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Przerwij i wróć")]
+    BINDINGS = [("escape", "abort", "Przerwij i wróć")]
 
     def __init__(self, prof_name, profile, names, sample, pristine=False,
                  reset=True, swd_reminder=True):
@@ -492,6 +499,11 @@ class RunScreen(Screen):
         # Pełny zapis przebiegu (komendy + ich wyjście) do skopiowania
         # klawiszem C – przydatne zwłaszcza, gdy build padnie.
         self.transcript = []
+        # Esc w trakcie komendy: uchwyt bieżącego procesu (do ubicia) i
+        # flaga przerwania. Ekranu NIE zdejmujemy, dopóki wątek west/flash
+        # żyje – pisanie do odpiętego Log-a rzuca NoActiveAppError.
+        self._active_handle = None
+        self._aborting = False
 
     def compose(self):
         yield Static("", id="status")
@@ -506,6 +518,27 @@ class RunScreen(Screen):
     def on_button_pressed(self, event):
         if event.button.id == "copy_log":
             self._copy_log()
+
+    def action_abort(self):
+        """Esc: gdy komenda (build/flash) trwa – ubij proces i oznacz
+        przerwanie, ale NIE zdejmuj ekranu od razu. Wątek strumieniujący
+        jeszcze pisze do Log-a, a pisanie do odpiętego widgetu rzuca
+        NoActiveAppError; po zakończeniu wątku flow() sam wraca (przez
+        _Aborted). Esc bez trwającej komendy = natychmiastowy powrót."""
+        if self._active_handle is None:
+            if self.app.screen is self:
+                self.app.pop_screen()
+            return
+        if self._aborting:
+            return
+        self._aborting = True
+        # Zaznacz zamiar także w uchwycie – gdyby proces jeszcze nie zdążył
+        # powstać, _stream ubije go zaraz po Popen.
+        self._active_handle["abort"] = True
+        proc = self._active_handle.get("proc")
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        self.query_one("#status", Static).update("Przerywam bieżącą komendę…")
 
     def _copy_log(self):
         """Kopiuj pełny zapis przebiegu do schowka. Najpierw lokalne
@@ -552,9 +585,15 @@ class RunScreen(Screen):
 
         spinner = self.set_interval(1 / 8, tick)
         handle = {}
+        self._active_handle = handle
         lines = []
 
         def on_line(line):
+            # Po Esc nie piszemy już do Log-a: ekran zaraz zniknie, a
+            # kolejne wpisy tylko planują wątkowe workery, które sięgają
+            # po odpiętą już aplikację (NoActiveAppError).
+            if self._aborting:
+                return
             lines.append(line)
             self.transcript.append(line)
             out.write_line(line)
@@ -573,10 +612,16 @@ class RunScreen(Screen):
             raise
         finally:
             spinner.stop()
+            self._active_handle = None
             # Narzędzia flashujące (J-Link/nrfutil) potrafią pisać wprost
             # do /dev/tty i zresetować tryb myszy – odnów go, zanim pojawi
             # się kolejny klikalny dialog (SWD/pomiar).
             self.app._reassert_mouse()
+        # Esc przerwał komendę: wątek już się zwinął (ekran wciąż
+        # zamontowany, więc bez NoActiveAppError) – wychodzimy czysto.
+        if self._aborting:
+            section.title = f"✗ {title} — przerwano"
+            raise _Aborted()
         if rc != 0:
             section.title = f"✗ {title} — kod {rc}"
             section.collapsed = False
@@ -751,9 +796,14 @@ class RunScreen(Screen):
             await self.app.push_screen_wait(ConfirmScreen(
                 f"[b]Zakończono.[/b] Zapisane pomiary "
                 f"({self.sample}):\n\n{summary}\n\n"
-                "Dziennik: reports/pomiary.csv (commituj do repo!)",
+                "Dziennik: reports/pomiary.csv (lokalny, poza repo).",
                 yes="OK", no=None))
             if self.app.screen is self:   # Esc mógł już zdjąć ekran
+                self.app.pop_screen()
+        except _Aborted:
+            # Esc w trakcie komendy: proces ubity, wątek zwinięty – wróć
+            # czysto do ustawień (bez komunikatu błędu).
+            if self.app.screen is self:
                 self.app.pop_screen()
         except (SystemExit, RuntimeError) as e:
             msg = str(e) or "przerwano"
@@ -1559,8 +1609,17 @@ class PowerTestApp(App):
                                     color: #888888; text-style: none; }
     /* Opcjonalny zapis surowych danych sesji – pod tabelą wyników. */
     #save_results { margin: 1 1 0 1; min-width: 18; }
+    /* Nagłówek logów: kontener Horizontal ma domyślnie height:1fr, co
+       zjadałoby górną połowę ekranu i spychało logi na środek – ogranicz
+       go do wysokości zawartości (jeden wiersz). */
+    #cmds-head { height: auto; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
     #cmds { padding: 0 1; height: auto; }
+    /* Tryb ręczny: logi build/flash kumulują się przez cały przebieg, więc
+       obszar logów jest przyklejonym do góry panelem (1fr) z własnym
+       scrollem – jak w trybie autonomicznym – zamiast rozpychać i
+       przewijać cały ekran (wczesne logi nie uciekają poza widok). */
+    RunScreen #cmds { height: 1fr; }
     /* Monitor dongla (serial) – logi przed i podczas pomiaru. Panel
        wypełnia wolną wysokość (1fr) i jest jedynym przewijanym obszarem
        w środku ekranu – dzięki temu sam Screen nie musi się przewijać i

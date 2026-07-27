@@ -1,0 +1,23 @@
+/*
+ * Copyright (c) 2026 Goodbyte
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <nordic/nrf54l15_cpuapp.dtsi>
+#include "BTZ_EndDevice_cpuapp_common.dtsi"
+
+/ {
+	compatible = "goodbyte,btz-enddevice-cpuapp";
+	model = "BTZ End Device nRF54L15";
+
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+		zephyr,sram = &cpuapp_sram;
+	};
+};
+
+/* Include default memory partition configuration file */
+#include <vendor/nordic/nrf54l15_cpuapp_partition.dtsi>

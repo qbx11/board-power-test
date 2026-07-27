@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Goodbyte
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: BTZ_EndDevice/nrf54l15/cpuapp
+name: BTZ End Device nRF54L15 cpuapp
+type: mcu
+arch: arm
+toolchain:
+  - gnuarmemb
+  - zephyr
+sysbuild: true
+ram: 188
+flash: 1428
+supported:
+  - gpio
+  - i2c
+  - watchdog

@@ -1,0 +1,6 @@
+board:
+  name: BTZ_EndDevice
+  full_name: BTZ End Device
+  vendor: goodbyte
+  socs:
+    - name: nrf54l15

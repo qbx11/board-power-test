@@ -1,0 +1,81 @@
+/*
+ * Copyright (c) 2026 Goodbyte
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "BTZ_EndDevice-pinctrl.dtsi"
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led_0 {
+			gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;
+			label = "Status LED";
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		button0: button_0 {
+			gpios = <&gpio1 14 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "User button";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	/* Bramka zasilania czujników: P0.00 aktywny stanem niskim (enable = low) */
+	sensor_pwr: sensor_pwr {
+		compatible = "regulator-fixed";
+		regulator-name = "sensor_pwr";
+		enable-gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+		regulator-boot-on;
+	};
+
+	aliases {
+		led0 = &led0;
+		sw0 = &button0;
+		watchdog0 = &wdt31;
+	};
+};
+
+&uart20 {
+	current-speed = <115200>;
+	pinctrl-0 = <&uart20_default>;
+	pinctrl-1 = <&uart20_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Wymagania po stronie aplikacji (prj.conf), aby czujniki I2C działały:
+ *
+ *   CONFIG_I2C=y               magistrala I2C (sterownik TWIM)
+ *   CONFIG_REGULATOR=y         podsystem regulatorów (framework)
+ *   CONFIG_REGULATOR_FIXED=y   sterownik bramki zasilania sensor_pwr (P0.00)
+ *   CONFIG_SENSOR=y            API czujnikow (sensor_sample_fetch/_channel_get)
+ *
+ */
+&i2c30 {
+	status = "okay";
+	pinctrl-0 = <&i2c30_default>;
+	pinctrl-1 = <&i2c30_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	sts4x: sts4x@44 {
+		compatible = "sensirion,sts4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+
+	bmi270: bmi270@68 {
+		compatible = "bosch,bmi270";
+		reg = <0x68>;
+	};
+
+	ltr329: ltr329@29 {
+		compatible = "liteon,ltr329";
+		reg = <0x29>;
+	};
+};
