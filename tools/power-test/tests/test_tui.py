@@ -42,6 +42,17 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             elapsed += 0.05
         self.fail(f"timeout: {msg}")
 
+    @staticmethod
+    def forward_button(screen):
+        """Przycisk „idź dalej" napotkanego dialogu: w oknie pomiaru
+        pomijamy zapis, w oknie wgrywania flashujemy (ChoiceScreen z
+        „Zamknij okno"), w zwykłym potwierdzeniu klikamy 'tak'."""
+        if isinstance(screen, tui.MeasureScreen):
+            return "#skip"
+        if isinstance(screen, tui.ChoiceScreen):
+            return "#flash"
+        return "#yes"
+
     async def click_through_run(self, pilot):
         """Przeklikaj dialogi FAZY 2 (flash -> SWD -> pomiar 'Pomiń' ->
         podsumowanie) aż RunScreen wróci do ekranu głównego. Zwraca notki
@@ -69,8 +80,7 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             if not isinstance(screen, (tui.ConfirmScreen, tui.ChoiceScreen,
                                        tui.MeasureScreen)):
                 return notes  # RunScreen zdjęty – jesteśmy na ekranie głównym
-            button = ("#skip" if isinstance(screen, tui.MeasureScreen)
-                      else "#yes")
+            button = self.forward_button(screen)
             # Klik z ponowieniem: pod obciążeniem zdarza się trafić w
             # dialog, zanim się w pełni ułoży – wtedy klik idzie w pustkę.
             for _ in range(5):
@@ -105,8 +115,7 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             if not isinstance(screen, (tui.ConfirmScreen, tui.ChoiceScreen,
                                        tui.MeasureScreen)):
                 return texts  # RunScreen zdjęty – koniec przebiegu
-            button = ("#skip" if isinstance(screen, tui.MeasureScreen)
-                      else "#yes")
+            button = self.forward_button(screen)
             for _ in range(5):
                 await pilot.pause()
                 await pilot.click(button)
@@ -614,6 +623,36 @@ class TuiRunTests(TuiHarness):
             self.assertTrue(captured)
             self.assertIn("west build", captured[0])
             self.assertIn("Memory region", captured[0])
+
+    async def test_zamkniecie_i_ponowne_otwarcie_okna_wgrywania(self):
+        # Okno "wgraj / pomiń" można zamknąć (żeby obejrzeć logi builda);
+        # przebieg czeka wtedy na przycisk "Wgraj na płytkę", który
+        # otwiera je z powrotem.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["hexowy"])
+            await self.wait_until(
+                pilot, lambda a: isinstance(a.screen, tui.ChoiceScreen),
+                msg="okno wgrywania")
+            run_screen = next(s for s in app.screen_stack
+                              if isinstance(s, tui.RunScreen))
+            self.assertFalse(run_screen.query_one("#reopen_flash").display)
+            await pilot.click("#close")
+            await self.wait_until(
+                pilot, lambda a: a.screen is run_screen, msg="powrót do logów")
+            # Przycisk powrotu odsłonięty, przebieg stoi na oknie wgrywania.
+            self.assertTrue(run_screen.query_one("#reopen_flash").display)
+            self.assertFalse(self.env.commands())     # nic nie wgrano
+
+            await pilot.pause()          # odsłonięty przycisk musi się ułożyć
+            await pilot.click("#reopen_flash")
+            await self.wait_until(
+                pilot, lambda a: isinstance(a.screen, tui.ChoiceScreen),
+                msg="ponowne otwarcie okna wgrywania")
+            self.assertFalse(run_screen.query_one("#reopen_flash").display)
+            await self.click_through_run(pilot)
+            self.assertTrue(any(c.startswith("nrfutil device program")
+                                for c in self.env.commands()))
 
     async def test_swd_reminder_domyslnie_pokazywany(self):
         # Domyślnie (checkbox zaznaczony) przed pomiarem pojawia się

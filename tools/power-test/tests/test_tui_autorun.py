@@ -229,6 +229,44 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["scenariusz"], "zwykly")
 
+    async def test_tabela_pamieci_po_buildzie(self):
+        # Po każdym buildzie pulpit trybu autonomicznego pokazuje tę samą
+        # tabelkę zajętości pamięci co tryb ręczny. Znika razem z logami
+        # kroku (remove_children po pomiarze), więc zbieramy ją w locie.
+        app = tui.PowerTestApp()
+        reports = set()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "0.2"
+            app.query_one("#sample", Input).value = "BTZ #1"
+            await pilot.pause()
+            app.query_one("#start", tui.Button).scroll_visible(animate=False)
+            await pilot.pause()
+            await pilot.click("#start")
+            await pilot.pause()
+            await pilot.click("#ppk2_detect")
+            await pilot.pause()
+            await pilot.click("#ppk2_start")
+            await pilot.pause()
+            screen = app.screen
+            self.assertIsInstance(screen, tui.AutoRunScreen)
+            elapsed = 0.0
+            while not screen._done and elapsed < 20.0:
+                reports.update(str(w.render())
+                               for w in screen.query(".mem-report"))
+                await pilot.pause(0.05)
+                elapsed += 0.05
+            self.assertTrue(screen._done, "plan się nie zakończył")
+        joined = "\n".join(reports)
+        self.assertIn("| Memory region | Used Size | Region Size | "
+                      "%age Used |", joined)
+        self.assertIn("| --- | --- | --- | --- |", joined)
+        self.assertIn("| FLASH | 118436 B | 1536 KB | 7.53% |", joined)
+        self.assertIn("| RAM | 25696 B | 188 KB | 13.35% |", joined)
+
     async def test_sweep_card_expands_to_steps(self):
         # Karta z włączoną serią rozwija się na wiele kroków "N.M", każdy
         # z inną flagą -DCONFIG_...=<wartość>, wspólny (stały) czas.

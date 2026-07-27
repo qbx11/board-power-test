@@ -573,6 +573,8 @@ class RunScreen(Screen):
 
     BINDINGS = [("escape", "abort", "Przerwij i wróć")]
 
+    HINT = "Esc — przerwij i wróć"
+
     def __init__(self, prof_name, profile, names, sample, pristine=False,
                  reset=True, swd_reminder=True):
         super().__init__()
@@ -589,20 +591,33 @@ class RunScreen(Screen):
         # żyje – pisanie do odpiętego Log-a rzuca NoActiveAppError.
         self._active_handle = None
         self._aborting = False
+        # Okno „wgraj / pomiń” można zamknąć (żeby obejrzeć logi i tabelkę
+        # pamięci); przebieg czeka wtedy na tym zdarzeniu, aż użytkownik
+        # otworzy je z powrotem przyciskiem.
+        self._reopen = None
 
     def compose(self):
         yield Static("", id="status")
         # Nagłówek okna logów: przycisk kopiowania tuż nad nimi, po prawej.
         with Horizontal(id="cmds-head"):
             yield Static("Logi budowania", id="cmds-title")
+            # Widoczny tylko wtedy, gdy okno wgrywania jest zamknięte.
+            yield Button("Wgraj na płytkę", id="reopen_flash")
             yield Button("Kopiuj log", id="copy_log")
         yield VerticalScroll(id="cmds")
-        yield Static("Esc — przerwij i wróć   ·   zaznacz tekst i skopiuj "
-                     "(macOS: ⌥+przeciągnij, potem ⌘C)", id="hint")
+        yield Static(self.HINT, id="hint")
 
     def on_button_pressed(self, event):
         if event.button.id == "copy_log":
             self._copy_log()
+        elif event.button.id == "reopen_flash":
+            self._reopen_flash()
+
+    def _reopen_flash(self):
+        """Klik „Wgraj na płytkę”: otwórz z powrotem zamknięte okno
+        wgrywania (przebieg stoi na `self._reopen`)."""
+        if self._reopen is not None:
+            self._reopen.set()
 
     def action_abort(self):
         """Esc: gdy komenda (build/flash) trwa – ubij proces i oznacz
@@ -643,6 +658,7 @@ class RunScreen(Screen):
             self.app.notify(f"Brak narzędzia schowka — zapisano log do {path}.")
 
     def on_mount(self):
+        self.query_one("#reopen_flash", Button).display = False
         self.flow()
 
     def note(self, text):
@@ -721,6 +737,40 @@ class RunScreen(Screen):
             box.border_title = "pamięć (Markdown — skopiuj)"
             await self.query_one("#cmds").mount(box)
             self.query_one("#cmds").scroll_end(animate=False)
+
+    async def _ask_flash(self, name, scen, attempt):
+        """Okno „wgraj / pomiń scenariusz” z trzecią opcją: zamknij je,
+        żeby spokojnie obejrzeć logi builda i tabelkę pamięci. Po zamknięciu
+        przebieg czeka na przycisk „Wgraj na płytkę” w nagłówku logów (albo
+        na Esc). Zwraca True = wgrywamy, False = pomijamy scenariusz."""
+        text = (f"[b]{_label(name, scen)}[/b]\n"
+                f"{scen.get('description', '')}\n\n"
+                "Programator podłączony i płytka ZASILONA\n"
+                "(np. VOUT z PPK2)?")
+        flash = ("Wgraj ponownie" if attempt > 1
+                 else "Wgraj gotowy hex (z kasowaniem)"
+                 if scen.get("hex") else "Wgraj (flash --erase)")
+        btn = self.query_one("#reopen_flash", Button)
+        hint = self.query_one("#hint", Static)
+        while True:
+            choice = await self.app.push_screen_wait(ChoiceScreen(
+                text, [(flash, "flash"), ("Pomiń scenariusz", "skip"),
+                       ("Zamknij okno", "close")]))
+            if choice != "close":
+                return choice == "flash"
+            self._reopen = asyncio.Event()
+            btn.display = True
+            hint.update("Okno wgrywania zamknięte · „Wgraj na płytkę” — "
+                        f"otwórz je z powrotem   ·   {self.HINT}")
+            try:
+                await self._reopen.wait()
+            finally:
+                self._reopen = None
+            # Dopiero po powrocie z czekania – gdy Esc anulował workera,
+            # ekran jest już zdjęty i pisanie do jego widgetów rzuciłoby
+            # NoActiveAppError (jak przy Log-u w run_west()).
+            btn.display = False
+            hint.update(self.HINT)
 
     @work
     async def flow(self):
@@ -805,16 +855,7 @@ class RunScreen(Screen):
                 # ("Wgraj ponownie") bez cofania całego przebiegu.
                 attempt = 1
                 while True:
-                    ok = await self.app.push_screen_wait(ConfirmScreen(
-                        f"[b]{_label(name, scen)}[/b]\n"
-                        f"{scen.get('description', '')}\n\n"
-                        "Programator podłączony i płytka ZASILONA\n"
-                        "(np. VOUT z PPK2)?",
-                        yes=("Wgraj ponownie" if attempt > 1
-                             else "Wgraj gotowy hex (z kasowaniem)"
-                             if scen.get("hex") else "Wgraj (flash --erase)"),
-                        no="Pomiń scenariusz"))
-                    if not ok:
+                    if not await self._ask_flash(name, scen, attempt):
                         self.note(f"Pominięto {name}.")
                         break
 
@@ -1228,6 +1269,9 @@ class AutoRunScreen(Screen):
         # Aktywna zwijana sekcja komendy (build/flash) + jej spinner.
         self._active_section = None
         self._active_log = None
+        # Linie bieżącej komendy – po buildzie wyłuskujemy z nich tabelkę
+        # zajętości pamięci (jak w trybie ręcznym).
+        self._active_lines = None
         self._spinner = None
         self._spin_i = 0
 
@@ -1282,6 +1326,7 @@ class AutoRunScreen(Screen):
         cmds.scroll_end(animate=False)
         self._active_section = section
         self._active_log = log
+        self._active_lines = []
         self._active_title = title
         self._spin_i = 0
         self._spinner = self.set_interval(1 / 8, self._tick)
@@ -1294,6 +1339,8 @@ class AutoRunScreen(Screen):
             f"{self.SPINNER[self._spin_i]} {self._active_title}"
 
     def _cmd_line(self, text):
+        if self._active_lines is not None:
+            self._active_lines.append(text)
         if self._active_log is not None:
             self._active_log.write_line(text)
         else:
@@ -1309,8 +1356,19 @@ class AutoRunScreen(Screen):
             else:
                 self._active_section.title = f"✗ {title} — kod {rc}"
                 self._active_section.collapsed = False
+        lines = self._active_lines or []
         self._active_section = None
         self._active_log = None
+        self._active_lines = None
+        # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown –
+        # ta sama co w trybie ręcznym. Przy flashu parser zwraca None.
+        report = core.parse_memory_report(lines)
+        if report is not None:
+            box = Static(report, classes="mem-report", markup=False)
+            box.border_title = "pamięć (Markdown — skopiuj)"
+            cmds = self.query_one("#cmds")
+            cmds.mount(box)
+            cmds.scroll_end(animate=False)
         # Narzędzia flashujące (J-Link/nrfutil) potrafią pisać wprost do
         # /dev/tty i zresetować tryb myszy – odnów go, jak w run_west().
         self.app._reassert_mouse()
@@ -1714,7 +1772,12 @@ class PowerTestApp(App):
        zjadałoby górną połowę ekranu i spychało logi na środek – ogranicz
        go do wysokości zawartości (jeden wiersz). */
     #cmds-head { height: auto; }
-    #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
+    /* width:1fr jawnie: bez tego Static rozpycha się na całą szerokość
+       nagłówka i wypycha przyciski poza ekran (były nieklikalne). */
+    #cmds-title { width: 1fr; height: 1; color: #777777; padding: 0 1;
+                  margin-top: 1; }
+    /* Powrót do zamkniętego okna wgrywania – obok „Kopiuj log”. */
+    #reopen_flash { margin-right: 1; }
     #cmds { padding: 0 1; height: auto; }
     /* Tryb ręczny: logi build/flash kumulują się przez cały przebieg, więc
        obszar logów jest przyklejonym do góry panelem (1fr) z własnym
