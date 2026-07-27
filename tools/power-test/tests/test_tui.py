@@ -765,5 +765,65 @@ class TuiRunTests(TuiHarness):
             self.assertEqual(self.env.commands(), [])
 
 
+class TuiJlinkGuardTests(TuiHarness):
+    """Blokada przed FAZĄ 2, gdy sondę J-Link trzyma inny program (np.
+    demony nRF Connect for Desktop). Cudza sesja zawyża pomiar, więc
+    lepiej stanąć na dialogu niż zapisać śmieciowy wynik."""
+
+    def _dialog_text(self, app):
+        return str(app.screen.query_one(".dialog-text").render())
+
+    async def _wait_guard(self, pilot):
+        await self.wait_until(
+            pilot, lambda a: isinstance(a.screen, tui.ChoiceScreen),
+            msg="dialog o zajętym J-Linku")
+        text = self._dialog_text(pilot.app)
+        self.assertIn("Sondę J-Link trzyma inny program", text)
+        self.assertIn("pid 4242", text)
+
+    async def test_przerwij_nie_dopuszcza_do_flasha(self):
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly"])
+            await self._wait_guard(pilot)
+            await pilot.click("#abort")
+            await self.wait_until(
+                pilot,
+                lambda a: not isinstance(a.screen, (tui.RunScreen,
+                                                    tui.ChoiceScreen)),
+                msg="powrót do ustawień po przerwaniu")
+        cmds = self.env.commands()
+        # Build zdążył się wykonać (jest PRZED sprawdzeniem sondy),
+        # ale flasha już nie ma – i o to chodzi.
+        self.assertTrue(any(c.startswith("west build") for c in cmds))
+        self.assertFalse(any(c.startswith("west flash") for c in cmds))
+
+    async def test_ponow_wpuszcza_po_zwolnieniu_sondy(self):
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly"])
+            await self._wait_guard(pilot)
+            self.env.jlink_owners = []       # udajemy zamknięcie nRF Connect
+            await pilot.click("#retry")
+            await self.click_through_run(pilot)
+        self.assertTrue(any(c.startswith("west flash")
+                            for c in self.env.commands()))
+
+    async def test_mierz_mimo_to_zostawia_notke(self):
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly"])
+            await self._wait_guard(pilot)
+            await pilot.click("#ignore")
+            notes = await self.click_through_run(pilot)
+        self.assertTrue(any("J-Link zajęty przez inny program" in n
+                            for n in notes), notes)
+        self.assertTrue(any(c.startswith("west flash")
+                            for c in self.env.commands()))
+
+
 if __name__ == "__main__":
     unittest.main()

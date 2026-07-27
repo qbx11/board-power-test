@@ -772,6 +772,28 @@ class RunScreen(Screen):
             btn.display = False
             hint.update(self.HINT)
 
+    async def _ensure_jlink_free(self):
+        """Nie wchodź do flasha, dopóki sondę J-Link trzyma inny program
+        (patrz core.jlink_owners – cudza sesja zawyża pomiar i wywołuje
+        dialog EDU). Zwraca False, gdy użytkownik wybrał przerwanie."""
+        while True:
+            owners = await asyncio.to_thread(core.jlink_owners)
+            if not owners:
+                return True
+            choice = await self.app.push_screen_wait(ChoiceScreen(
+                "[b]Sondę J-Link trzyma inny program[/b]\n\n"
+                + core.jlink_conflict_message(owners),
+                [("Sprawdziłem – ponów", "retry"),
+                 ("Mierz mimo to", "ignore"),
+                 ("Przerwij", "abort")]))
+            if choice == "retry":
+                continue
+            if choice == "ignore":
+                self.note("J-Link zajęty przez inny program – pomiar może "
+                          "być zawyżony.")
+                return True
+            return False
+
     @work
     async def flow(self):
         status = self.query_one("#status", Static)
@@ -842,6 +864,10 @@ class RunScreen(Screen):
                 self.note("Nic do budowania (same gotowe pliki hex).")
 
             # --- FAZA 2: flash + pomiar ---
+            # Sonda jest potrzebna dopiero tutaj, więc konflikt o J-Linka
+            # sprawdzamy po buildach (budowanie nikomu nie przeszkadza).
+            if not await self._ensure_jlink_free():
+                raise _Aborted()
             saved = []
             for i, name in enumerate(self.names, 1):
                 scen = scenarios[name]
@@ -2270,10 +2296,34 @@ class PowerTestApp(App):
                         severity="error", timeout=8)
             return
 
+        self._auto_check_jlink(plan, sample)
+
+    def _push_auto_run(self, plan, sample):
         def go(ok):
             if ok:
                 self.push_screen(AutoRunScreen(plan, sample))
         self.push_screen(Ppk2ConnectScreen(), callback=go)
+
+    def _auto_check_jlink(self, plan, sample):
+        """Blokada startu przebiegu autonomicznego, dopóki sondę J-Link
+        trzyma inny program (cudza sesja zawyża CAŁY przebieg – a ten
+        trwa godzinami, więc lepiej wyłożyć się teraz niż nad ranem)."""
+        owners = core.jlink_owners()
+        if not owners:
+            self._push_auto_run(plan, sample)
+            return
+
+        def decided(choice):
+            if choice == "retry":
+                self._auto_check_jlink(plan, sample)
+            elif choice == "ignore":
+                self._push_auto_run(plan, sample)
+        self.push_screen(ChoiceScreen(
+            "[b]Sondę J-Link trzyma inny program[/b]\n\n"
+            + core.jlink_conflict_message(owners),
+            [("Sprawdziłem – ponów", "retry"),
+             ("Mierz mimo to", "ignore"),
+             ("Przerwij", "abort")]), callback=decided)
 
     def _build_auto_plan(self, prof_name):
         """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =

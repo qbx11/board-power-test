@@ -141,6 +141,123 @@ def child_env():
     return env
 
 
+# ------------------------------------------------------------
+#  Konflikt o sondę J-Link
+# ------------------------------------------------------------
+# Sonda J-Link ma JEDNEGO właściciela. Gdy trzyma ją inny program – w
+# praktyce najczęściej nRF Connect for Desktop, którego demony
+# `nrfutil device list --hotplug --traits ...jlink...` żyją w tle tak
+# długo, jak otwarta jest aplikacja – psuje nam to pomiar na dwa sposoby:
+#   1. runner jlink NIE wygasza rejestru DP CTRL/STAT po wgraniu. Mówi to
+#      wprost komentarz w zephyr/scripts/west_commands/runners/jlink.py:
+#      "Under normal operation this is done automatically, but if other
+#      JLink tools are running, it is not performed". Debug interface
+#      układu zostaje wtedy zasilony i chip nie schodzi do podłogi snu –
+#      pomiar minimum wychodzi w setkach µA zamiast ~0.5 µA i wygląda to
+#      jak "programator nie zresetował płytki".
+#   2. obcy proces otwiera sondę ze SWOIM środowiskiem (ma DISPLAY), więc
+#      J-Link EDU/EDU Mini pokazuje dialog licencyjny – zdejmowanie
+#      DISPLAY w child_env() go nie dotyczy, bo to nie nasz proces.
+# Wykrywanie: biblioteka `libjlinkarm` zmapowana w CUDZYM procesie
+# (/proc/<pid>/maps). Linux-only, bez zależności – gdy /proc nie ma albo
+# brak praw do cudzych `maps`, po prostu nic nie znajdujemy.
+JLINK_LIB = "libjlinkarm"
+
+
+def _proc_field(pid, name, proc_root):
+    try:
+        return (Path(proc_root) / str(pid) / name).read_bytes()
+    except OSError:
+        return b""
+
+
+def _proc_cmdline(pid, proc_root):
+    """Komenda procesu (argv rozdzielone spacjami) albo ''."""
+    raw = _proc_field(pid, "cmdline", proc_root).decode("utf-8", "replace")
+    return " ".join(p for p in raw.split("\0") if p)
+
+
+def _proc_ppid(pid, proc_root):
+    """PPid z /proc/<pid>/stat (0, gdy nie da się odczytać). Nazwę procesu
+    w nawiasach pomijamy przez rpartition – potrafi zawierać spacje."""
+    tail = _proc_field(pid, "stat", proc_root).decode(
+        "utf-8", "replace").rpartition(")")[2].split()
+    try:
+        return int(tail[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _is_own_process(pid, proc_root):
+    """Czy `pid` to my albo NASZ potomek (JLinkExe odpalony przez westa,
+    pylink w naszym procesie) – takich nie zgłaszamy jako konfliktu."""
+    me = os.getpid()
+    seen = set()
+    while pid > 1 and pid not in seen:
+        if pid == me:
+            return True
+        seen.add(pid)
+        pid = _proc_ppid(pid, proc_root)
+    return False
+
+
+def jlink_owners(proc_root="/proc"):
+    """Obce procesy trzymające bibliotekę J-Linka: [(pid, komenda), ...],
+    posortowane po pid. Pusta lista = sonda jest nasza."""
+    root = Path(proc_root)
+    if not root.is_dir():
+        return []
+    owners = []
+    for entry in root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(entry / "maps", encoding="utf-8",
+                      errors="replace") as f:
+                if not any(JLINK_LIB in line for line in f):
+                    continue
+        except OSError:
+            continue          # cudzy albo zniknięty proces – pomiń
+        pid = int(entry.name)
+        if _is_own_process(pid, proc_root):
+            continue
+        owners.append((pid, _proc_cmdline(pid, proc_root)))
+    return sorted(owners)
+
+
+def jlink_conflict_message(owners):
+    """Czytelny opis konfliktu o sondę ('' dla pustej listy)."""
+    if not owners:
+        return ""
+    lines = [f"  pid {pid}: {cmd[:110] or '(nieznana komenda)'}"
+             for pid, cmd in owners]
+    if any("nrfutil" in cmd or "nrfconnect" in cmd for _, cmd in owners):
+        hint = ("To nRF Connect for Desktop – jego demony "
+                "'nrfutil device list --hotplug' żyją, dopóki aplikacja "
+                "jest otwarta. Zamknij CAŁĄ aplikację (nie tylko kartę "
+                "Programmer / Power Profiler).")
+    else:
+        hint = ("Zamknij ten program (JLinkExe, JLinkGDBServer, Ozone, "
+                "nRF Connect) i spróbuj ponownie.")
+    return ("Sondę J-Link trzyma inny program:\n" + "\n".join(lines)
+            + "\n\nPrzy cudzej sesji J-Linka runner nie wygasza debug "
+            "interface'u po wgraniu, więc układ nie schodzi do podłogi "
+            "snu (setki µA zamiast ~0.5 µA), a sonda EDU/EDU Mini "
+            "dorzuca dialog licencyjny.\n" + hint)
+
+
+def wait_for_free_jlink(dry_run=False):
+    """CLI: nie ruszaj flasha, dopóki sondę trzyma inny program."""
+    if dry_run:
+        return
+    while True:
+        owners = jlink_owners()
+        if not owners:
+            return
+        print("\nUWAGA: " + jlink_conflict_message(owners))
+        ask("[Enter = sprawdź ponownie, Ctrl-C = przerwij] ")
+
+
 def run_cmd(cmd, dry, cwd=ROOT):
     """Wypisz i (poza --dry-run) wykonaj komendę."""
     print(f"\n>>> {shlex.join(cmd)}")
@@ -539,7 +656,10 @@ def cmd_run(args):
         built[name] = build_dir
 
     # --- FAZA 2: flash + pomiar, scenariusz po scenariuszu ---
+    # Dopiero tu potrzebna jest sonda, więc konfliktu o J-Linka pilnujemy
+    # po buildach – budowanie nikomu nie przeszkadza.
     print(f"\n=== FAZA 2/2: flash + pomiar ({len(names)} scenariusz(y)) ===")
+    wait_for_free_jlink(args.dry_run)
     for name in names:
         measure_scenario(name, scenarios[name], built[name], profile,
                          defaults, sample, args, workspace)
@@ -938,6 +1058,10 @@ def cmd_autorun(args):
     if not sample and not args.dry_run:
         while not sample:
             sample = ask("Egzemplarz płytki (np. 'BTZ #2'): ")
+
+    # Cudza sesja J-Linka zawyża CAŁY przebieg (a przebieg autonomiczny
+    # trwa godzinami) – pilnujemy tego przed startem, nie po fakcie.
+    wait_for_free_jlink(args.dry_run)
 
     def on_event(ev):
         if ev.kind in ("phase", "plan_start"):
