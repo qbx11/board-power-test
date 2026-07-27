@@ -38,6 +38,12 @@ gotowy `.hex`). Przycisk **„Dodaj kod”** dodaje nowy scenariusz — wskazuje
 katalog aplikacji albo plik `.hex`, reszta (build, wpis na liście) dzieje się
 sama.
 
+W trybie ręcznym scenariusze są wprost na ekranie (checklista z opisem
+i ✕ do usunięcia); w trybie autonomicznym tę samą listę pokazuje przycisk
+**„Scenariusze”**. Nie da się usunąć wpisu, który jest akurat wybrany
+w karcie „Pomiar N” albo zaznaczony na liście trybu ręcznego — ani
+ostatniego wpisu w manifeście.
+
 Płytkę wybiera się z listy profili nad scenariuszami; nowy profil (target
 budowania, ewentualny overlay sprzętowy) dodaje się wpisem w
 `scenarios.toml`.

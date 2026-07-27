@@ -112,12 +112,29 @@ class DescArrow(Static):
         super().__init__("▶", classes="scen-arrow scen-icon", **kwargs)
         self.desc_id = desc_id
 
-    def on_click(self, event):
-        event.stop()
+    def toggle(self):
         desc = self.screen.query_one(f"#{self.desc_id}", Static)
         shown = not desc.has_class("shown")
         desc.set_class(shown, "shown")
         self.update("▼" if shown else "▶")
+
+    def on_click(self, event):
+        event.stop()
+        self.toggle()
+
+
+class ScenName(Static):
+    """Nazwa scenariusza w okienku „Scenariusze” – klik rozwija/zwija opis.
+    W trybie ręcznym tę linię zajmuje checkbox (zaznaczenie = zmierz to),
+    tu nie ma czego zaznaczać, więc cała nazwa działa jak strzałka."""
+
+    def __init__(self, text, arrow_id, **kwargs):
+        super().__init__(text, classes="scen-name", **kwargs)
+        self.arrow_id = arrow_id
+
+    def on_click(self, event):
+        event.stop()
+        self.screen.query_one(f"#{self.arrow_id}", DescArrow).toggle()
 
 
 class DeleteCross(Static):
@@ -472,6 +489,74 @@ class ResultsScreen(ModalScreen):
                     continue          # wiersz z innego trybu – pomiń
                 table.add_row(*(self._fmt_cell(c, row.get(c, ""))
                                 for c in cols))
+
+    def on_button_pressed(self, event):
+        self.dismiss()
+
+
+def _plural_entries(n):
+    """'1 wpis' / '3 wpisy' / '7 wpisów' – odmiana do podpisu listy."""
+    if n == 1:
+        return "1 wpis"
+    if 2 <= n % 10 <= 4 and n % 100 not in (12, 13, 14):
+        return f"{n} wpisy"
+    return f"{n} wpisów"
+
+
+class ScenariosScreen(ModalScreen):
+    """Okienko „Scenariusze” – pełna lista wpisów z manifestu: ▶ (albo klik
+    w nazwę) rozwija opis, ✕ usuwa wpis. To ta sama lista, którą tryb
+    ręczny ma wprost na ekranie; w trybie autonomicznym scenariusze
+    wybiera się w kartach „Pomiar N”, więc lista mieszka w dialogu.
+    Usuwanie idzie przez app.confirm_remove(), czyli z tymi samymi
+    blokadami (wpis w użyciu / ostatni w manifeście)."""
+
+    BINDINGS = [("escape", "close", "Zamknij")]
+
+    def compose(self):
+        with Vertical(classes="dialog scenarios"):
+            yield Static("", id="scen-title")
+            with VerticalScroll(id="scen-list"):
+                for n, s in self.app.scenarios.items():
+                    yield self._row(n, s)
+            yield Static("Wpisy z scenarios.toml (i prywatnego "
+                         "scenarios.local.toml). Nowy dodaje przycisk "
+                         "„Dodaj kod”.", classes="scen-hint")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Zamknij", id="close")
+
+    def on_mount(self):
+        self._refresh_title()
+
+    @staticmethod
+    def _row(name, scen):
+        body = scen.get("description", "")
+        if scen.get("note"):
+            body += f"\nUwaga: {scen['note']}"
+        return Vertical(
+            Horizontal(
+                ScenName(_label(name, scen), f"arrow_{name}"),
+                Horizontal(DescArrow(f"desc_{name}", id=f"arrow_{name}"),
+                           DeleteCross(name, id=f"del_{name}"),
+                           classes="scen-actions"),
+                classes="scenario-head"),
+            Static(body or "(bez opisu)", classes="scen-desc",
+                   id=f"desc_{name}"),
+            classes="scenario-row", id=f"row_{name}")
+
+    def _refresh_title(self):
+        self.query_one("#scen-title", Static).update(
+            f"[b]Scenariusze[/b] · {_plural_entries(len(self.app.scenarios))}")
+
+    def remove_row(self, name):
+        """Wołane przez aplikację po skasowaniu wpisu z manifestu – lista
+        w dialogu ma zniknąć razem z nim, bez zamykania okienka."""
+        for row in self.query(f"#row_{name}"):
+            row.remove()
+        self._refresh_title()
+
+    def action_close(self):
+        self.dismiss()
 
     def on_button_pressed(self, event):
         self.dismiss()
@@ -977,7 +1062,9 @@ class MeasurementCard(Vertical):
             return
         label = _label(scen, self.scenarios.get(scen, {}))
         # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
-        dupes = sum(1 for card in self.app.query(MeasurementCard)
+        # Pytamy własny ekran, nie App: App.query widzi tylko wierzchni
+        # ekran, a tytuły odświeżamy też spod otwartego dialogu.
+        dupes = sum(1 for card in self.screen.query(MeasurementCard)
                     if card._scenario() == scen)
         suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
         title.update(f"▶ {label}{suffix}{self._sweep_title()}")
@@ -1002,6 +1089,20 @@ class MeasurementCard(Vertical):
         Textual – rozpoznajemy blank po tym, że nie jest znaną nazwą)."""
         scen = self.query_one(".card-scenario", Select).value
         return scen if scen in self.scenarios else ""
+
+    def refresh_options(self):
+        """Przeładuj listę scenariuszy w Selecie po zmianie manifestu
+        („Dodaj kod” / usunięcie wpisu). Select dostaje opcje raz, przy
+        tworzeniu karty, więc bez tego nowego scenariusza nie dałoby się
+        wybrać w już istniejącej karcie. set_options() kasuje zaznaczenie –
+        odtwarzamy je, o ile wybrany scenariusz nadal istnieje."""
+        select = self.query_one(".card-scenario", Select)
+        current = select.value
+        select.set_options([(_label(n, s), n)
+                            for n, s in self.scenarios.items()])
+        if current in self.scenarios:
+            select.value = current
+        self._refresh_title()
 
     def get_config(self):
         return {
@@ -1673,6 +1774,16 @@ class PowerTestApp(App):
        (seria/parametr/min/max) bez poziomego scrolla na typowym terminalu. */
     .dialog.results { width: 96%; max-width: 100%; }
     .results DataTable { height: 18; width: 100%; background: transparent; }
+
+    /* Okienko „Scenariusze” (tryb autonomiczny) – ta sama lista co
+       w trybie ręcznym (#scenarios), tyle że w dialogu. */
+    #scen-list { border: round #555555; background: transparent;
+                 height: auto; max-height: 18; overflow-y: auto;
+                 padding: 0 1; }
+    .scen-name { width: 1fr; height: 1; text-wrap: nowrap;
+                 text-overflow: ellipsis; }
+    .scen-name:hover { text-style: bold; }
+    .scen-hint { color: #888888; margin-top: 1; }
     #current-row { height: auto; }
     #current-row #current { width: 32; }
     #current-row #unit { width: 12; margin-left: 2; }
@@ -1791,6 +1902,11 @@ class PowerTestApp(App):
                 yield Static(classes="actions-gap standard-only")
                 yield Button("Dodaj kod", id="add_fw")
                 yield Static(classes="actions-gap")
+                # Lista scenariuszy (opis + usuwanie) tylko w trybie
+                # autonomicznym – w ręcznym stoi wprost na ekranie.
+                yield Button("Scenariusze", id="scenarios_btn",
+                             classes="auto-only")
+                yield Static(classes="actions-gap auto-only")
                 yield Button("Wyniki", id="results_btn")
                 yield Static(classes="actions-gap")
                 yield Button("Wyjście", id="quit")
@@ -1813,28 +1929,88 @@ class PowerTestApp(App):
             Static(body, classes="scen-desc", id=f"desc_{n}"),
             classes="scenario-row", id=f"row_{n}")
 
+    def _main_screen(self):
+        """Ekran główny (pod ewentualnymi dialogami). App.query widzi tylko
+        wierzchni ekran, więc listę scenariuszy, karty i przyciski ustawień
+        odpytujemy tutaj – inaczej spod okienka „Scenariusze” nic byśmy nie
+        znaleźli."""
+        return self.screen_stack[0]
+
+    def _scenario_in_use(self, name):
+        """Powód, dla którego scenariusza nie wolno teraz usunąć, albo None.
+        Blokujemy wpis wybrany w karcie „Pomiar N” kreatora i zaznaczony na
+        liście trybu ręcznego (usunięcie zostawiłoby zaplanowany pomiar bez
+        firmware'u), a także ostatni wpis w manifeście – bez żadnego
+        scenariusza narzędzie nie wystartuje."""
+        label = _label(name, self.scenarios.get(name, {}))
+        if len(self.scenarios) <= 1:
+            return (f"Nie można usunąć „{label}” — to ostatni scenariusz "
+                    "w manifeście, a bez żadnego wpisu narzędzie się nie "
+                    "uruchomi.")
+        main = self._main_screen()
+        reasons = []
+        numbers = sorted({card.number for card in main.query(MeasurementCard)
+                          if card._scenario() == name})
+        if numbers:
+            which = ", ".join(f"Pomiar {n}" for n in numbers)
+            reasons.append(f"jest wybrany w kreatorze ({which})")
+        for box in main.query(f"#check_{name}"):
+            if box.value:
+                reasons.append("jest zaznaczony na liście trybu ręcznego")
+        if not reasons:
+            return None
+        return (f"Nie można usunąć „{label}” — " + " i ".join(reasons)
+                + ". Zmień wybór i spróbuj ponownie.")
+
     def confirm_remove(self, name):
-        """✕ przy scenariuszu: potwierdzenie i usunięcie wpisu."""
+        """✕ przy scenariuszu: blokady, potwierdzenie i usunięcie wpisu."""
+        blocked = self._scenario_in_use(name)
+        if blocked:
+            self.notify(blocked, severity="error", timeout=8)
+            return
+
         def done(ok):
             if ok:
                 self._remove_scenario(name)
         label = _label(name, self.scenarios.get(name, {}))
         self.push_screen(ConfirmScreen(
             f"[b]Usunąć scenariusz „{label}”?[/b]\n\n"
-            "Wpis zniknie z scenarios.toml.\n"
+            "Wpis zniknie z manifestu (scenarios.toml albo\n"
+            "prywatnego scenarios.local.toml).\n"
             "Zebrane pomiary w reports/pomiary.csv zostają.",
             yes="Usuń", no="Anuluj", danger=True), callback=done)
 
     def _remove_scenario(self, name):
+        # Blokady sprawdzamy jeszcze raz: między otwarciem potwierdzenia
+        # a kliknięciem „Usuń” stan mógł się zmienić.
+        blocked = self._scenario_in_use(name)
+        if blocked:
+            self.notify(blocked, severity="error", timeout=8)
+            return
         try:
             core.remove_scenario(name)
-        except ValueError as e:
-            self.notify(str(e), severity="error")
+        except (ValueError, OSError) as e:
+            self.notify(f"Nie udało się usunąć: {e}", severity="error",
+                        timeout=8)
             return
         self.scenarios.pop(name, None)
-        self.query_one(f"#row_{name}").remove()
-        self._update_select_all()
-        self.notify(f"Usunięto scenariusz '{name}' z scenarios.toml.")
+        for row in self._main_screen().query(f"#row_{name}"):
+            row.remove()
+        for screen in self.screen_stack:
+            if isinstance(screen, ScenariosScreen):
+                screen.remove_row(name)
+        self._refresh_card_scenarios()
+        # Po refreshu (remove() jest asynchroniczny – checkbox jeszcze
+        # chwilę wisi w drzewie).
+        self.call_after_refresh(self._update_select_all)
+        self.notify(f"Usunięto scenariusz '{name}' z manifestu.")
+
+    def _refresh_card_scenarios(self):
+        """Karty „Pomiar N” dostają opcje Selecta przy tworzeniu, więc po
+        zmianie manifestu trzeba je przeładować – inaczej świeżo dodanego
+        scenariusza nie da się wybrać, a skasowany dalej straszy na liście."""
+        for card in self._main_screen().query(MeasurementCard):
+            card.refresh_options()
 
     def on_mount(self):
         self._apply_mode()
@@ -1847,6 +2023,8 @@ class PowerTestApp(App):
                 box.value = True
         elif event.button.id == "add_fw":
             self.push_screen(AddScreen(), callback=self._scenario_added)
+        elif event.button.id == "scenarios_btn":
+            self.push_screen(ScenariosScreen())
         elif event.button.id == "results_btn":
             self.push_screen(ResultsScreen(self.mode))
         elif event.button.id == "add_measurement":
@@ -1877,8 +2055,12 @@ class PowerTestApp(App):
             w.display = auto
         for w in self.query(".standard-only"):
             w.display = not auto
-        self.query_one("#start", Button).label = (
-            "Dalej: PPK2 →" if auto else "Start")
+        start = self.query_one("#start", Button)
+        start.label = "Dalej: PPK2 →" if auto else "Start"
+        # Szerokość `auto` przycisku nie przelicza się po samej zmianie
+        # etykiety – bez tego dłuższy podpis trybu autonomicznego zostawał
+        # przycięty do szerokości słowa "Start" ("Dalej").
+        start.refresh(layout=True)
 
     # ---------- karty 'Pomiar N' (kreator autonomiczny) ----------
 
@@ -1955,16 +2137,23 @@ class PowerTestApp(App):
         self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
 
     def _scenario_added(self, result):
-        """Po 'Dodaj firmware': nowy scenariusz od razu na liście
-        (i zaznaczony), bez restartu aplikacji."""
+        """Po 'Dodaj kod': nowy scenariusz od razu do wyboru, bez restartu
+        aplikacji – wiersz na liście trybu ręcznego ORAZ przeładowane opcje
+        w kartach „Pomiar N” (te mają własną kopię listy). Zaznaczamy go
+        tylko w trybie ręcznym, bo tam checkbox znaczy „zmierz to”;
+        w autonomicznym scenariusz wybiera się w karcie pomiaru."""
         if not result:
             return
         name, entry = result
         self.scenarios[name] = entry
-        self.query_one("#scenarios").mount(
-            self._scenario_row(name, entry, value=True))
+        standard = self.mode == "standard"
+        self._main_screen().query_one("#scenarios").mount(
+            self._scenario_row(name, entry, value=standard))
+        self._refresh_card_scenarios()
+        self.call_after_refresh(self._update_select_all)
         self.notify(f"Dodano scenariusz '{name}' (zapisany "
-                    "w scenarios.toml).")
+                    "w scenarios.toml)."
+                    + ("" if standard else " Wybierz go w karcie pomiaru."))
 
     def on_checkbox_changed(self, event):
         self._update_select_all()
@@ -1972,8 +2161,9 @@ class PowerTestApp(App):
     def _update_select_all(self):
         """'Zaznacz wszystkie' wygląda na wciśnięty dokładnie wtedy, gdy
         zaznaczone są wszystkie scenariusze."""
-        boxes = self.query(".scen-check")
-        self.query_one("#select_all", Button).set_class(
+        main = self._main_screen()
+        boxes = main.query(".scen-check")
+        main.query_one("#select_all", Button).set_class(
             bool(boxes) and all(box.value for box in boxes), "pressed")
 
     def _start(self):

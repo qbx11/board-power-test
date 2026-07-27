@@ -287,6 +287,30 @@ class RemoveScenarioTests(unittest.TestCase):
             core.remove_scenario("nie_ma")
         self.assertIn("nie istnieje", str(ctx.exception))
 
+    def _write_local(self, text):
+        local = core.MANIFEST_PATH.with_name(core.LOCAL_MANIFEST_NAME)
+        local.write_text(text, encoding="utf-8")
+        return local
+
+    def test_usuwa_wpis_z_manifestu_lokalnego(self):
+        # Scenariusz z prywatnego scenarios.local.toml też musi dać się
+        # usunąć – inaczej „usunięty" wracałby przy następnym starcie.
+        local = self._write_local('[scenarios.prywatny]\n'
+                                  'hex = "gotowe/firmware.hex"\n')
+        self.assertIn("prywatny", core.load_manifest()["scenarios"])
+        core.remove_scenario("prywatny")
+        self.assertNotIn("prywatny", core.load_manifest()["scenarios"])
+        self.assertNotIn("[scenarios.prywatny]", local.read_text())
+
+    def test_usuwa_wpis_nadpisany_lokalnie_z_obu_plikow(self):
+        local = self._write_local('[scenarios.zwykly]\n'
+                                  'label = "Nadpisany lokalnie"\n')
+        core.remove_scenario("zwykly")
+        self.assertNotIn("zwykly", core.load_manifest()["scenarios"])
+        self.assertNotIn("[scenarios.zwykly]", local.read_text())
+        self.assertNotIn("[scenarios.zwykly]",
+                         core.MANIFEST_PATH.read_text())
+
 
 class BuildSkipTests(unittest.TestCase):
     """Pomijanie budowania, gdy build_<scenariusz>/ ma gotowy obraz."""

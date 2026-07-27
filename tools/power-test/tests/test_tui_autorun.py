@@ -116,6 +116,37 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 second.query_one(".card-duration", Input).value, "77s")
 
+    async def test_dodany_scenariusz_od_razu_do_wyboru_w_karcie(self):
+        # Regresja: 'Dodaj kod' w trybie autonomicznym dopisywał wpis do
+        # manifestu, ale Select istniejącej karty trzymał starą listę opcji
+        # – nowego scenariusza nie dało się wybrać bez restartu.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            await pilot.pause()
+            await pilot.click("#add_fw")
+            await self.wait_until(pilot,
+                                  lambda a: isinstance(a.screen,
+                                                       tui.AddScreen))
+            app.screen.query_one("#path", Input).value = "gotowe/firmware.hex"
+            await pilot.click("#add")
+            await self.wait_until(pilot,
+                                  lambda a: not isinstance(a.screen,
+                                                           tui.AddScreen))
+            await pilot.pause()
+            # dotychczasowy wybór przeżywa przeładowanie opcji…
+            self.assertEqual(card._scenario(), "zwykly")
+            # …a nowy scenariusz da się wybrać (nieznana wartość rzuciłaby)
+            card.query_one(".card-scenario", Select).value = "firmware"
+            card.query_one(".card-duration", Input).value = "30s"
+            await pilot.pause()
+            self.assertEqual(card._scenario(), "firmware")
+            plan = app._build_auto_plan("btz")
+            self.assertEqual(plan.steps[0].scenario, "firmware")
+
     async def test_rtt_and_delay_in_plan(self):
         # RTT domyślnie wyłączony -> 'off'; po włączeniu tryb 'trigger'
         # trafia do planu. Osobno: start-po-czasie parsuje jednostki ('45s').
