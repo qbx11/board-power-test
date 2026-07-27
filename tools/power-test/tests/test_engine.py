@@ -18,6 +18,20 @@ from autorun import plan as planmod
 from autorun.engine import AutoRunner
 
 
+class _LossySampler(FakeSampler):
+    """PPK2, który gubi próbki (USB nie nadąża) – oddaje tylko `keep`
+    część tego, co powinno przyjść. Oś liczona próbkami zostaje wtedy
+    w tyle za zegarem."""
+
+    def __init__(self, keep=0.5, **kw):
+        super().__init__(**kw)
+        self.keep = keep
+
+    def read(self):
+        chunk = super().read()
+        return chunk[:int(len(chunk) * self.keep)]
+
+
 def _plan(**step):
     step.setdefault("scenario", "zwykly")
     step.setdefault("duration_s", 0.2)
@@ -369,6 +383,27 @@ class EngineTest(unittest.TestCase):
         notes = [ev.text for ev in self.events if ev.kind == "note"]
         self.assertTrue(any("Sondę J-Link trzyma inny program" in n
                             for n in notes), notes)
+
+    def test_odliczanie_idzie_zegarem_a_nie_probkami(self):
+        # REGRESJA (#22): odliczanie w trybie autonomicznym „zacinało się”
+        # – ta sama sekunda pokazywała się dwa razy. Powód: UI liczyło
+        # pozostały czas z `elapsed_s`, a ten idzie PRÓBKAMI, więc przy
+        # zgubionych próbkach zostaje w tyle za zegarem. Zdarzenie `live`
+        # musi nieść czas zegarowy pomiaru.
+        self.sampler = _LossySampler(sample_rate=200, keep=0.5)
+        self._run(_plan(duration_s=1.5,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        live = [ev for ev in self.events if ev.kind == "live"]
+        self.assertGreaterEqual(len(live), 3, "za mało statusów na żywo")
+        last = live[-1].data
+        self.assertIsNotNone(last.get("wall_elapsed_s"))
+        # Połowa próbek przepadła, więc oś próbek jest ~2x wolniejsza od
+        # zegara – to właśnie ono zatrzymywało odliczanie.
+        self.assertGreater(last["wall_elapsed_s"], last["elapsed_s"] + 0.5)
+        # Zegar idzie równo: kolejne statusy co ~1 s (siatka bez dryfu).
+        stamps = [ev.data["wall_elapsed_s"] for ev in live]
+        for prev, nxt in zip(stamps, stamps[1:]):
+            self.assertAlmostEqual(nxt - prev, 1.0, delta=0.35)
 
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.

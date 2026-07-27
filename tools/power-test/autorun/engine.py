@@ -418,7 +418,9 @@ class AutoRunner:
                 break
             self._emit("countdown", idx, step.scenario,
                        data={"remaining_s": round(remaining, 1)})
-            time.sleep(min(0.5, remaining))
+            # Częściej niż raz na sekundę: pojedyncze zacięcie (GC, zajęte
+            # UI) nie zabiera wtedy całej sekundy z odliczania.
+            time.sleep(min(0.25, remaining))
 
     def _start_monitor(self, idx, step, session_dir):
         """Uruchom monitor dongla, jeśli krok podał `monitor_port`. Gdy port
@@ -446,7 +448,7 @@ class AutoRunner:
                         f"{DEFAULT_BAUD}]")
         return mon
 
-    def _do_pause(self, sampler, writer, idx, step):
+    def _do_pause(self, sampler, writer, idx, step, wall_elapsed_s=0.0):
         """Pauza pomiaru (Stop w UI): zatrzymaj sampler i zamroź oś czasu,
         czekaj na wznowienie albo cancel. Płytka zostaje zasilona – to ten
         sam pomiar. Zwraca czas trwania pauzy (do korekty rozliczania
@@ -461,6 +463,7 @@ class AutoRunner:
         self._emit("paused", idx, step.scenario, data={
             "avg_uA": round(avg, 3) if avg is not None else None,
             "elapsed_s": round(writer.elapsed_s, 1),
+            "wall_elapsed_s": round(wall_elapsed_s, 1),
             "duration_s": step.duration_s})
         while self.pause.is_set():
             self._check_cancel()
@@ -497,17 +500,24 @@ class AutoRunner:
         sampler.start()
         errors = 0
         last_data = time.monotonic()
-        last_status = 0.0
         sec_sum, sec_n = 0.0, 0
         expected_base = time.monotonic()
+        # Odliczanie w UI chodzi po SIATCE co 1 s liczonej od startu pomiaru,
+        # nie „1 s od poprzedniego statusu”: odczyt PPK2 i zapis tierów
+        # potrafią zjeść kilkadziesiąt ms, a przy „od poprzedniego” ten
+        # naddatek kumulował się i sekundy na ekranie robiły się dłuższe.
+        next_status = expected_base
         reported_deficit = 0
         try:
             while writer.samples_written < target:
                 self._check_cancel()
                 if self.pause.is_set():
-                    expected_base += self._do_pause(
-                        sampler, writer, idx, step)
-                    last_data = last_status = time.monotonic()
+                    paused_s = self._do_pause(
+                        sampler, writer, idx, step,
+                        time.monotonic() - expected_base)
+                    expected_base += paused_s
+                    next_status += paused_s
+                    last_data = time.monotonic()
                     continue
                 time.sleep(READ_INTERVAL_S)
                 try:
@@ -552,11 +562,12 @@ class AutoRunner:
                     writer.write_samples(chunk)
                     sec_sum += float(chunk.sum())
                     sec_n += len(chunk)
-                if now - last_status >= 1.0:
+                if now >= next_status:
                     # Rozliczenie zgubionych próbek: ile powinno przyjść
                     # wg zegara vs ile przyszło (w jednostkach efektywnej
                     # częstotliwości; nadwyżka deficytu -> meta.gaps).
-                    expected = (now - expected_base) * eff_rate
+                    wall_elapsed = now - expected_base
+                    expected = wall_elapsed * eff_rate
                     deficit = int(expected - writer.samples_written
                                   - reported_deficit)
                     if deficit > eff_rate * 0.2:
@@ -569,10 +580,21 @@ class AutoRunner:
                         "avg_uA": round(avg, 3) if avg is not None else None,
                         "inst_uA": round(inst, 3) if inst is not None else None,
                         "elapsed_s": round(writer.elapsed_s, 1),
+                        # Czas ZEGAROWY pomiaru (bez pauz) – tylko do
+                        # odliczania w UI. `elapsed_s` liczy się próbkami,
+                        # więc przy zgubionych próbkach zostaje w tyle za
+                        # rzeczywistością i odliczanie potrafiło pokazać tę
+                        # samą sekundę dwa razy z rzędu.
+                        "wall_elapsed_s": round(wall_elapsed, 1),
                         "duration_s": step.duration_s,
                         "samples": writer.samples_written})
                     sec_sum, sec_n = 0.0, 0
-                    last_status = now
+                    # Kolejny punkt siatki; po dłuższym zacięciu (np. restart
+                    # odczytu) łapiemy najbliższą przyszłą sekundę zamiast
+                    # nadrabiać serią zaległych statusów.
+                    next_status += 1.0
+                    if next_status <= now:
+                        next_status = now + 1.0
         finally:
             stop_rtt.set()
             try:

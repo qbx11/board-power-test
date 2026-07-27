@@ -481,5 +481,37 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].sample_rate, 1000)
 
 
+class CountdownFormatTest(unittest.TestCase):
+    """REGRESJA (#22): odliczanie w trybie autonomicznym zacinało się –
+    ta sama sekunda potrafiła wisieć dwa takty."""
+
+    def test_kolejne_sekundy_sie_nie_powtarzaja(self):
+        # Wartości spadające dokładnie co 1 s muszą dawać ZA KAŻDYM razem
+        # inny napis, niezależnie od tego, w którym miejscu sekundy
+        # wypadł odczyt. round() przy offsecie 0.5 pokazywało tę samą
+        # liczbę dwa razy z rzędu.
+        for offset in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9):
+            shown = [tui.AutoRunScreen._fmt_countdown(s + offset)
+                     for s in range(20, 0, -1)]
+            self.assertEqual(len(set(shown)), len(shown), (offset, shown))
+
+    def test_zero_dopiero_gdy_naprawde_koniec(self):
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(0.4), "00:01")
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(0.0), "00:00")
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(-3.0), "00:00")
+
+    def test_pozostalo_liczone_zegarem(self):
+        # Czas zegarowy ma pierwszeństwo przed osią próbek (ta przy
+        # zgubionych próbkach stoi w miejscu)…
+        self.assertEqual(
+            tui.AutoRunScreen._remaining_s(
+                {"duration_s": 60, "elapsed_s": 10.0,
+                 "wall_elapsed_s": 25.0}), 35.0)
+        # …ale zdarzenie bez czasu zegarowego nadal działa.
+        self.assertEqual(
+            tui.AutoRunScreen._remaining_s(
+                {"duration_s": 60, "elapsed_s": 10.0}), 50.0)
+
+
 if __name__ == "__main__":
     unittest.main()

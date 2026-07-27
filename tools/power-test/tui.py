@@ -19,6 +19,7 @@
 
 import asyncio
 import csv
+import math
 import os
 import shlex
 import shutil
@@ -1485,6 +1486,15 @@ class AutoRunScreen(Screen):
         m, sec = divmod(r, 60)
         return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
+    @classmethod
+    def _fmt_countdown(cls, s):
+        """Czas POZOSTAŁY – zaokrąglany w GÓRĘ. Przy round() wartość
+        odczytana chwilę po pełnej sekundzie (np. 9,6 s) pokazywała się
+        jako ta sama liczba co poprzedni odczyt i sekunda na ekranie
+        „stała” dwa takty; ceil daje równe 10, 9, 8, …, a zero pojawia
+        się dopiero, gdy naprawdę nie ma już czasu."""
+        return cls._fmt_time(math.ceil(max(0.0, s)))
+
     @staticmethod
     def _step_label(ev):
         """Etykieta kroku do wyświetlenia: 'N.M' dla serii, inaczej numer."""
@@ -1527,9 +1537,9 @@ class AutoRunScreen(Screen):
             # Wykres (osobne okno) chwilowo wyłączony – zajmiemy się później.
             self.live_session = ev.data.get("dir")
         elif ev.kind == "countdown":
-            status.update(f"{ev.name} · start pomiaru za "
-                          f"[b]{self._fmt_time(ev.data.get('remaining_s', 0))}"
-                          "[/b]")
+            status.update(
+                f"{ev.name} · start pomiaru za "
+                f"[b]{self._fmt_countdown(ev.data.get('remaining_s', 0))}[/b]")
         elif ev.kind == "monitor":
             self._monitor_line(ev.text)
         elif ev.kind == "live":
@@ -1570,13 +1580,24 @@ class AutoRunScreen(Screen):
         self.query_one("#measure-remain", Static).update("")
         self.query_one("#measure-inst", Static).update("")
 
+    @staticmethod
+    def _remaining_s(d):
+        """Ile jeszcze potrwa pomiar. Liczymy z czasu ZEGAROWEGO
+        (`wall_elapsed_s`), a nie z `elapsed_s` liczonego próbkami – ten
+        drugi przy zgubionych próbkach zostaje w tyle i odliczanie
+        „zacinało się” na tej samej sekundzie. Fallback na elapsed_s dla
+        zdarzeń bez czasu zegarowego (pauza starszego silnika)."""
+        elapsed = d.get("wall_elapsed_s")
+        if elapsed is None:
+            elapsed = d.get("elapsed_s") or 0
+        return max(0.0, (d.get("duration_s") or 0) - elapsed)
+
     def _update_measure(self, ev):
         d = ev.data
-        remain = max(0.0, (d.get("duration_s") or 0) - (d.get("elapsed_s") or 0))
         self.query_one("#measure-avg", Static).update(
             f"[b]{self._fmt_uA(d.get('avg_uA'))}[/b]")
         self.query_one("#measure-remain", Static).update(
-            f"pozostało [b]{self._fmt_time(remain)}[/b]")
+            f"pozostało [b]{self._fmt_countdown(self._remaining_s(d))}[/b]")
         self.query_one("#measure-inst", Static).update(
             f"[#888888]teraz {self._fmt_uA(d.get('inst_uA'))} · "
             f"próbek {d.get('samples', 0):,}[/]")
