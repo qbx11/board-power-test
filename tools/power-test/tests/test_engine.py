@@ -349,6 +349,27 @@ class EngineTest(unittest.TestCase):
                          {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
                           "value": "2"})
 
+    def test_flash_wymusza_reset_i_erase(self):
+        # REGRESJA: bez --reset J-Link zostawia układ w stanie po
+        # programowaniu (firmware nie startuje), więc pomiar łapie stary
+        # stan i pobór prądu jest zawyżony. Tryb ręczny ma na to własny
+        # test (test_tui.py) – tu pilnujemy ścieżki autonomicznej.
+        self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
+        flashes = [c for c in self.env.commands()
+                   if c.startswith("west flash")]
+        self.assertTrue(flashes)
+        self.assertTrue(all("--reset" in c for c in flashes), flashes)
+        self.assertTrue(all("--erase" in c for c in flashes), flashes)
+
+    def test_ostrzega_o_cudzej_sesji_jlinka(self):
+        # Cudzy właściciel sondy zawyża pomiar; przebiegu nie blokujemy
+        # (może iść z crona), ale musi to być widać w logu/UI.
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
+        notes = [ev.text for ev in self.events if ev.kind == "note"]
+        self.assertTrue(any("Sondę J-Link trzyma inny program" in n
+                            for n in notes), notes)
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

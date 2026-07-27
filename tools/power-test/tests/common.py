@@ -128,17 +128,24 @@ class FakeEnv:
                     "BPT_SAVED_PYTHONHOME", "BPT_SAVED_PYTHONPATH"):
             os.environ.pop(var, None)
 
-        self._saved_core = (core.ROOT, core.MANIFEST_PATH, core.CSV_PATH)
+        self._saved_core = (core.ROOT, core.MANIFEST_PATH, core.CSV_PATH,
+                            core.jlink_owners)
         core.ROOT = self.repo
         core.MANIFEST_PATH = self.repo / "scenarios.toml"
         core.CSV_PATH = self.repo / "reports" / "pomiary.csv"
+        # Detekcja cudzej sesji J-Linka czyta prawdziwe /proc – w teście
+        # ma zwracać to, co ustawi test (domyślnie: sonda wolna), inaczej
+        # wynik zależałby od tego, czy ktoś ma otwarte nRF Connect.
+        self.jlink_owners = []
+        core.jlink_owners = lambda *a, **kw: list(self.jlink_owners)
 
     def commands(self):
         """Zalogowane wywołania fałszywych narzędzi (jedna linia = jedno)."""
         return [line for line in self.log.read_text().splitlines() if line]
 
     def cleanup(self):
-        core.ROOT, core.MANIFEST_PATH, core.CSV_PATH = self._saved_core
+        (core.ROOT, core.MANIFEST_PATH, core.CSV_PATH,
+         core.jlink_owners) = self._saved_core
         os.environ.clear()
         os.environ.update(self._saved_env)
         self._tmp.cleanup()

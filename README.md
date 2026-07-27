@@ -54,6 +54,23 @@ Płytkę wybiera się z listy profili nad scenariuszami; nowy profil (target
 budowania, ewentualny overlay sprzętowy) dodaje się wpisem w
 `scenarios.toml`.
 
+## Sonda J-Link tylko dla nas
+
+Sonda J-Link ma **jednego właściciela**. Jeśli trzyma ją inny program -
+najczęściej **nRF Connect for Desktop**, którego demony
+`nrfutil device list --hotplug` żyją w tle tak długo, jak otwarta jest
+aplikacja - pomiar wychodzi **zawyżony**: przy cudzej sesji J-Linka runner
+nie wygasza debug interface'u po wgraniu, więc układ nie schodzi do podłogi
+snu (setki µA zamiast ~0,5 µA), a sonda EDU/EDU Mini dorzuca do tego dialog
+licencyjny przy każdym flashu.
+
+Narzędzie sprawdza to samo przed wgrywaniem (szuka biblioteki
+`libjlinkarm` w obcych procesach) i pokazuje dialog: *Sprawdziłem - ponów* /
+*Mierz mimo to* / *Przerwij*. Tryb autonomiczny nie blokuje przebiegu
+(może startować bez nikogo przy klawiaturze), ale wpisuje ostrzeżenie do
+`plan.log` i pokazuje je w interfejsie. **Zamykaj całe nRF Connect for
+Desktop**, nie tylko kartę aplikacji.
+
 ## Serie pomiarów (sweep parametru)
 
 W trybie autonomicznym każda karta **„Pomiar N"** może być **serią**: w

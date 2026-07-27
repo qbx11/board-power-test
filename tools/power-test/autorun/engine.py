@@ -837,6 +837,15 @@ class AutoRunner:
                       f"({self.profile['board']}), egzemplarz "
                       f"{self.sample}")
 
+            # Cudza sesja J-Linka zawyża pomiar (patrz core.jlink_owners).
+            # Przebiegu NIE blokujemy – może startować z crona/SSH bez
+            # nikogo przy klawiaturze – ale wpisujemy to do plan.log i
+            # pokazujemy w UI, żeby wynik dał się później zinterpretować.
+            if not self.dry_run:
+                owners = core.jlink_owners()
+                if owners:
+                    self._note("UWAGA: " + core.jlink_conflict_message(owners))
+
             needs_west = any("hex" not in self.scenarios[s.scenario]
                              for s in self.plan.steps)
             workspace = core.ROOT

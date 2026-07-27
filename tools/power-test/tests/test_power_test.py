@@ -7,7 +7,10 @@ import argparse
 import contextlib
 import csv
 import io
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from common import FakeEnv, core
@@ -450,6 +453,133 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[-1]["flagi"],
                          "-DEXTRA_CONF_FILE=low_power.conf source=app_zespolu")
         self.assertEqual(rows[-1]["prad_uA"], "2500.0")
+
+
+class ChildEnvTests(unittest.TestCase):
+    """Środowisko procesów west/nrfutil (child_env). REGRESJA: bez
+    zdejmowania DISPLAY/WAYLAND_DISPLAY J-Link EDU/EDU Mini pokazuje
+    dialog licencyjny przy każdym flashu i przebieg staje na klik."""
+
+    def setUp(self):
+        self.env = FakeEnv()
+        self.addCleanup(self.env.cleanup)
+
+    def test_zdejmuje_display_i_wayland(self):
+        os.environ["DISPLAY"] = ":0"
+        os.environ["WAYLAND_DISPLAY"] = "wayland-0"
+        env = core.child_env()
+        self.assertNotIn("DISPLAY", env)
+        self.assertNotIn("WAYLAND_DISPLAY", env)
+        # Środowiska SAMEJ aplikacji nie ruszamy (TUI dalej ma działać).
+        self.assertEqual(os.environ.get("DISPLAY"), ":0")
+        self.assertEqual(os.environ.get("WAYLAND_DISPLAY"), "wayland-0")
+
+    def test_dziala_gdy_display_nie_bylo(self):
+        os.environ.pop("DISPLAY", None)
+        os.environ.pop("WAYLAND_DISPLAY", None)
+        self.assertNotIn("DISPLAY", core.child_env())
+
+    def test_przywraca_pythonhome_toolchaina(self):
+        os.environ["BPT_SAVED_PYTHONHOME"] = "/ncs/python"
+        env = core.child_env()
+        self.assertEqual(env["PYTHONHOME"], "/ncs/python")
+        self.assertNotIn("BPT_SAVED_PYTHONHOME", env)
+
+
+class JlinkConflictTests(unittest.TestCase):
+    """Wykrywanie cudzej sesji J-Linka na atrapie /proc. Cudzy właściciel
+    sondy zawyża pomiar (runner nie wygasza debug interface'u) i wywołuje
+    dialog EDU, więc musi być zauważony PRZED flashem."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="bpt-proc-")
+        self.proc = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _pid(self, pid, has_lib=True, cmdline="nrfutil-device list", ppid=1):
+        d = self.proc / str(pid)
+        d.mkdir()
+        maps = ["7f0000000000-7f0000001000 r--p 0 00:00 0 /lib/libc.so\n"]
+        if has_lib:
+            maps.append("7f0000002000-7f0000003000 r-xp 00000000 103:05 1 "
+                        "/opt/SEGGER/JLink_V952/libjlinkarm.so.9.52.0\n")
+        (d / "maps").write_text("".join(maps))
+        (d / "cmdline").write_bytes(cmdline.replace(" ", "\0").encode())
+        (d / "stat").write_text(f"{pid} (fake proc) S {ppid} 0 0 0\n")
+        return d
+
+    def test_zglasza_obcy_proces_z_biblioteka_jlinka(self):
+        self._pid(4242, cmdline="nrfutil-device list --hotplug")
+        owners = core.jlink_owners(self.proc)
+        self.assertEqual([pid for pid, _ in owners], [4242])
+        self.assertIn("--hotplug", owners[0][1])
+
+    def test_pomija_procesy_bez_biblioteki(self):
+        self._pid(4243, has_lib=False)
+        self.assertEqual(core.jlink_owners(self.proc), [])
+
+    def test_pomija_nas_samych(self):
+        # pylink otwiera sesję J-Link w NASZYM procesie (tryb autonomiczny,
+        # RTT) – to nie konflikt.
+        self._pid(os.getpid())
+        self.assertEqual(core.jlink_owners(self.proc), [])
+
+    def test_pomija_naszych_potomkow(self):
+        # JLinkExe odpalony przez naszego westa też nie jest konfliktem.
+        self._pid(4244, cmdline="JLinkExe", ppid=os.getpid())
+        self.assertEqual(core.jlink_owners(self.proc), [])
+
+    def test_nieczytelne_maps_nie_wywala(self):
+        d = self._pid(4245)
+        (d / "maps").unlink()
+        self.assertEqual(core.jlink_owners(self.proc), [])
+
+    def test_brak_proc_zwraca_pusta_liste(self):
+        self.assertEqual(core.jlink_owners(self.proc / "nie-ma"), [])
+
+    def test_komunikat_wskazuje_nrf_connect(self):
+        self.assertEqual(core.jlink_conflict_message([]), "")
+        msg = core.jlink_conflict_message(
+            [(4242, "nrfutil-device list --hotplug")])
+        self.assertIn("pid 4242", msg)
+        self.assertIn("nRF Connect for Desktop", msg)
+        msg = core.jlink_conflict_message([(7, "JLinkGDBServer")])
+        self.assertIn("JLinkGDBServer", msg)
+
+
+class JlinkGuardCliTests(unittest.TestCase):
+    """Blokada CLI: przy zajętej sondzie `run` nie wchodzi do flasha,
+    dopóki użytkownik nie zwolni J-Linka."""
+
+    def setUp(self):
+        self.env = FakeEnv()
+        self.addCleanup(self.env.cleanup)
+
+    def test_run_czeka_az_jlink_bedzie_wolny(self):
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        answers = iter(["", "", "tak", "2.5 mA", ""])   # 1. Enter = ponów
+
+        def released(prompt=""):
+            # Po pierwszym "sprawdź ponownie" udajemy zamknięcie nRF Connect.
+            self.env.jlink_owners = []
+            return next(answers)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                patch("builtins.input", released):
+            core.cmd_run(run_args(["zwykly"], dry_run=False, sample="T #1"))
+        self.assertIn("Sondę J-Link trzyma inny program", out.getvalue())
+        self.assertIn("pid 4242", out.getvalue())
+        # Flash i tak się wykonał – po zwolnieniu sondy.
+        self.assertTrue(any(c.startswith("west flash")
+                            for c in self.env.commands()))
+
+    def test_dry_run_nie_pyta_o_jlink(self):
+        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            core.cmd_run(run_args(["zwykly"]))
+        self.assertNotIn("Sondę J-Link", out.getvalue())
 
 
 if __name__ == "__main__":
