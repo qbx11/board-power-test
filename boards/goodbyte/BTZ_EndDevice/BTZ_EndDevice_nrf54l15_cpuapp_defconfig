@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Goodbyte
+# SPDX-License-Identifier: Apache-2.0
+
+# Keep UART driver available (uart20 in devicetree), but it is not the console
+CONFIG_SERIAL=y
+
+# Console routed to SEGGER RTT over J-Link (no UART pins needed)
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=n
+CONFIG_USE_SEGGER_RTT=y
+CONFIG_RTT_CONSOLE=y
+
+# Enable GPIO
+CONFIG_GPIO=y
+
+# Enable MPU
+CONFIG_ARM_MPU=y

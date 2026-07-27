@@ -22,7 +22,7 @@ settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
 [boards.btz]
 board      = "BTZ_EndDevice/nrf54l15/cpuapp"
 runner     = "jlink"                                # west flash -r jlink (J-Link mini EDU)
-board_root = "../NCS-Projects/Projekt-BLE-Mesh/app" # względem katalogu projektu; nadpisze env BOARD_ROOT
+board_root = "."                                    # definicja płytki jest w tym repo (boards/goodbyte/BTZ_EndDevice/) – clone buduje BTZ bez repo-sąsiadów; env BOARD_ROOT nadal nadpisuje
 
 [boards.dk]
 board = "nrf54l15dk/nrf54l15/cpuapp"
