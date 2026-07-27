@@ -1559,8 +1559,17 @@ class PowerTestApp(App):
                                     color: #888888; text-style: none; }
     /* Opcjonalny zapis surowych danych sesji – pod tabelą wyników. */
     #save_results { margin: 1 1 0 1; min-width: 18; }
+    /* Nagłówek logów: kontener Horizontal ma domyślnie height:1fr, co
+       zjadałoby górną połowę ekranu i spychało logi na środek – ogranicz
+       go do wysokości zawartości (jeden wiersz). */
+    #cmds-head { height: auto; }
     #cmds-title { height: 1; color: #777777; padding: 0 1; margin-top: 1; }
     #cmds { padding: 0 1; height: auto; }
+    /* Tryb ręczny: logi build/flash kumulują się przez cały przebieg, więc
+       obszar logów jest przyklejonym do góry panelem (1fr) z własnym
+       scrollem – jak w trybie autonomicznym – zamiast rozpychać i
+       przewijać cały ekran (wczesne logi nie uciekają poza widok). */
+    RunScreen #cmds { height: 1fr; }
     /* Monitor dongla (serial) – logi przed i podczas pomiaru. Panel
        wypełnia wolną wysokość (1fr) i jest jedynym przewijanym obszarem
        w środku ekranu – dzięki temu sam Screen nie musi się przewijać i
