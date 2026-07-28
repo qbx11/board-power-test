@@ -477,8 +477,17 @@ class AutoRunner:
 
     def _measure(self, idx, step, writer, rtt_reader):
         """Pętla pomiaru: czytaj PPK2, karm sesję, raportuj na żywo.
-        Koniec, gdy zbierzemy próbki warte duration_s (oś danych) albo
-        cancel. Wątek RTT (continuous) stawia auto-etykiety równolegle."""
+        Koniec, gdy minie OKNO duration_s liczone zegarem (albo wcześniej
+        zbierzemy komplet próbek), albo przy cancel. Wątek RTT
+        (continuous) stawia auto-etykiety równolegle.
+
+        Okno wyznacza zegar, nie licznik próbek: PPK2 potrafi zgubić
+        próbki (USB nie nadąża), a przy warunku „zbieraj, aż będzie
+        duration_s * rate próbek” pomiar ciągnął się o tyle dłużej, ile
+        danych przepadło – nawet kilkanaście sekund po wyzerowaniu
+        odliczania. Braki są danymi, których nie ma, a nie powodem, by
+        trzymać płytkę pod pomiarem dłużej: idą do `gaps` /
+        `lost_samples`."""
         sampler = self._sampler
         # Decymacja 100 kS/s -> wybrana częstotliwość (writer.sample_rate):
         # uśredniamy grupy po `decim` próbek, resztę przenosimy między
@@ -509,7 +518,7 @@ class AutoRunner:
         next_status = expected_base
         reported_deficit = 0
         try:
-            while writer.samples_written < target:
+            while True:
                 self._check_cancel()
                 if self.pause.is_set():
                     paused_s = self._do_pause(
@@ -519,6 +528,12 @@ class AutoRunner:
                     next_status += paused_s
                     last_data = time.monotonic()
                     continue
+                # KONIEC: zamknięte okno czasowe (pauzy się nie liczą) albo
+                # komplet próbek. Sprawdzamy PO pauzie, żeby Stop w UI nie
+                # skracał pomiaru.
+                if (time.monotonic() - expected_base >= step.duration_s
+                        or writer.samples_written >= target):
+                    break
                 time.sleep(READ_INTERVAL_S)
                 try:
                     chunk = sampler.read()
@@ -595,6 +610,22 @@ class AutoRunner:
                     next_status += 1.0
                     if next_status <= now:
                         next_status = now + 1.0
+            # Domknij rozliczenie braków: między ostatnim statusem a końcem
+            # okna też mogło ich zabraknąć, a od kiedy okno wyznacza zegar,
+            # zgubione próbki to JEDYNY ślad po tym, że dane są dziurawe
+            # (wcześniej widać je było jako przeciągnięty pomiar).
+            missing = int(target - writer.samples_written - reported_deficit)
+            if missing > eff_rate * 0.2:      # ten sam próg co w pętli
+                writer.record_gap(missing)
+                reported_deficit += missing
+            if reported_deficit > eff_rate * 0.5:    # ponad pół sekundy
+                self._note(
+                    f"pomiar {idx} ({step.scenario}): PPK2 zgubiło "
+                    f"{reported_deficit} próbek "
+                    f"(~{reported_deficit / eff_rate:.1f} s z "
+                    f"{step.duration_s:g} s) – USB nie nadążyło; okno "
+                    "pomiaru zamknięte zgodnie z zegarem",
+                    idx, step.scenario)
         finally:
             stop_rtt.set()
             try:

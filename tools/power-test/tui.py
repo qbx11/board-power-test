@@ -1623,6 +1623,17 @@ class AutoRunScreen(Screen):
             head.update(f"[b]POMIAR[/b] · {base}")
             btn.label = "Stop"
 
+    def _warn_lost_samples(self, d):
+        """Ostrzeż, gdy PPK2 zgubiło zauważalny kawałek danych. Próg 2%
+        okna – drobne braki na styku odczytów są normalne."""
+        lost = d.get("lost_samples") or 0
+        got = d.get("samples") or 0
+        if not lost or lost < 0.02 * (lost + got):
+            return
+        self.note(f"[#cc9900]⚠ PPK2 zgubiło {lost:,} próbek "
+                  f"({lost / (lost + got):.0%} okna) – USB nie nadążyło; "
+                  "średnia policzona z tego, co dotarło.[/]")
+
     def _finish_step(self, ev):
         """Po pomiarze: usuń okna build/flash tego kroku i dopisz wynik do
         tabelki na górze."""
@@ -1636,6 +1647,10 @@ class AutoRunScreen(Screen):
                       self._fmt_uA(d.get("max_uA")),
                       self._fmt_time(d.get("duration_s") or 0))
         self.query_one("#measure-panel").display = False
+        # Zgubione próbki muszą być WIDAĆ. Okno pomiaru zamyka zegar, więc
+        # braki nie objawiają się już przeciągniętym pomiarem – bez tej
+        # linijki dziurawe dane wyglądałyby jak zdrowe.
+        self._warn_lost_samples(d)
         # Sprzątnij monitor dongla tego kroku (następny odsłoni się sam).
         self.query_one("#dongle-log", Log).clear()
         self.query_one("#dongle-panel").display = False

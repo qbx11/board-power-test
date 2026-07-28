@@ -518,6 +518,32 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].sample_rate, 1000)
 
 
+class LostSamplesWarningTest(unittest.TestCase):
+    """Od kiedy okno pomiaru zamyka zegar, zgubione próbki nie objawiają
+    się już przeciągniętym pomiarem – muszą być widoczne wprost."""
+
+    def _warned(self, data):
+        seen = []
+        screen = tui.AutoRunScreen.__new__(tui.AutoRunScreen)
+        screen.note = seen.append
+        tui.AutoRunScreen._warn_lost_samples(screen, data)
+        return seen
+
+    def test_ostrzega_przy_realnej_stracie(self):
+        out = self._warned({"samples": 5000, "lost_samples": 5000})
+        self.assertTrue(out)
+        self.assertIn("5,000", out[0])
+        self.assertIn("50%", out[0])
+
+    def test_milczy_przy_komplecie_i_drobnicy(self):
+        self.assertFalse(self._warned({"samples": 10000,
+                                       "lost_samples": 0}))
+        # drobne braki na styku odczytów (<2% okna) to nie awaria
+        self.assertFalse(self._warned({"samples": 10000,
+                                       "lost_samples": 100}))
+        self.assertFalse(self._warned({"samples": 0}))
+
+
 class CountdownFormatTest(unittest.TestCase):
     """REGRESJA (#22): odliczanie w trybie autonomicznym zacinało się –
     ta sama sekunda potrafiła wisieć dwa takty."""

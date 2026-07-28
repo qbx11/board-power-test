@@ -436,6 +436,54 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(any("Sondę J-Link trzyma inny program" in n
                             for n in notes), notes)
 
+    def _measure_seconds(self, plan, sampler):
+        """Ile ZEGAROWO trwało samo okno pomiaru (od stanu 'measure' do
+        'step_done')."""
+        marks = {}
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind == "state" and ev.text == "measure":
+                marks["start"] = time.monotonic()
+            elif ev.kind == "step_done":
+                marks["end"] = time.monotonic()
+
+        self.sampler = sampler
+        results = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: sampler,
+            rtt_factory=lambda prof: FakeRttReader(),
+            event_cb=watcher, cancel=threading.Event()).run()
+        return results, marks["end"] - marks["start"]
+
+    def test_pomiar_konczy_sie_z_zegarem_mimo_zgubionych_probek(self):
+        # REGRESJA: pętla kończyła się dopiero po zebraniu duration_s * rate
+        # PRÓBEK, więc gdy PPK2 gubiło dane, pomiar ciągnął się dalej mimo
+        # wyzerowanego odliczania (obserwacja: +10 s). Okno ma zamykać
+        # zegar; braki to dziury w danych, nie powód do przedłużania.
+        plan = _plan(duration_s=2, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        results, measured_s = self._measure_seconds(
+            plan, _LossySampler(sample_rate=200, keep=0.5))
+        # Połowa próbek przepada: przed poprawką okno trwało ~2x dłużej.
+        self.assertLess(measured_s, 2 + 0.8, f"pomiar trwał {measured_s:.1f} s")
+        self.assertGreater(measured_s, 2 - 0.5)
+        # Dane są krótsze niż okno – i musi to być odnotowane.
+        summary = results[0].summary
+        self.assertLess(summary["samples"], 2 * 100)
+        self.assertGreater(summary["lost_samples"], 0)
+
+    def test_pelny_pomiar_zbiera_komplet_probek(self):
+        # Kontrola do powyższego: gdy nic nie ginie, okno zegarowe daje
+        # pełny komplet próbek (poprawka nie skraca zdrowego pomiaru).
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        results, measured_s = self._measure_seconds(
+            plan, FakeSampler(sample_rate=200))
+        self.assertLess(abs(results[0].summary["samples"] - 100), 12)
+        self.assertEqual(results[0].summary["lost_samples"], 0)
+        self.assertLess(measured_s, 1 + 0.8)
+
     def test_odliczanie_idzie_zegarem_a_nie_probkami(self):
         # REGRESJA (#22): odliczanie w trybie autonomicznym „zacinało się”
         # – ta sama sekunda pokazywała się dwa razy. Powód: UI liczyło
@@ -443,7 +491,9 @@ class EngineTest(unittest.TestCase):
         # zgubionych próbkach zostaje w tyle za zegarem. Zdarzenie `live`
         # musi nieść czas zegarowy pomiaru.
         self.sampler = _LossySampler(sample_rate=200, keep=0.5)
-        self._run(_plan(duration_s=1.5,
+        # Okno musi być dłuższe niż kilka sekund siatki statusów – od kiedy
+        # kończy je zegar, krótki pomiar nie zdąży ich wyemitować tylu.
+        self._run(_plan(duration_s=3.2,
                         trigger=planmod.Trigger(type="delay", seconds=0)))
         live = [ev for ev in self.events if ev.kind == "live"]
         self.assertGreaterEqual(len(live), 3, "za mało statusów na żywo")
