@@ -446,8 +446,10 @@ class ResultsScreen(ModalScreen):
     # z serii (sweep) miał jaką wartość flagi build.
     MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
                    "prad_uA", "oczekiwane", "uwagi"]
-    AUTO_COLS = ["data", "pomiar_id", "scenariusz", "parametr", "wartosc",
-                 "napiecie_V", "prad_uA", "czas_s"]
+    # 'egzemplarz' jest w OBU trybach: bez niego nie wiadomo, której płytki
+    # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
+    AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
+                 "wartosc", "napiecie_V", "prad_uA", "czas_s"]
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
     # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.

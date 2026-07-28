@@ -354,6 +354,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
                        "prad_uA": "0.9"})
         auto = {c: "" for c in core.CSV_FIELDS}
         auto.update({"data": "2026-01-02 10:00", "scenariusz": "lpn",
+                     "egzemplarz": "BTZ #7",
                      "prad_uA": "20.5", "pomiar_id": "1.1",
                      "parametr": "CONFIG_LPN_SENSOR_INTERVAL_S",
                      "wartosc": "10", "prad_min_uA": "-0.1",
@@ -386,6 +387,11 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             cols = tui.ResultsScreen.AUTO_COLS
             self.assertEqual(cells[cols.index("prad_uA")], "20.50")
             self.assertEqual(cells[cols.index("czas_s")], "120.00")
+            # REGRESJA: tryb autonomiczny gubił kolumnę z egzemplarzem
+            # płytki, więc w dzienniku z kilku płytek nie dało się
+            # odróżnić, czyj to wynik.
+            self.assertIn("egzemplarz", cols)
+            self.assertEqual(cells[cols.index("egzemplarz")], "BTZ #7")
 
     def test_sweep_str_and_step_label(self):
         S = tui.AutoRunScreen
