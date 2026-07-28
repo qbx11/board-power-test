@@ -2236,15 +2236,34 @@ class PowerTestApp(App):
         self.notify("Zastosowano ustawienia do wszystkich pomiarów.")
 
     def _apply_to_following(self, button):
-        """'…do następnych' – zapamiętaj config jako szablon; każdy KOLEJNY
-        dodany pomiar dostanie te ustawienia (bez zmiany istniejących)."""
+        """'…do następnych' – ustaw config (bez scenariusza) na wszystkich
+        kartach LEŻĄCYCH NIŻEJ i zapamiętaj go jako szablon dla kolejnych
+        dodanych pomiarów. Wcześniej działał tylko szablon, więc przycisk
+        nic nie robił, gdy karty niżej już istniały."""
         card = self._card_of(button)
         if card is None:
             return
         cfg = dict(card.get_config())
         cfg.pop("scenario", None)
         self._card_template = cfg
-        self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
+        # Kolejność z DOM = kolejność kart na ekranie; „niżej” szukamy po
+        # tożsamości widgetu, nie po ==.
+        cards = list(self.query(MeasurementCard))
+        seen = False
+        below = []
+        for other in cards:
+            if other is card:
+                seen = True
+            elif seen:
+                below.append(other)
+        for other in below:
+            other.apply_shared(cfg)
+        self._refresh_card_titles()
+        if below:
+            self.notify(f"Zastosowano ustawienia do {len(below)} kolejnych "
+                        "pomiarów; nowe też je odziedziczą.")
+        else:
+            self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
 
     def _scenario_added(self, result):
         """Po 'Dodaj kod': nowy scenariusz od razu do wyboru, bez restartu

@@ -100,8 +100,8 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(first.collapsed)
 
     async def test_apply_to_following_templates_new_cards(self):
-        # '…do następnych' zapamiętuje config; kolejny dodany pomiar go
-        # dziedziczy, ale istniejące karty zostają nietknięte.
+        # '…do następnych' zapamiętuje config – kolejny dodany pomiar go
+        # dziedziczy.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 60)) as pilot:
             await pilot.click("#mode-label-auto")
@@ -115,6 +115,43 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             _, second = list(app.query(tui.MeasurementCard))
             self.assertEqual(
                 second.query_one(".card-duration", Input).value, "77s")
+
+    async def test_apply_to_following_zmienia_istniejace_karty_nizej(self):
+        # REGRESJA (#24): przycisk działał tylko jako szablon dla pomiarów
+        # jeszcze nieutworzonych – karty już stojące niżej ignorował.
+        # Ma objąć wszystkie „niższe”, a wyższych nie ruszać.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second, third = list(app.query(tui.MeasurementCard))
+            for card, value in ((first, "1s"), (second, "2s"),
+                                (third, "3s")):
+                card.query_one(".card-duration", Input).value = value
+            second.query_one(".card-voltage", Input).value = "3.3"
+            app._apply_to_following(second.query_one(".card-apply-next",
+                                                     tui.Button))
+            await pilot.pause()
+            # niżej: przejęły ustawienia
+            self.assertEqual(
+                third.query_one(".card-duration", Input).value, "2s")
+            self.assertEqual(
+                third.query_one(".card-voltage", Input).value, "3.3")
+            # wyżej: nietknięte
+            self.assertEqual(
+                first.query_one(".card-duration", Input).value, "1s")
+            self.assertNotEqual(
+                first.query_one(".card-voltage", Input).value, "3.3")
+            # i nadal jest szablonem dla nowo dodanych
+            app.add_measurement()
+            await pilot.pause()
+            fourth = list(app.query(tui.MeasurementCard))[-1]
+            self.assertEqual(
+                fourth.query_one(".card-duration", Input).value, "2s")
 
     async def test_dodany_scenariusz_od_razu_do_wyboru_w_karcie(self):
         # Regresja: 'Dodaj kod' w trybie autonomicznym dopisywał wpis do
