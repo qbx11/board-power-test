@@ -20,6 +20,15 @@ config SLEEP_SYSTEM_ON_IDLE
 	  RAM i LFCLK/RTC (GRTC) pozostają aktywne. Referencyjny prąd
 	  "śpiącego" systemu RTOS.
 
+config SLEEP_SYSTEM_ON_ACTIVE
+	bool "System ON active; CPU w pustej pętli, bez usypiania (max zegar)"
+	help
+	  main() wchodzi w nieskończoną, pustą pętlę busy-loop (bez k_sleep/WFI,
+	  CPU nigdy nie usypia). Rdzeń aplikacyjny nRF54L15 pracuje na stałym
+	  zegarze PLL 128 MHz - to już domyślny build (SoC nie ma DVFS/HSFLL jak
+	  nRF54H20, PLL wspiera tylko 64/128 MHz). Punkt odniesienia "worst case":
+	  maksymalny pobór samego CPU, do porównania z wariantami snu.
+
 config SLEEP_SYSTEM_OFF_WAKE_GPIO
 	bool "System OFF; wybudzenie przyciskiem sw0 (bez retencji RAM)"
 	select GPIO

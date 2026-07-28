@@ -87,6 +87,28 @@ int main(void)
 	APP_LOG("Tryb: System ON idle (k_sleep FOREVER)\n");
 	k_sleep(K_FOREVER);
 
+#elif defined(CONFIG_SLEEP_SYSTEM_ON_ACTIVE)
+	/* --- System ON active ---
+	 * CPU nigdy nie usypia: pusta petla busy-loop, bez k_sleep/WFI.
+	 * Zegar cpuapp nRF54L15 jest stalym PLL 128 MHz (max dla tego SoC,
+	 * brak DVFS/HSFLL jak w nRF54H20) - to juz domyslny build, wiec
+	 * BUILD_ASSERT tylko to potwierdza, nic nie "zada" w runtime. */
+	BUILD_ASSERT(NRF_CONFIG_CPU_FREQ_MHZ == 128,
+		     "Oczekiwano stalego zegara cpuapp 128 MHz (max dla nRF54L15)");
+	APP_LOG("Tryb: System ON active, busy-loop @ %d MHz (bez usypiania)\n",
+		NRF_CONFIG_CPU_FREQ_MHZ);
+	while (1) {
+#if defined(CONFIG_CONSOLE)
+		static int64_t last_log;
+		int64_t now = k_uptime_get();
+
+		if (now - last_log >= 1000) {
+			APP_LOG("busy-loop dziala, uptime=%lld ms\n", now);
+			last_log = now;
+		}
+#endif
+	}
+
 #elif defined(CONFIG_SLEEP_PERIODIC_SYSTEM_ON)
 	/* --- Periodyk, System ON ---
 	 * Błysk aktywności co T, między nimi k_sleep(T) -> System ON idle.

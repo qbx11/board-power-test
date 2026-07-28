@@ -43,6 +43,12 @@ description = "RTOS uśpiony, RAM i zegar RTC podtrzymane. Natychmiastowe wybudz
 cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_ON_IDLE=y"]
 expected    = "~1-2 uA (System ON IDLE, kolumna LFXO)"
 
+[scenarios.active]
+label       = "Praca ciągła — CPU bez usypiania"
+description = "System ON, pusta pętla busy-loop na stałym zegarze 128 MHz. Górna granica poboru CPU (worst case)."
+cmake_args  = ["-DCONFIG_SLEEP_SYSTEM_ON_ACTIVE=y"]
+expected    = "rząd pojedynczych–kilkunastu mA (nie wartość do minimalizacji, punkt odniesienia)"
+
 [scenarios.wake_gpio]
 label       = "Sen głęboki — wybudzanie przyciskiem"
 description = "System OFF z wybudzeniem przyciskiem sw0 (SENSE), bez retencji RAM."
