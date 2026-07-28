@@ -75,13 +75,34 @@ def parse_duration(value):
 
 @dataclass
 class Trigger:
-    """Warunek startu pomiaru po flashu: 'delay' = odczekaj N sekund,
-    'rtt' = czekaj (max `timeout_s`) na linię logu RTT pasującą do
-    regexa `pattern`."""
+    """Warunek startu pomiaru po flashu:
+      'delay'  = odczekaj N sekund (`seconds`),
+      'rtt'    = czekaj (max `timeout_s`) na linię logu RTT pasującą do
+                 regexa `pattern`,
+      'serial' = j.w., ale na logu dongla (fragment `pattern`),
+      'chip'   = po flashu sparuj węzeł Matter i otwórz subskrypcję
+                 atrybutu; pomiar startuje na PIERWSZYM raporcie
+                 (patrz scripts/pair_and_subscribe.py). Pola chip_* niżej.
+                 `timeout_s` = ile czekać na pierwszą wartość."""
     type: str = "delay"
     seconds: float = 0.0
     pattern: str = ""
     timeout_s: float = 120.0
+    # --- parametry triggera 'chip' (parowanie Matter + subskrypcja) ---
+    node_id: str = ""            # Node ID węzła (wymagany dla 'chip')
+    dataset: str = ""            # operational dataset Thread w hex (parowanie)
+    pin: str = "20202021"        # setup PIN code
+    discriminator: str = ""      # discriminator (parowanie)
+    cluster: str = "temperaturemeasurement"
+    attribute: str = "measured-value"
+    endpoint: str = "1"
+    min_interval: str = "1"      # min interval subskrypcji [s]
+    max_interval: str = "60"     # max interval subskrypcji [s]
+    chip_dir: str = ""           # katalog connectedhomeip; puste = domyślny skryptu
+    chip_tool: str = ""          # ścieżka do chip-tool; puste = domyślny skryptu
+    match: str = ""              # regex 1. wartości; puste = domyślny skryptu
+    skip_pairing: bool = False   # węzeł już sparowany – tylko subskrypcja
+    no_wipe: bool = False        # nie kasuj /tmp/chip_* przed parowaniem
 
 
 @dataclass
@@ -202,7 +223,21 @@ def _step_from_toml(raw, idx):
         seconds=float(trig_raw.get("seconds", 0)),
         pattern=trig_raw.get("pattern", ""),
         timeout_s=(parse_duration(trig_raw["timeout"])
-                   if "timeout" in trig_raw else 120.0))
+                   if "timeout" in trig_raw else 120.0),
+        node_id=str(trig_raw.get("node_id", "")),
+        dataset=str(trig_raw.get("dataset", "")),
+        pin=str(trig_raw.get("pin", "20202021")),
+        discriminator=str(trig_raw.get("discriminator", "")),
+        cluster=trig_raw.get("cluster", "temperaturemeasurement"),
+        attribute=trig_raw.get("attribute", "measured-value"),
+        endpoint=str(trig_raw.get("endpoint", "1")),
+        min_interval=str(trig_raw.get("min_interval", "1")),
+        max_interval=str(trig_raw.get("max_interval", "60")),
+        chip_dir=str(trig_raw.get("chip_dir", "")),
+        chip_tool=str(trig_raw.get("chip_tool", "")),
+        match=str(trig_raw.get("match", "")),
+        skip_pairing=bool(trig_raw.get("skip_pairing", False)),
+        no_wipe=bool(trig_raw.get("no_wipe", False)))
     stor_raw = raw.get("storage", {})
     storage = Storage(mode=stor_raw.get("mode", "downsampled"),
                       window_ms=int(stor_raw.get("window_ms", 1)))
@@ -295,9 +330,9 @@ def validate_plan(plan, manifest):
         if step.sample_rate not in SAMPLE_RATES:
             errors.append(f"{who}: sample_rate = {step.sample_rate} – "
                           "dozwolone: " + ", ".join(map(str, SAMPLE_RATES)))
-        if step.trigger.type not in ("delay", "rtt", "serial"):
+        if step.trigger.type not in ("delay", "rtt", "serial", "chip"):
             errors.append(f"{who}: trigger.type = '{step.trigger.type}' – "
-                          "dozwolone: delay | rtt | serial")
+                          "dozwolone: delay | rtt | serial | chip")
         if step.trigger.type == "serial":
             if not step.trigger.pattern:
                 errors.append(f"{who}: trigger serial wymaga pola 'pattern' "
@@ -314,6 +349,20 @@ def validate_plan(plan, manifest):
             if step.rtt == "off":
                 errors.append(f"{who}: trigger rtt wymaga rtt = 'trigger' "
                               "albo 'continuous' (jest 'off')")
+        if step.trigger.type == "chip":
+            if not step.trigger.node_id:
+                errors.append(f"{who}: trigger chip wymaga pola 'node_id'")
+            if not step.trigger.skip_pairing:
+                if not step.trigger.dataset:
+                    errors.append(f"{who}: trigger chip wymaga 'dataset' "
+                                  "(Thread w hex) do parowania – albo ustaw "
+                                  "skip_pairing = true")
+                if not step.trigger.discriminator:
+                    errors.append(f"{who}: trigger chip wymaga 'discriminator' "
+                                  "do parowania – albo ustaw skip_pairing = true")
+            if step.trigger.match and not _regex_ok(step.trigger.match):
+                errors.append(f"{who}: trigger chip 'match' nie jest poprawnym "
+                              f"regexem: '{step.trigger.match}'")
         if step.labels and step.rtt != "continuous":
             errors.append(f"{who}: auto-etykiety (labels) działają tylko "
                           "przy rtt = 'continuous' – znaczniki powstają "

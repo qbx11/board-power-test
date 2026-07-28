@@ -35,9 +35,19 @@ from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
-                             DirectoryTree, Input, Label, Log, Select, Static)
+                             DirectoryTree, Input, Label, Log, Select, Static,
+                             TextArea)
 
 import power_test as core
+
+# Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
+# pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
+# jest edytowalne; to tylko wygodna wartość startowa dla typowego setupu.
+CHIP_DATASET_DEFAULT = (
+    "0e08000000000001000000030000174a0300000e35060004001fffe0"
+    "0208813ba4b5a068fddf0708fddc8e685e36d6cc0510b840138392a6efbee6"
+    "1680bdca9ae7fd030f4f70656e5468726561642d666236650102fb6e04108c"
+    "97ec5b81873b78c371537a24886bef0c0402a0f7f8")
 
 # Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (Small Mono
 # 12), monochromatyczna jak reszta interfejsu; pod spodem podpis
@@ -1063,6 +1073,78 @@ class MeasurementCard(Vertical):
                     yield Input(value=c.get("serial_pattern", ""),
                                 placeholder="np. Friendship z LPN nawiazany",
                                 classes="card-serial-pattern")
+                # Matter (chip) – OPCJONALNY start po flashu: sparuj węzeł i
+                # otwórz subskrypcję atrybutu; pomiar rusza na 1. odczycie.
+                # Pola pojawiają się po włączeniu. Gdy zaznaczone, ma pierwszeństwo
+                # przed innymi źródłami startu (delay/RTT/serial).
+                yield Check("Matter: parowanie + subskrypcja po flashu "
+                            "(start na 1. odczycie)",
+                            value=c.get("chip_on", False),
+                            classes="card-chip-on")
+                with Vertical(classes="card-chip-box"):
+                    with Horizontal(classes="card-row"):
+                        with Vertical(classes="card-col"):
+                            yield Label("Node ID:")
+                            yield Input(value=c.get("chip_node_id", "5"),
+                                        placeholder="5",
+                                        classes="card-chip-node")
+                        with Vertical(classes="card-col"):
+                            yield Label("Discriminator:")
+                            yield Input(
+                                value=c.get("chip_discriminator", "3840"),
+                                placeholder="3840",
+                                classes="card-chip-disc")
+                        with Vertical(classes="card-col"):
+                            yield Label("Setup PIN:")
+                            yield Input(value=c.get("chip_pin", "20202021"),
+                                        placeholder="20202021",
+                                        classes="card-chip-pin")
+                    # Dataset (długi hex, ~222 znaki) w TextArea z zawijaniem –
+                    # Input tej długości renderuje się pusty (wartość szersza
+                    # niż pole, gdy tworzone w ukrytym boksie).
+                    yield Label("Dataset Thread (hex):")
+                    yield TextArea(
+                        c.get("chip_dataset", CHIP_DATASET_DEFAULT),
+                        soft_wrap=True, compact=True, show_line_numbers=False,
+                        classes="card-chip-dataset")
+                    # Cluster na pełną szerokość – „temperaturemeasurement" nie
+                    # mieści się w wąskiej kolumnie (też renderowałby się pusty).
+                    yield Label("Cluster:")
+                    yield Input(
+                        value=c.get("chip_cluster", "temperaturemeasurement"),
+                        classes="card-chip-cluster")
+                    with Horizontal(classes="card-row"):
+                        with Vertical(classes="card-col"):
+                            yield Label("Atrybut:")
+                            yield Input(
+                                value=c.get("chip_attribute",
+                                            "measured-value"),
+                                classes="card-chip-attr")
+                        with Vertical(classes="card-col"):
+                            yield Label("Endpoint:")
+                            yield Input(value=c.get("chip_endpoint", "1"),
+                                        placeholder="1",
+                                        classes="card-chip-endpoint")
+                    with Horizontal(classes="card-row"):
+                        with Vertical(classes="card-col"):
+                            yield Label("Min interval [s]:")
+                            yield Input(value=c.get("chip_min", "1"),
+                                        placeholder="1",
+                                        classes="card-chip-min")
+                        with Vertical(classes="card-col"):
+                            yield Label("Max interval [s]:")
+                            yield Input(value=c.get("chip_max", "60"),
+                                        placeholder="60",
+                                        classes="card-chip-max")
+                        with Vertical(classes="card-col"):
+                            yield Label("Timeout 1. wartości:")
+                            yield Input(value=c.get("chip_timeout", "120s"),
+                                        placeholder="120s",
+                                        classes="card-chip-timeout")
+                    yield Check("Węzeł już sparowany (pomiń parowanie, "
+                                "tylko subskrypcja)",
+                                value=c.get("chip_skip", False),
+                                classes="card-chip-skip")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
                         yield Label("Napięcie (V, 1.8–3.6):")
@@ -1111,6 +1193,8 @@ class MeasurementCard(Vertical):
             self.query_one(".card-serial-on", Checkbox).value
         self.query_one(".card-serial-pattern").display = \
             self.query_one(".card-serial-trig-on", Checkbox).value
+        self.query_one(".card-chip-box").display = \
+            self.query_one(".card-chip-on", Checkbox).value
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
@@ -1198,6 +1282,28 @@ class MeasurementCard(Vertical):
                 self.query_one(".card-serial-trig-on", Checkbox).value,
             "serial_pattern":
                 self.query_one(".card-serial-pattern", Input).value.strip(),
+            "chip_on": self.query_one(".card-chip-on", Checkbox).value,
+            "chip_node_id":
+                self.query_one(".card-chip-node", Input).value.strip(),
+            "chip_discriminator":
+                self.query_one(".card-chip-disc", Input).value.strip(),
+            "chip_pin": self.query_one(".card-chip-pin", Input).value.strip(),
+            # TextArea dopuszcza Enter – dataset to jeden ciąg hex, więc
+            # usuwamy wszystkie białe znaki (spacje/nowe linie).
+            "chip_dataset":
+                "".join(self.query_one(".card-chip-dataset",
+                                       TextArea).text.split()),
+            "chip_cluster":
+                self.query_one(".card-chip-cluster", Input).value.strip(),
+            "chip_attribute":
+                self.query_one(".card-chip-attr", Input).value.strip(),
+            "chip_endpoint":
+                self.query_one(".card-chip-endpoint", Input).value.strip(),
+            "chip_min": self.query_one(".card-chip-min", Input).value.strip(),
+            "chip_max": self.query_one(".card-chip-max", Input).value.strip(),
+            "chip_timeout":
+                self.query_one(".card-chip-timeout", Input).value.strip(),
+            "chip_skip": self.query_one(".card-chip-skip", Checkbox).value,
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
@@ -1220,6 +1326,20 @@ class MeasurementCard(Vertical):
             cfg["serial_trig"]
         self.query_one(".card-serial-pattern", Input).value = \
             cfg["serial_pattern"]
+        self.query_one(".card-chip-on", Checkbox).value = cfg["chip_on"]
+        self.query_one(".card-chip-node", Input).value = cfg["chip_node_id"]
+        self.query_one(".card-chip-disc", Input).value = \
+            cfg["chip_discriminator"]
+        self.query_one(".card-chip-pin", Input).value = cfg["chip_pin"]
+        self.query_one(".card-chip-dataset", TextArea).text = cfg["chip_dataset"]
+        self.query_one(".card-chip-cluster", Input).value = cfg["chip_cluster"]
+        self.query_one(".card-chip-attr", Input).value = cfg["chip_attribute"]
+        self.query_one(".card-chip-endpoint", Input).value = \
+            cfg["chip_endpoint"]
+        self.query_one(".card-chip-min", Input).value = cfg["chip_min"]
+        self.query_one(".card-chip-max", Input).value = cfg["chip_max"]
+        self.query_one(".card-chip-timeout", Input).value = cfg["chip_timeout"]
+        self.query_one(".card-chip-skip", Checkbox).value = cfg["chip_skip"]
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
@@ -1769,13 +1889,16 @@ class PowerTestApp(App):
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
     .card-sweep-on, .card-delay-on, .card-rtt-on, .card-serial-on,
-    .card-serial-trig-on {
+    .card-serial-trig-on, .card-chip-on, .card-chip-skip {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
     .card-sweep-param, .card-sweep-values { width: 100%; }
     .card-serial-port, .card-serial-pattern { width: 100%; }
-    .card-rtt-box, .card-serial-box, .card-sweep-box { height: auto; }
+    .card-chip-cluster { width: 100%; }
+    .card-chip-dataset { width: 100%; height: 6; border: round #555555; }
+    .card-rtt-box, .card-serial-box, .card-sweep-box,
+    .card-chip-box { height: auto; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
@@ -2409,12 +2532,49 @@ class PowerTestApp(App):
             except ValueError as e:
                 raise ValueError(f"Pomiar {card.number}: {e}")
             rtt = c["rtt_mode"] if c["rtt_on"] else "off"
+            # Trigger 'chip' sam wyznacza start (1. odczyt), więc tryb RTT
+            # 'trigger' (start po logu) traci sens – zostawiamy tylko
+            # 'continuous' (etykiety) albo 'off'.
+            if c.get("chip_on") and rtt == "trigger":
+                rtt = "off"
             monitor_port = c["serial_port"] if c["serial_on"] else ""
             labels = []
             if rtt == "continuous" and c["pattern"]:
                 labels = [LabelRule(pattern=c["pattern"],
                                     label=c["pattern"])]
-            if c["serial_on"] and c["serial_trig"] and c["serial_pattern"]:
+            if c.get("chip_on"):
+                if not c["chip_node_id"]:
+                    raise ValueError(
+                        f"Pomiar {card.number}: Matter – podaj Node ID.")
+                if not c["chip_skip"]:
+                    if not c["chip_dataset"]:
+                        raise ValueError(
+                            f"Pomiar {card.number}: Matter – podaj dataset "
+                            "Thread (hex) albo zaznacz 'węzeł już sparowany'.")
+                    if not c["chip_discriminator"]:
+                        raise ValueError(
+                            f"Pomiar {card.number}: Matter – podaj "
+                            "discriminator albo 'węzeł już sparowany'.")
+                try:
+                    chip_to = (parse_duration(c["chip_timeout"])
+                               if c["chip_timeout"] else 120.0)
+                except ValueError:
+                    raise ValueError(
+                        f"Pomiar {card.number}: Matter – timeout "
+                        f"'{c['chip_timeout']}' nie jest czasem (np. 120s).")
+                trigger = Trigger(
+                    type="chip", timeout_s=chip_to,
+                    node_id=c["chip_node_id"],
+                    dataset=c["chip_dataset"],
+                    pin=c["chip_pin"] or "20202021",
+                    discriminator=c["chip_discriminator"],
+                    cluster=c["chip_cluster"] or "temperaturemeasurement",
+                    attribute=c["chip_attribute"] or "measured-value",
+                    endpoint=c["chip_endpoint"] or "1",
+                    min_interval=c["chip_min"] or "1",
+                    max_interval=c["chip_max"] or "60",
+                    skip_pairing=c["chip_skip"])
+            elif c["serial_on"] and c["serial_trig"] and c["serial_pattern"]:
                 trigger = Trigger(type="serial", pattern=c["serial_pattern"],
                                   timeout_s=180.0)
             elif rtt == "trigger":

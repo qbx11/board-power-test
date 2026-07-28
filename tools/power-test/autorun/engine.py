@@ -17,6 +17,7 @@ import math
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -154,6 +155,99 @@ class _SerialMonitor:
             pass
 
 
+# Skrypt parowania + subskrypcji (patrz też README). Żyje w scripts/ obok
+# instalatora. Sekwencja: rm /tmp/chip_* -> pairing ble-thread -> interactive
+# start -> subscribe; na pierwszej wartości wypisuje marker FIRST-VALUE i
+# TRZYMA subskrypcję otwartą aż do zamknięcia procesu.
+CHIP_SCRIPT = core.ROOT / "scripts" / "pair_and_subscribe.py"
+CHIP_FIRST_VALUE_MARK = "FIRST-VALUE"
+# Zapas nad `trigger.timeout_s` (który dotyczy czekania na 1. wartość) na
+# samo parowanie BLE+Thread, zanim silnik uzna sesję chip za zawieszoną.
+# Skrypt ma własne, ciaśniejsze limity (pairing/wartość) i wychodzi pierwszy –
+# to tylko bezpiecznik na twardo zawieszony proces.
+CHIP_PAIR_ALLOWANCE_S = 240.0
+
+
+class _ChipSession:
+    """Trigger 'chip': parowanie Matter + otwarta subskrypcja atrybutu.
+
+    Odpala scripts/pair_and_subscribe.py i wątkiem drenuje jego stdout przez
+    CAŁE życie procesu – to konieczne, bo inaczej bufor pipe by się zapchał i
+    subskrypcja (a więc raporty) by zamarły w trakcie pomiaru. Gdy w strumieniu
+    padnie marker FIRST-VALUE, ustawia `first_value` (silnik startuje pomiar).
+    Linie do momentu pierwszej wartości idą też do UI (postęp parowania); potem
+    już tylko do chip.log, żeby nie zalewać ekranu raportami subskrypcji.
+    Subskrypcja żyje aż do stop() (wołane po pomiarze w _run_step)."""
+
+    def __init__(self, cmd, engine, log_path, idx, scenario):
+        self.cmd = cmd
+        self.engine = engine
+        self.log_path = log_path
+        self.idx = idx
+        self.scenario = scenario
+        self.first_value = threading.Event()
+        self.value = ""
+        self.proc = None
+        self._thread = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            self.cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace",
+            bufsize=1, env=core.child_env())
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        with open(self.log_path, "a", encoding="utf-8") as log:
+            for line in self.proc.stdout:
+                line = line.rstrip()
+                log.write(line + "\n")
+                log.flush()
+                if not self.first_value.is_set():
+                    self.engine._emit("line", self.idx, self.scenario, line)
+                    if line.startswith(CHIP_FIRST_VALUE_MARK):
+                        parts = line.split(None, 1)
+                        self.value = parts[1] if len(parts) > 1 else ""
+                        self.first_value.set()
+
+    def wait_first_value(self, timeout_s, check_cancel):
+        """Blokuj do markera FIRST-VALUE. _TriggerTimeout po `timeout_s`;
+        AutoRunError, gdy skrypt padnie wcześniej (parowanie/subskrypcja
+        nie doszły do skutku)."""
+        deadline = time.monotonic() + timeout_s
+        while not self.first_value.is_set():
+            check_cancel()
+            if self.proc.poll() is not None:
+                raise AutoRunError(
+                    "chip: skrypt parowania/subskrypcji zakończył się przed "
+                    f"pierwszą wartością (kod {self.proc.returncode}) – "
+                    f"sprawdź {self.log_path.name}")
+            if time.monotonic() >= deadline:
+                raise _TriggerTimeout(
+                    f"chip: pierwsza wartość nie przyszła w {timeout_s:g} s")
+            time.sleep(0.1)
+
+    def stop(self):
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            self.proc.terminate()          # skrypt łapie SIGTERM i ubija chip-tool
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        # Wątek drenujący już wyszedł (EOF po zakończeniu procesu) – bezpiecznie
+        # domknij pipe, żeby nie zostawiać otwartego deskryptora.
+        if self.proc.stdout is not None:
+            try:
+                self.proc.stdout.close()
+            except Exception:
+                pass
+
+
 class AutoRunner:
 
     def __init__(self, plan, manifest, sample, *, sampler_factory=None,
@@ -189,6 +283,10 @@ class AutoRunner:
         # ustawiany na starcie _run_step, doklejany do zdarzeń w _emit.
         self._cur_label = ""
         self._cur_sweep = None
+        # Sesja triggera 'chip' (parowanie + subskrypcja) bieżącego kroku:
+        # ustawiana w _wait_trigger, zamykana w _run_step (finally), żeby
+        # subskrypcja żyła przez cały pomiar i została ubita po nim.
+        self._chip = None
 
     # ---------- pomocnicze ----------
 
@@ -342,6 +440,36 @@ class AutoRunner:
             self._sampler.dut_power(on)
             self._dut_on = on
 
+    def _chip_cmd(self, trig):
+        """argv skryptu parowania+subskrypcji (scripts/pair_and_subscribe.py)
+        z parametrów triggera 'chip'. Puste pola pomijamy – skrypt ma własne
+        domyślne (chip-dir, chip-tool, match)."""
+        cmd = [sys.executable, str(CHIP_SCRIPT),
+               "--node-id", trig.node_id,
+               "--endpoint", trig.endpoint,
+               "--cluster", trig.cluster,
+               "--attribute", trig.attribute,
+               "--min-interval", trig.min_interval,
+               "--max-interval", trig.max_interval,
+               "--value-timeout", str(trig.timeout_s)]
+        if trig.pin:
+            cmd += ["--pin", trig.pin]
+        if trig.dataset:
+            cmd += ["--dataset", trig.dataset]
+        if trig.discriminator:
+            cmd += ["--discriminator", trig.discriminator]
+        if trig.chip_dir:
+            cmd += ["--chip-dir", trig.chip_dir]
+        if trig.chip_tool:
+            cmd += ["--chip-tool", trig.chip_tool]
+        if trig.match:
+            cmd += ["--match", trig.match]
+        if trig.skip_pairing:
+            cmd.append("--skip-pairing")
+        if trig.no_wipe:
+            cmd.append("--no-wipe")
+        return cmd
+
     def _wait_trigger(self, idx, step, session_dir, run_log, monitor=None):
         """Warunek startu pomiaru. Zwraca (czytnik_rtt | None) – przy
         rtt='continuous' połączenie zostaje otwarte na czas pomiaru."""
@@ -384,6 +512,48 @@ class AutoRunner:
                 time.sleep(0.1)
             self._note(f"trigger dongla złapany: {trig.pattern!r}", idx,
                        step.scenario, files=(run_log,))
+            return None
+
+        if trig.type == "chip":
+            # Po flashu: sparuj węzeł Matter i otwórz subskrypcję atrybutu;
+            # pomiar startuje na PIERWSZYM raporcie (marker FIRST-VALUE ze
+            # scripts/pair_and_subscribe.py). Subskrypcja żyje przez cały
+            # pomiar – proces zamyka _run_step (finally) przez self._chip.
+            cmd = self._chip_cmd(trig)
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail="Matter: parowanie + subskrypcja")
+            self._note(f"trigger: chip node={trig.node_id} "
+                       f"{trig.cluster}/{trig.attribute} ep={trig.endpoint} "
+                       f"timeout={trig.timeout_s:g} s", idx, step.scenario,
+                       files=(run_log,))
+            self._log(f"chip: $ {shlex.join(cmd)}", files=(run_log,))
+            if self.dry_run:
+                return None
+            # cmd_start/cmd_end obejmują parowanie+subskrypcję – UI grupuje
+            # wyjście skryptu w zwijaną sekcję (jak build/flash). Zaczynamy
+            # PRZED chip.start(), żeby linie z wątku drenującego trafiły do niej.
+            title = f"chip {step.scenario}: parowanie + subskrypcja"
+            self._emit("cmd_start", idx, step.scenario, text=title)
+            chip = _ChipSession(cmd, self, session_dir / "chip.log",
+                                idx, step.scenario)
+            chip.start()
+            try:
+                chip.wait_first_value(trig.timeout_s + CHIP_PAIR_ALLOWANCE_S,
+                                      self._check_cancel)
+            except BaseException:
+                self._emit("cmd_end", idx, step.scenario,
+                           data={"rc": 1, "title": title})
+                chip.stop()
+                raise
+            self._emit("cmd_end", idx, step.scenario,
+                       data={"rc": 0, "title": title})
+            self._chip = chip
+            self._note(f"chip: pierwsza wartość ({chip.value}) – start pomiaru",
+                       idx, step.scenario, files=(run_log,))
+            if step.rtt == "continuous":
+                reader = self.rtt_factory(self.profile)
+                reader.attach()
+                return reader
             return None
 
         # trigger rtt: czekaj na wzorzec na konsoli RTT
@@ -883,6 +1053,12 @@ class AutoRunner:
             return StepResult(idx, step.scenario, "error", session_dir,
                               error=str(e))
         finally:
+            # Subskrypcja chip żyła przez pomiar – zamknij ją (skrypt ubija
+            # chip-tool na SIGTERM). Robimy to PRZED monitorem/logiem, żeby
+            # zwolnić Thread/CASE, niezależnie od tego, jak krok się skończył.
+            if self._chip is not None:
+                self._chip.stop()
+                self._chip = None
             if monitor is not None:
                 monitor.stop()
             run_log.close()
@@ -923,7 +1099,12 @@ class AutoRunner:
                 # z planu – meta ma opisywać ten pomiar, nie zamiar.
                 "trigger": {"type": step.trigger.type,
                             "seconds": effective_delay_s(step.trigger),
-                            "pattern": step.trigger.pattern},
+                            "pattern": step.trigger.pattern,
+                            **({"node_id": step.trigger.node_id,
+                                "cluster": step.trigger.cluster,
+                                "attribute": step.trigger.attribute,
+                                "endpoint": step.trigger.endpoint}
+                               if step.trigger.type == "chip" else {})},
                 "rtt": step.rtt}
 
     def _fail_meta(self, session_dir, idx, step, scen, voltage, status,

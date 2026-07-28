@@ -147,6 +147,41 @@ class ValidateTest(unittest.TestCase):
             planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
                                   MANIFEST), [])
 
+    def test_chip_trigger_requires_fields(self):
+        # bez node_id/dataset/discriminator -> trzy błędy
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip"))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("node_id" in e for e in errs))
+        self.assertTrue(any("dataset" in e for e in errs))
+        self.assertTrue(any("discriminator" in e for e in errs))
+        # komplet do parowania przechodzi
+        ok = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840"))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
+                                  MANIFEST), [])
+        # skip_pairing zdejmuje wymóg dataset/discriminator (zostaje node_id)
+        skip = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[skip]),
+                                  MANIFEST), [])
+        # zły regex match -> błąd
+        badre = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True, match="[unclosed"))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[badre]),
+                                     MANIFEST)
+        self.assertTrue(any("match" in e for e in errs))
+
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(
             scenario="reset_only", duration_s=30,

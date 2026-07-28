@@ -131,3 +131,13 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # Wpisy, których NIE chcesz trzymać na remote (np. cudze aplikacje
 # `source` z sąsiednich repo), umieść w scenarios.local.toml – ten plik
 # jest w .gitignore i scala się na wierzch tego manifestu przy starcie.
+
+[scenarios.end_device]
+label       = "matter"
+description = "Aplikacja z ../matter-end-device/end_device (build przez west)."
+source      = "../matter-end-device/end_device"
+
+[scenarios.end_device_2]
+label       = "matterv2"
+description = "Aplikacja z ../matter-end-device/end_device (build przez west)."
+source      = "../matter-end-device/end_device"

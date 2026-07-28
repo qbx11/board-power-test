@@ -211,6 +211,42 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].trigger.type, "rtt")
             self.assertEqual(plan.steps[0].trigger.pattern, "Ready")
 
+    async def test_chip_trigger_in_plan(self):
+        # Opcja Matter (chip) domyślnie WYŁĄCZONA -> trigger 'delay'. Po
+        # włączeniu i wypełnieniu pól: trigger 'chip' z parametrami. Bez
+        # Node ID -> czytelny błąd (blokuje start planu).
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            await pilot.pause()
+            # domyślnie brak chipa -> delay
+            self.assertEqual(
+                app._build_auto_plan("btz").steps[0].trigger.type, "delay")
+            # włącz Matter i wypełnij pola
+            card.query_one(".card-chip-on", tui.Check).value = True
+            card.query_one(".card-chip-node", Input).value = "5"
+            card.query_one(".card-chip-disc", Input).value = "3840"
+            card.query_one(".card-chip-dataset", tui.TextArea).text = "0e08aa"
+            card.query_one(".card-chip-timeout", Input).value = "90s"
+            card.query_one(".card-chip-endpoint", Input).value = "1"
+            await pilot.pause()
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertEqual(t.type, "chip")
+            self.assertEqual(t.node_id, "5")
+            self.assertEqual(t.discriminator, "3840")
+            self.assertEqual(t.dataset, "0e08aa")
+            self.assertEqual(t.timeout_s, 90)
+            self.assertEqual(t.endpoint, "1")
+            # bez Node ID -> błąd
+            card.query_one(".card-chip-node", Input).value = ""
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
+
     async def test_apply_to_all(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 60)) as pilot:
