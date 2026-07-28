@@ -42,6 +42,20 @@ READ_INTERVAL_S = 0.01     # ~10 ms między odczytami portu PPK2
 # Przy takich brakach średnia nie opisuje już przebiegu prądu.
 MAX_LOST_FRACTION = 0.05
 MEASURE_ATTEMPTS = 2       # pierwotny pomiar + jedno powtórzenie
+# Płytka po flashu resetuje się i przechodzi rozruch – pierwsze sekundy
+# to prąd bootowania, nie prąd scenariusza. Dlatego każdy start "po
+# czasie" ma tu podłogę. NIE dodajemy jej do czasu z planu, tylko bierzemy
+# większy z dwóch (30 s w planie = 30 s, nie 35 s).
+MIN_START_DELAY_S = 5.0
+
+
+def effective_delay_s(trigger):
+    """Ile sekund realnie czekamy po flashu przy triggerze 'delay'.
+    Dla RTT/serial 0 – tam czekaniem jest sam wzorzec i doliczenie
+    sekund groziłoby przegapieniem linii wypisanej tuż po rozruchu."""
+    if trigger.type != "delay":
+        return 0.0
+    return max(trigger.seconds, MIN_START_DELAY_S)
 
 
 class AutoRunError(RuntimeError):
@@ -327,13 +341,15 @@ class AutoRunner:
         rtt='continuous' połączenie zostaje otwarte na czas pomiaru."""
         trig = step.trigger
         if trig.type == "delay":
+            # Podłoga, nie doliczenie: plan prosi o 30 s -> czekamy 30 s.
+            delay_s = effective_delay_s(trig)
             self._emit("state", idx, step.scenario, "trigger",
-                       detail=f"start za {trig.seconds:g} s")
-            self._note(f"trigger: delay {trig.seconds:g} s", idx,
+                       detail=f"start za {delay_s:g} s")
+            self._note(f"trigger: delay {delay_s:g} s", idx,
                        step.scenario, files=(run_log,))
             if self.dry_run:
                 return None
-            self._countdown(idx, step, trig.seconds)
+            self._countdown(idx, step, delay_s)
             if step.rtt != "continuous":
                 return None
             reader = self.rtt_factory(self.profile)
@@ -863,8 +879,10 @@ class AutoRunner:
                 "build_dir": build_dir if isinstance(build_dir, str)
                 else None,
                 "duration_s": step.duration_s,
+                # `seconds` = realne czekanie (z podłogą), nie życzenie
+                # z planu – meta ma opisywać ten pomiar, nie zamiar.
                 "trigger": {"type": step.trigger.type,
-                            "seconds": step.trigger.seconds,
+                            "seconds": effective_delay_s(step.trigger),
                             "pattern": step.trigger.pattern},
                 "rtt": step.rtt}
 

@@ -1025,6 +1025,9 @@ class MeasurementCard(Vertical):
                                             "300, 600",
                                 classes="card-sweep-values")
                 # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
+                # Bez niego i tak czekamy MIN_START_DELAY_S na rozruch
+                # płytki; wpisany czas nie dokłada się do tych sekund,
+                # tylko je zastępuje (liczy się większy).
                 yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
                             value=c.get("delay_on", False),
                             classes="card-delay-on")
@@ -2384,7 +2387,9 @@ class PowerTestApp(App):
         """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =
         kolejność kart. Trigger (priorytet): log dongla > RTT 'start po logu'
         > 'start po czasie' > od razu; przy RTT continuous wzorzec staje się
-        auto-etykietą."""
+        auto-etykietą. Przy starcie po czasie (i 'od razu') silnik trzyma
+        własną podłogę na rozruch płytki – bierze WIĘKSZY z dwóch czasów,
+        nie sumę, więc tutaj nic nie doliczamy."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
                                   Trigger, expand_sweep, parse_duration)
 

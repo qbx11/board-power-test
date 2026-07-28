@@ -46,6 +46,15 @@ class EngineTest(unittest.TestCase):
         self.manifest = core.load_manifest()
         self.events = []
         self.sampler = FakeSampler(sample_rate=2000)
+        # Podłoga startu po flashu to sekundy realnego czekania – w
+        # testach niepowiązanych z nią zerujemy ją, żeby suite nie
+        # spowolnił. Klasy sprawdzające samą podłogę ustawiają ją same.
+        self._set_min_delay(0.0)
+
+    def _set_min_delay(self, seconds):
+        import autorun.engine as eng
+        old, eng.MIN_START_DELAY_S = eng.MIN_START_DELAY_S, seconds
+        self.addCleanup(setattr, eng, "MIN_START_DELAY_S", old)
 
     def tearDown(self):
         self.env.cleanup()
@@ -363,6 +372,74 @@ class EngineTest(unittest.TestCase):
         cd = [ev for ev in self.events if ev.kind == "countdown"]
         self.assertTrue(cd)
         self.assertIn("remaining_s", cd[0].data)
+
+    def _trigger_wait_s(self, plan, rtt_script=None):
+        """Ile ZEGAROWO minęło od wejścia w stan 'trigger' do otwarcia
+        okna pomiaru (stan 'measure')."""
+        marks = {}
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind != "state":
+                return
+            if ev.text == "trigger":
+                marks["start"] = time.monotonic()
+            elif ev.text == "measure":
+                # setdefault: powtórka pomiaru emituje 'measure' ponownie.
+                marks.setdefault("end", time.monotonic())
+
+        results = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(rtt_script),
+            event_cb=watcher, cancel=threading.Event()).run()
+        return results, marks["end"] - marks["start"]
+
+    def test_start_pomiaru_ma_stala_podloge_po_flashu(self):
+        # Płytka po flashu się resetuje – pierwsze sekundy to prąd
+        # rozruchu, nie scenariusza. Nawet bez „startu po czasie”
+        # odczekujemy podłogę i pokazujemy odliczanie.
+        self._set_min_delay(0.6)
+        results, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2, trigger=planmod.Trigger(type="delay", seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        self.assertGreater(waited, 0.6 - 0.05, f"czekano tylko {waited:.2f} s")
+        self.assertLess(waited, 0.6 + 0.5, f"czekano aż {waited:.2f} s")
+        self.assertTrue([ev for ev in self.events if ev.kind == "countdown"],
+                        "odliczanie musi być widoczne w UI")
+
+    def test_wlasny_czas_startu_zastepuje_podloge_a_nie_dodaje(self):
+        # Sedno: 0.9 s z planu przy podłodze 0.4 s daje 0.9 s, NIE 1.3 s.
+        self._set_min_delay(0.4)
+        _r, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2,
+            trigger=planmod.Trigger(type="delay", seconds=0.9)))
+        self.assertGreater(waited, 0.9 - 0.05)
+        self.assertLess(waited, 0.9 + 0.35,
+                        f"czasy się zsumowały: {waited:.2f} s")
+
+    def test_krotszy_wlasny_czas_podnosi_sie_do_podlogi(self):
+        # Druga strona max(): 0.2 s z planu nie skraca podłogi.
+        self._set_min_delay(0.8)
+        _r, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2,
+            trigger=planmod.Trigger(type="delay", seconds=0.2)))
+        self.assertGreater(waited, 0.8 - 0.05, f"czekano tylko {waited:.2f} s")
+
+    def test_podloga_nie_dotyczy_triggera_rtt(self):
+        # Przy RTT czekaniem jest sam wzorzec. Doliczenie podłogi
+        # groziłoby przegapieniem linii wypisanej tuż po rozruchu.
+        self._set_min_delay(5.0)
+        _r, waited = self._trigger_wait_s(
+            _plan(duration_s=0.2, rtt="trigger",
+                  trigger=planmod.Trigger(type="rtt", pattern="Ready",
+                                          timeout_s=5)),
+            rtt_script=[(0.05, "System Ready now")])
+        # Próg z zapasem: po złapaniu wzorca silnik odłącza J-Linka i daje
+        # płytce ~1 s na uspokojenie – to nie jest podłoga startu.
+        self.assertLess(waited, 2.0,
+                        f"RTT czekał na podłogę zamiast na wzorzec "
+                        f"({waited:.2f} s)")
 
     def test_sweep_distinct_builds_and_csv(self):
         # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość
