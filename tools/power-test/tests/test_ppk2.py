@@ -5,6 +5,7 @@
 # Ppk2ApiSampler._ppk2 i sprawdzamy TWARDY limit napięcia, bezpieczny
 # stan startowy oraz zwolnienie portu przy zamknięciu.
 
+import time
 import unittest
 
 import common  # noqa: F401  (dokłada TOOL_DIR do sys.path)
@@ -179,6 +180,138 @@ class _CalPPK2:
         if not self.ok:
             return None
         return True if self.calls > self.succeed_after else None
+
+
+class _FreeRunningSerial:
+    """Port PPK2 nadający swobodnie: `in_waiting` rośnie z upływem czasu,
+    a bajty można odebrać TYLKO raz. Bufor ma sufit – po jego przekroczeniu
+    najstarsze dane przepadają, dokładnie jak w sterowniku tty. Dzięki temu
+    da się bez sprzętu pokazać, że wolny konsument gubi próbki."""
+
+    RATE_BPS = 100_000 * 4          # ~400 kB/s
+    CAP = 4 * 1024                  # ciasny bufor jak tty
+
+    def __init__(self):
+        self.closed = False
+        self.flushed = False
+        self.timeout = None
+        self.streaming = True
+        self._t0 = time.monotonic()
+        self._produced = 0           # ile bajtów urządzenie już nadało
+        self._taken = 0              # ile host odebrał
+        self.dropped = 0             # ile przepadło z przepełnienia
+
+    def _advance(self):
+        if not self.streaming:
+            return
+        want = int((time.monotonic() - self._t0) * self.RATE_BPS)
+        want -= want % 4
+        self._produced = max(self._produced, want)
+        pending = self._produced - self._taken
+        if pending > self.CAP:                 # przepełnienie – strata
+            lost = pending - self.CAP
+            self.dropped += lost
+            self._taken += lost
+
+    @property
+    def in_waiting(self):
+        self._advance()
+        return self._produced - self._taken
+
+    def read(self, n):
+        self._advance()
+        n = min(n, self._produced - self._taken)
+        if n <= 0:
+            time.sleep(0.001)                  # udaje blokadę do timeoutu
+            return b""
+        self._taken += n
+        return b"\x00" * n
+
+    def reset_input_buffer(self):
+        self.flushed = True
+        self._advance()
+        self._taken = self._produced
+
+    def close(self):
+        self.closed = True
+
+
+class _FreeRunningPPK2(FakePPK2):
+    def __init__(self):
+        super().__init__()
+        self.ser = _FreeRunningSerial()
+
+    def get_data(self):
+        # Jak PPK2_API.get_data – zabiera to, co akurat leży w porcie.
+        return self.ser.read(self.ser.in_waiting)
+
+    def get_samples(self, buf):
+        # Dekodowanie kosztuje czas – tak jak pętla Pythona w ppk2-api.
+        n = len(buf) // 4
+        time.sleep(n / 800_000)                # ~817 kS/s, jak zmierzone
+        return [1.0] * n, []
+
+    def stop_measuring(self):
+        super().stop_measuring()
+        self.ser.streaming = False
+
+
+class DrainThreadTest(unittest.TestCase):
+    """REGRESJA: port drenowała ta sama pętla, która dekoduje i zapisuje –
+    przez większość czasu nie czytał go NIKT i PPK2 gubiło dziesiątki
+    procent okna (zaobserwowane 35%)."""
+
+    def _sampler(self):
+        s = ppk2.Ppk2ApiSampler()
+        s._ppk2 = _FreeRunningPPK2()
+        self.addCleanup(s.stop)
+        return s
+
+    def test_watek_drenujacy_nadaza_mimo_wolnego_konsumenta(self):
+        s = self._sampler()
+        s.start()
+        got = 0
+        # Konsument celowo ospały (100 ms na cykl) – dokładnie ten wzorzec,
+        # który wcześniej gubił dane.
+        for _ in range(10):
+            time.sleep(0.1)
+            got += len(s.read())
+        s.stop()
+        got += len(s.read())               # ogon z bufora
+        dropped = s._ppk2.ser.dropped
+        self.assertEqual(dropped, 0, f"port przepełniony o {dropped} B")
+        # ~1 s strumienia przy 100 kS/s; luz na rozjazd zegara.
+        self.assertGreater(got, 70_000, f"odebrano tylko {got} probek")
+
+    def test_bez_drenowania_dane_gina(self):
+        # Kontrola dowodząca, że atrapa portu w ogóle potrafi gubić: ten sam
+        # wzorzec BEZ wątku (odczyt dopiero w chwili konsumpcji).
+        ser = _FreeRunningSerial()
+        taken = 0
+        for _ in range(10):
+            time.sleep(0.1)
+            taken += len(ser.read(ser.in_waiting))
+        self.assertGreater(ser.dropped, 0)
+        self.assertLess(taken, 100_000)      # ledwie ułamek strumienia
+
+    def test_stop_domyka_watek(self):
+        s = self._sampler()
+        s.start()
+        time.sleep(0.05)
+        reader = s._reader
+        s.stop()
+        self.assertIsNone(s._reader)
+        self.assertFalse(reader.is_alive())
+
+    def test_przepelnienie_bufora_to_blad_a_nie_cisza(self):
+        # Gdy konsument stanie na tyle długo, że bufor RAM się zapcha,
+        # read() ma KRZYCZEĆ – inaczej mielilibyśmy dane sprzed pół minuty.
+        s = self._sampler()
+        s.start()
+        s._overflow = True
+        with self.assertRaises(ppk2.Ppk2Error) as ctx:
+            s.read()
+        self.assertIn("przepełniony", str(ctx.exception))
 
 
 class _StreamingPPK2:

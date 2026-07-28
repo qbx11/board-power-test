@@ -456,11 +456,20 @@ class EngineTest(unittest.TestCase):
             event_cb=watcher, cancel=threading.Event()).run()
         return results, marks["end"] - marks["start"]
 
+    def _allow_lossy(self, fraction=0.95):
+        """Podnieś próg strat na czas testu – tu badamy CZAS trwania okna,
+        nie politykę odrzucania (ta ma własne testy)."""
+        from autorun import engine as eng
+        orig = eng.MAX_LOST_FRACTION
+        eng.MAX_LOST_FRACTION = fraction
+        self.addCleanup(setattr, eng, "MAX_LOST_FRACTION", orig)
+
     def test_pomiar_konczy_sie_z_zegarem_mimo_zgubionych_probek(self):
         # REGRESJA: pętla kończyła się dopiero po zebraniu duration_s * rate
         # PRÓBEK, więc gdy PPK2 gubiło dane, pomiar ciągnął się dalej mimo
         # wyzerowanego odliczania (obserwacja: +10 s). Okno ma zamykać
         # zegar; braki to dziury w danych, nie powód do przedłużania.
+        self._allow_lossy()
         plan = _plan(duration_s=2, sample_rate=100,
                      trigger=planmod.Trigger(type="delay", seconds=0))
         results, measured_s = self._measure_seconds(
@@ -490,6 +499,7 @@ class EngineTest(unittest.TestCase):
         # pozostały czas z `elapsed_s`, a ten idzie PRÓBKAMI, więc przy
         # zgubionych próbkach zostaje w tyle za zegarem. Zdarzenie `live`
         # musi nieść czas zegarowy pomiaru.
+        self._allow_lossy()
         self.sampler = _LossySampler(sample_rate=200, keep=0.5)
         # Okno musi być dłuższe niż kilka sekund siatki statusów – od kiedy
         # kończy je zegar, krótki pomiar nie zdąży ich wyemitować tylu.
@@ -506,6 +516,40 @@ class EngineTest(unittest.TestCase):
         stamps = [ev.data["wall_elapsed_s"] for ev in live]
         for prev, nxt in zip(stamps, stamps[1:]):
             self.assertAlmostEqual(nxt - prev, 1.0, delta=0.35)
+
+    def test_duze_straty_powtarzaja_pomiar_a_potem_odrzucaja(self):
+        # Obserwacja z pola: PPK2 zgubiło 35% okna. Taki wynik jest
+        # bezwartościowy (średnia nie opisuje przebiegu) i NIE MA prawa
+        # trafić do dziennika jako zdrowy. Polityka: powtórz raz, druga
+        # porażka = błąd kroku.
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        self.sampler = _LossySampler(sample_rate=200, keep=0.5)
+        results = self._run(plan)
+        # Krok kończy się błędem (dalej decyduje polityka planu).
+        self.assertEqual(results[0].status, "error")
+        self.assertIn("zgubiło", results[0].error)
+        # Pomiar poszedł DWA razy (pierwotny + powtórka).
+        measure = [ev for ev in self.events
+                   if ev.kind == "state" and ev.text == "measure"]
+        self.assertEqual(len(measure), 2, "brak automatycznego powtórzenia")
+        # …i nic nie wylądowało w dzienniku jako zdrowy pomiar (dziennik
+        # nawet nie powstał – nie było czego zapisać).
+        if core.CSV_PATH.is_file():
+            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+                self.assertEqual(list(csv.DictReader(f)), [])
+
+    def test_drobne_straty_nie_powtarzaja_pomiaru(self):
+        # Kontrola: braki poniżej progu przechodzą bez powtarzania – inaczej
+        # każdy pomiar kręciłby się dwa razy.
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        self.sampler = FakeSampler(sample_rate=200)
+        results = self._run(plan)
+        self.assertEqual(results[0].status, "done")
+        measure = [ev for ev in self.events
+                   if ev.kind == "state" and ev.text == "measure"]
+        self.assertEqual(len(measure), 1)
 
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.

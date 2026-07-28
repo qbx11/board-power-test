@@ -38,6 +38,10 @@ from .session import SessionWriter, _atomic_json, new_session_dir
 # (po 3 nieudanych restartach pomiaru stosowana jest polityka kroku).
 STALL_TIMEOUT_S = 10.0
 READ_INTERVAL_S = 0.01     # ~10 ms między odczytami portu PPK2
+# Ile okna pomiaru wolno zgubić, zanim wynik uznamy za bezwartościowy.
+# Przy takich brakach średnia nie opisuje już przebiegu prądu.
+MAX_LOST_FRACTION = 0.05
+MEASURE_ATTEMPTS = 2       # pierwotny pomiar + jedno powtórzenie
 
 
 class AutoRunError(RuntimeError):
@@ -637,6 +641,46 @@ class AutoRunner:
             if rtt_reader is not None:
                 rtt_reader.detach()
 
+    @staticmethod
+    def _lost_fraction(writer):
+        """Jaka część okna pomiaru przepadła (0..1). Braki są w `gaps`;
+        mianownik to całe okno, czyli to, co przyszło + to, co zginęło."""
+        lost = sum(g[1] for g in writer.gaps)
+        total = lost + writer.samples_written
+        return (lost / total) if total else 0.0
+
+    def _measure_with_retry(self, idx, step, session_dir, writer, rtt_reader,
+                            new_writer, run_log):
+        """Pomiar z kontrolą strat. Gdy PPK2 zgubi więcej niż
+        MAX_LOST_FRACTION okna, wynik jest bezwartościowy – powtarzamy
+        pomiar raz, do świeżej sesji (stara zostaje na dysku jako
+        'discarded', żeby dało się dojść, co się stało). Druga porażka to
+        błąd kroku: śmieciowy pomiar NIE ma prawa trafić do dziennika jako
+        zdrowy. Zwraca (katalog_sesji, writer) użytego pomiaru."""
+        for attempt in range(1, MEASURE_ATTEMPTS + 1):
+            self._measure(idx, step, writer, rtt_reader)
+            lost = self._lost_fraction(writer)
+            if lost <= MAX_LOST_FRACTION:
+                return session_dir, writer
+            msg = (f"pomiar {idx} ({step.scenario}): PPK2 zgubiło "
+                   f"{lost:.0%} okna (limit {MAX_LOST_FRACTION:.0%})")
+            if attempt >= MEASURE_ATTEMPTS:
+                writer.finalize("lossy")
+                raise AutoRunError(
+                    f"{msg} – również przy powtórzeniu. Wynik odrzucony: "
+                    "przy takich brakach średnia nie opisuje przebiegu. "
+                    "Odciąż komputer (zamknij nRF Connect, przeglądarkę), "
+                    "użyj innego portu USB albo obniż 'Próbki na sekundę'")
+            self._note(f"{msg} – powtarzam pomiar", idx, step.scenario,
+                       files=(run_log,))
+            writer.finalize("discarded")
+            session_dir = new_session_dir(self.run_dir, step.scenario)
+            writer = new_writer(session_dir)
+            # UI zaczyna kartę pomiaru od nowa (odliczanie, podgląd sesji).
+            self._emit("state", idx, step.scenario, "measure")
+            self._emit("session", idx, step.scenario,
+                       data={"dir": str(session_dir), "live": True})
+
     def _rtt_label_loop(self, reader, matcher, writer, stop, idx, step):
         """Wątek auto-etykiet (rtt='continuous'): każda linia RTT do
         rtt.log, linie pasujące do reguł -> adnotacje sesji. Czas
@@ -738,19 +782,24 @@ class AutoRunner:
             eff_rate = hw_rate // decim
             window_ms = max(step.storage.window_ms,
                             math.ceil(1000 / eff_rate))
-            writer = SessionWriter(
-                session_dir,
-                meta=self._session_meta(idx, step, scen, voltage,
-                                        build_dir),
-                sample_rate=eff_rate,
-                storage_mode=step.storage.mode,
-                window_ms=window_ms)
+            def _new_writer(directory):
+                return SessionWriter(
+                    directory,
+                    meta=self._session_meta(idx, step, scen, voltage,
+                                            build_dir),
+                    sample_rate=eff_rate,
+                    storage_mode=step.storage.mode,
+                    window_ms=window_ms)
+
+            writer = _new_writer(session_dir)
             if self.dry_run:
                 summary = writer.finalize("done")
                 return StepResult(idx, step.scenario, "done",
                                   session_dir, summary)
             try:
-                self._measure(idx, step, writer, rtt_reader)
+                session_dir, writer = self._measure_with_retry(
+                    idx, step, session_dir, writer, rtt_reader,
+                    _new_writer, run_log)
             except _Cancelled:
                 summary = writer.finalize("cancelled")
                 self._append_csv(step, scen, voltage, summary,
