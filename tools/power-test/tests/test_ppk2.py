@@ -22,6 +22,7 @@ class FakePPK2:
         self.ser = _FakeSerial()
         self.remainder = {"sequence": b"", "len": 0}
         self.started = False
+        self.stops = 0
 
     def set_source_voltage(self, mV):
         self.voltages.append(mV)
@@ -33,19 +34,33 @@ class FakePPK2:
         self.started = True
 
     def stop_measuring(self):
-        pass
+        self.started = False
+        self.stops += 1
+        self.ser.streaming = False    # AVERAGE_STOP ucisza urządzenie
 
 
 class _FakeSerial:
-    def __init__(self):
+    """Port PPK2. `streaming` = urządzenie wciąż sypie próbkami, więc
+    reset_input_buffer() nie opróżnia go na trwałe."""
+
+    def __init__(self, streaming=False):
         self.closed = False
         self.flushed = False
+        self.streaming = streaming
+
+    @property
+    def in_waiting(self):
+        return 4096 if self.streaming else 0
 
     def reset_input_buffer(self):
         self.flushed = True
 
     def close(self):
         self.closed = True
+
+
+def _boom(*_a, **_k):
+    raise RuntimeError("port padł")
 
 
 class VoltageGuardTest(unittest.TestCase):
@@ -106,6 +121,38 @@ class VoltageGuardTest(unittest.TestCase):
         self.assertTrue(fake.ser.closed)       # port zwolniony
         self.assertIsNone(s._ppk2)
 
+    def test_close_ucisza_urzadzenie_przed_zamknieciem_portu(self):
+        # REGRESJA (#23): pomiar przerwany Esc zostawiał PPK2 w środku
+        # strumienia próbek – kolejny pomiar nie ruszał bez fizycznego
+        # restartu urządzenia. close() musi zatrzymać nadawanie i opróżnić
+        # bufor, ZANIM zamknie port.
+        #
+        # Stan jak po Esc: pętla pomiaru zdążyła już zawołać stop(), więc
+        # `_measuring` jest False i samo close() nic do urządzenia nie
+        # wysyłało – a ono wciąż nadawało zaległe próbki.
+        s = ppk2.Ppk2ApiSampler()
+        fake = FakePPK2()
+        fake.ser.streaming = True
+        s._ppk2 = fake
+        s._measuring = False
+        s.close()
+        self.assertGreaterEqual(fake.stops, 1)
+        self.assertFalse(fake.ser.streaming)   # urządzenie ucichło
+        self.assertTrue(fake.ser.flushed)      # bufor opróżniony
+        self.assertTrue(fake.ser.closed)
+
+    def test_close_odcina_zasilanie_mimo_bledu_stopu(self):
+        # Gdy stop() poleci wyjątkiem, zasilanie płytki I TAK musi zniknąć
+        # (wcześniej oba kroki dzieliły jeden try i dut_power się gubiło).
+        s = ppk2.Ppk2ApiSampler()
+        fake = FakePPK2()
+        fake.stop_measuring = _boom
+        s._ppk2 = fake
+        s._measuring = True
+        s.close()
+        self.assertIn("OFF", fake.dut)
+        self.assertTrue(fake.ser.closed)
+
     def test_dut_power_tracks_state(self):
         s = ppk2.Ppk2ApiSampler()
         s._ppk2 = FakePPK2()
@@ -134,6 +181,22 @@ class _CalPPK2:
         return True if self.calls > self.succeed_after else None
 
 
+class _StreamingPPK2:
+    """PPK2 zostawione w trakcie pomiaru: dopóki nadaje próbki,
+    get_modifiers() nie znajduje metadanych."""
+
+    def __init__(self):
+        self.ser = _FakeSerial(streaming=True)
+        self.stops = 0
+
+    def stop_measuring(self):
+        self.stops += 1
+        self.ser.streaming = False
+
+    def get_modifiers(self):
+        return not self.ser.streaming
+
+
 class LoadCalibrationTest(unittest.TestCase):
     def setUp(self):
         # bez realnego czekania między próbami
@@ -153,6 +216,16 @@ class LoadCalibrationTest(unittest.TestCase):
         with self.assertRaises(ppk2.Ppk2Error) as ctx:
             s._load_calibration()
         self.assertIn("kalibrac", str(ctx.exception))
+
+    def test_ucisza_urzadzenie_zostawione_w_pomiarze(self):
+        # REGRESJA (#23): PPK2 porzucone w trakcie nadawania (poprzedni
+        # przebieg przerwany Esc) topiło metadane w strumieniu próbek –
+        # sam flush bufora nic nie dawał, trzeba było przepiąć USB.
+        # Odczyt kalibracji musi najpierw wysłać AVERAGE_STOP.
+        s = ppk2.Ppk2ApiSampler()
+        s._ppk2 = _StreamingPPK2()
+        s._load_calibration()                 # nie rzuca
+        self.assertGreaterEqual(s._ppk2.stops, 1)
 
 
 class _FakePort:

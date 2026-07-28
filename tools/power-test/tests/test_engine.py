@@ -169,6 +169,58 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta["state"], "cancelled")
         self.assertGreater(meta["summary"]["samples"], 0)
 
+    def _closed_before_plan_done(self):
+        """Indeks zdarzenia 'plan_done' i liczba zdarzeń w chwili zamknięcia
+        samplera (do porównania kolejności)."""
+        done_at = next(i for i, ev in enumerate(self.events)
+                       if ev.kind == "plan_done")
+        return self._closed_at, done_at
+
+    def _watch_close(self):
+        """Zapamiętaj, ile zdarzeń poleciało, zanim sampler się zamknął."""
+        self._closed_at = None
+        orig = self.sampler.close
+
+        def close():
+            orig()
+            if self._closed_at is None:
+                self._closed_at = len(self.events)
+
+        self.sampler.close = close
+
+    def test_ppk2_zwolnione_przed_ogloszeniem_konca(self):
+        # REGRESJA (#23): 'plan_done' odsłania w UI wyjście z ekranu, a więc
+        # i start kolejnego przebiegu. Gdy PPK2 zamykało się dopiero PO tym
+        # zdarzeniu, następny pomiar trafiał na wciąż otwarte urządzenie –
+        # i nie ruszał bez fizycznego restartu PPK2.
+        self._watch_close()
+        self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
+        closed_at, done_at = self._closed_before_plan_done()
+        self.assertIsNotNone(closed_at, "sampler nie został zamknięty")
+        self.assertLessEqual(closed_at, done_at)
+
+    def test_ppk2_zwolnione_przed_ogloszeniem_przerwania(self):
+        # Ta sama kolejność na ścieżce Esc – to ona zgłoszona w #23.
+        cancel = threading.Event()
+        self._watch_close()
+        plan = _plan(duration_s=30,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind == "state" and ev.text == "measure":
+                threading.Timer(0.3, cancel.set).start()
+
+        rtt = FakeRttReader()
+        AutoRunner(plan, self.manifest, "BTZ #1",
+                   sampler_factory=lambda p: self.sampler,
+                   rtt_factory=lambda prof: rtt,
+                   event_cb=watcher, cancel=cancel).run()
+        closed_at, done_at = self._closed_before_plan_done()
+        self.assertIsNotNone(closed_at, "sampler nie został zamknięty")
+        self.assertLessEqual(closed_at, done_at)
+        self.assertFalse(self.sampler.dut)      # zasilanie płytki odcięte
+
     def test_dangerous_voltage_aborts_before_hardware(self):
         # Napięcie poza twardym limitem: plan pada na walidacji, ZANIM
         # cokolwiek trafi na płytkę (sampler nie dostaje set_voltage).

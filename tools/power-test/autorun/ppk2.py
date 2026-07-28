@@ -91,6 +91,10 @@ class Ppk2ApiSampler:
         port = find_ppk2(self._port_hint)
         try:
             self._ppk2 = PPK2_API(port)
+            # PPK2 mogło zostać w trakcie nadawania próbek (poprzednia sesja
+            # przerwana Esc albo ubity proces) – ucisz je, zanim cokolwiek
+            # z niego przeczytamy.
+            self._quiesce()
             # Modyfikatory kalibracyjne z urządzenia – BEZ nich dekodowanie
             # liczy prąd z domyślnych, błędnych stałych (odczyt zawyżony
             # o rzędy wielkości, np. mA zamiast µA).
@@ -110,18 +114,49 @@ class Ppk2ApiSampler:
             raise Ppk2Error(f"nie mogę otworzyć PPK2 na '{port}': {e}")
         self.port = port
 
+    def _drain(self):
+        """Wyrzuć wszystko, co urządzenie zdążyło nadać. Po AVERAGE_STOP
+        PPK2 nadaje jeszcze przez chwilę – zaległe próbki wymieszałyby się
+        z odpowiedzią na następną komendę."""
+        ser = getattr(self._ppk2, "ser", None)
+        if ser is None:
+            return
+        for _ in range(5):
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                return
+            time.sleep(0.05)
+            if not getattr(ser, "in_waiting", 0):
+                return
+
+    def _quiesce(self):
+        """Ucisz urządzenie: zatrzymaj nadawanie i opróżnij bufor. Wołane
+        przy otwarciu ORAZ przy zamknięciu – bez tego PPK2 zostawione
+        w środku strumienia (sesja przerwana Esc) nie umiało oddać
+        metadanych przy następnym otwarciu i jedynym ratunkiem było
+        fizyczne przepięcie kabla USB."""
+        try:
+            self._ppk2.stop_measuring()
+        except Exception:
+            pass
+        self._measuring = False
+        self._drain()
+
     def _load_calibration(self):
         """Niezawodne wczytanie modyfikatorów kalibracji. Odczyt metadanych
         w ppk2-api bywa wyścigowy (szuka 'END' w 5 próbach), a przy porażce
         get_modifiers() zwraca None i BIBLIOTEKA CICHO zostaje przy domyślnych,
-        błędnych stałych. Czyścimy bufor, ponawiamy, a trwały brak kalibracji
-        traktujemy jak twardy błąd (lepiej nie mierzyć niż mierzyć źle)."""
-        ser = getattr(self._ppk2, "ser", None)
+        błędnych stałych. Uciszamy urządzenie, ponawiamy, a trwały brak
+        kalibracji traktujemy jak twardy błąd (lepiej nie mierzyć niż mierzyć
+        źle)."""
         last = None
         for _ in range(15):
             try:
-                if ser is not None:
-                    ser.reset_input_buffer()
+                # Ponowne uciszenie, a nie samo czyszczenie bufora: jeśli
+                # urządzenie wciąż nadaje próbki, sam flush nic nie da –
+                # metadane znowu utoną w strumieniu.
+                self._quiesce()
                 if self._ppk2.get_modifiers():      # True dopiero po sparsie
                     return
             except Exception as e:                  # port jeszcze niegotowy
@@ -178,11 +213,24 @@ class Ppk2ApiSampler:
     def close(self):
         if self._ppk2 is None:
             return
+        # Każdy krok w osobnym try: gdy padnie stop(), zasilanie płytki i tak
+        # MUSI zostać odcięte.
         try:
             self.stop()
-            self.dut_power(False)      # ODETNIJ zasilanie płytki
         except Exception:
             pass               # sprzątanie po błędzie – nie maskuj oryginału
+        try:
+            self.dut_power(False)      # ODETNIJ zasilanie płytki
+        except Exception:
+            pass
+        # Zostaw urządzenie ciche i z pustym buforem. Zamknięcie portu
+        # w środku strumienia próbek (przerwanie pomiaru Esc) zostawiało
+        # PPK2 w stanie, w którym następny pomiar nie ruszał bez fizycznego
+        # restartu urządzenia.
+        try:
+            self._quiesce()
+        except Exception:
+            pass
         # Jawnie zwolnij port szeregowy: ppk2-api nie ma metody close/
         # disconnect (port zamyka dopiero __del__/GC), a bez tego kolejne
         # otwarcie PPK2 potrafi trafić na zajęty port.
@@ -193,3 +241,4 @@ class Ppk2ApiSampler:
         except Exception:
             pass
         self._ppk2 = None
+        self._dut_on = False

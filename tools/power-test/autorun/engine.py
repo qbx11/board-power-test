@@ -900,22 +900,40 @@ class AutoRunner:
                     raise AutoRunError(
                         f"krok {idx} ({step.scenario}): {result.error}; "
                         "plan ma on_step_error = 'abort'")
+            # PPK2 zwalniamy PRZED ogłoszeniem końca planu: 'plan_done'
+            # odblokowuje w UI wyjście z ekranu, a więc i start kolejnego
+            # przebiegu. Gdy zamykanie zostawało na później, nowy przebieg
+            # trafiał na wciąż otwarte (i wciąż nadające) PPK2 – stąd
+            # „po Esc trzeba zrestartować PPK2”.
+            self._close_sampler()
             self._emit("plan_done", data={
                 "results": [(r.index, r.scenario, r.status)
                             for r in results]})
             return results
         except _Cancelled:
             self._note("przerwano plan (Esc)")
+            self._close_sampler()
             self._emit("plan_done", data={"cancelled": True})
             return results
         finally:
-            if self._sampler is not None:
-                self._ensure_dut_power(False)
-                self._sampler.close()
-                self._sampler = None
+            self._close_sampler()          # awaryjnie, gdy poleciał wyjątek
             if self._plan_log is not None:
                 self._plan_log.close()
                 self._plan_log = None
+
+    def _close_sampler(self):
+        """Odetnij zasilanie płytki i zwolnij PPK2. Idempotentne – wołane
+        na każdej ścieżce wyjścia z run()."""
+        if self._sampler is None:
+            return
+        sampler, self._sampler = self._sampler, None
+        try:
+            if self._dut_on:
+                sampler.dut_power(False)
+                self._dut_on = False
+        except Exception:
+            pass                     # close() i tak odcina zasilanie
+        sampler.close()
 
 
 class _Cancelled(Exception):
