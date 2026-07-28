@@ -1,6 +1,6 @@
 # board-power-test
 
-Narzędzie do pomiaru poboru prądu za pomocą PPK2.
+Narzędzie mierzy pobór prądu płytki za pomocą PPK2.
 
 ## Instalacja
 
@@ -13,70 +13,70 @@ board-power-test            # start
 
 **Wymagania:**
 - Python ≥ 3.11 - `sudo apt install python3.11 python3.11-venv` (Ubuntu/Debian)
-- nRF Util (`nrfutil`) - pobierz instalator ze strony Nordic Semiconductor, potem doinstaluj toolchain-manager i sam SDK:
+- `nrfutil` - pobierz instalator ze strony Nordic Semiconductor, potem doinstaluj toolchain i SDK:
   ```sh
   nrfutil install toolchain-manager
-  nrfutil toolchain-manager install --ncs-version v3.4.0   # SDK NCS v3.4.0, inna lokalizacja: export NCS_WORKSPACE=/ścieżka
+  nrfutil toolchain-manager install --ncs-version v3.4.0   # inna lokalizacja: export NCS_WORKSPACE=/ścieżka
   ```
-- `west` w PATH do budowania i wgrywania firmware'u - dociąga się razem z toolchainem NCS powyżej (albo ręcznie: `pip install west`)
-- J-Link (flash) - instalator „J-Link Software and Documentation Pack" ze strony SEGGER
-- PPK2 + nRF Connect Power Profiler (pomiar ręczny) - aplikacja „Power Profiler" w nRF Connect for Desktop (strona Nordic Semiconductor)
-- płytka `BTZ_EndDevice`: dołączona w repo (`boards/goodbyte/BTZ_EndDevice/`) - build działa od razu po `git clone`.
+- `west` w PATH - dociąga się z toolchainem NCS; ręcznie: `pip install west`
+- J-Link - instalator „J-Link Software and Documentation Pack” ze strony SEGGER
+- PPK2 i „Power Profiler” w nRF Connect for Desktop - do pomiaru ręcznego
+- płytka `BTZ_EndDevice` - leży w repo (`boards/goodbyte/BTZ_EndDevice/`), build działa po `git clone`
 
 ## Dwa tryby pomiaru
 
+**Pomiar ręczny** sprawdza baseline nowej płytki.
+Zaznacz scenariusze na liście.
+Narzędzie buduje i wgrywa każdy z nich po kolei.
+Zmierz prąd w Nordic Power Profiler i wpisz odczyt.
+Wynik trafia do wspólnego dziennika.
 
-**Pomiar ręczny** - weryfikacja baseline'u nowej płytki: czy działa
-poprawnie i nie pobiera za dużo prądu. Zaznaczasz scenariusze z listy,
-narzędzie po kolei buduje i wgrywa każdy z nich, a Ty prowadzony jesteś
-przez pomiar w Nordic Power Profiler i wpisujesz odczytaną wartość. Wynik
-trafia do wspólnego dziennika.
+**Tryb autonomiczny** mierzy prąd bez Twojego udziału.
+Narzędzie zasila płytkę z PPK2, mierzy przez zadany czas i zapisuje wynik.
+Ułóż sekwencję pomiarów na kartach „Pomiar 1, 2, …”.
+Każda karta ma własny czas, napięcie, warunek startu i podgląd logów.
 
-**Tryb autonomiczny** - narzędzie samo zasila płytkę z PPK2, mierzy prąd
-przez zadany czas i zapisuje wynik. Kreator kart „Pomiar 1, 2, …” pozwala ułożyć całą sekwencję
-pomiarów, każdy z własnym czasem, napięciem, warunkiem startu i opcjonalnym
-podglądem logów z portu szeregowego.
-
-Aplikacja startuje w trybie autonomicznym; na ręczny przełącza się
-kliknięciem w napis **„Pomiar ręczny”** u góry ekranu.
+Aplikacja startuje w trybie autonomicznym.
+Kliknij napis **„Pomiar ręczny”** u góry ekranu, aby zmienić tryb.
 
 ## Scenariusze i płytki
 
-Każdy pomiar to **scenariusz** (firmware repo + flagi, cudza aplikacja albo
-gotowy `.hex`). Przycisk **„Dodaj kod”** dodaje nowy scenariusz - wskazujesz
-katalog aplikacji albo plik `.hex`, reszta (build, wpis na liście) dzieje się
-sama.
+Scenariusz to jeden obraz firmware plus notatki do pomiaru.
+Rodzaje: firmware z repo z flagami, cudza aplikacja albo gotowy `.hex`.
+Naciśnij **„Dodaj kod”**, aby dodać scenariusz (patrz krok 3 niżej).
 
-W trybie ręcznym scenariusze są wprost na ekranie (checklista z opisem
-i ✕ do usunięcia); w trybie autonomicznym tę samą listę pokazuje przycisk
-**„Scenariusze”**. Nie da się usunąć wpisu, który jest akurat wybrany
-w karcie „Pomiar N” albo zaznaczony na liście trybu ręcznego - ani
-ostatniego wpisu w manifeście.
+Tryb ręczny pokazuje scenariusze wprost na ekranie.
+Tryb autonomiczny pokazuje tę samą listę pod przyciskiem **„Scenariusze”**.
+Usuń wpis przyciskiem ✕ przy jego nazwie.
 
-Płytkę wybiera się z listy profili nad scenariuszami; nowy profil (target
-budowania, ewentualny overlay sprzętowy) dodaje się wpisem w
-`scenarios.toml`.
+Narzędzie blokuje usunięcie w trzech przypadkach.
+Wpis jest wybrany w karcie „Pomiar N”.
+Wpis jest zaznaczony na liście trybu ręcznego.
+Wpis jest ostatni w manifeście.
+
+Wybierz płytkę z listy profili nad scenariuszami.
+Dodaj nowy profil (target budowania, overlay sprzętowy) wpisem w `scenarios.toml`.
 
 ## Sonda J-Link tylko dla nas
 
-Sonda J-Link ma **jednego właściciela**. Jeśli trzyma ją inny program -
-najczęściej **nRF Connect for Desktop**, którego demony
-`nrfutil device list --hotplug` żyją w tle tak długo, jak otwarta jest
-aplikacja - pomiar wychodzi **zawyżony**: przy cudzej sesji J-Linka runner
-nie wygasza debug interface'u po wgraniu, więc układ nie schodzi do podłogi
-snu (setki µA zamiast ~0,5 µA), a sonda EDU/EDU Mini dorzuca do tego dialog
-licencyjny przy każdym flashu.
+Sonda J-Link ma **jednego właściciela**.
+Cudza sesja J-Linka zawyża pomiar.
+Runner nie wygasza wtedy debug interface'u po wgraniu.
+Układ nie schodzi do podłogi snu: setki µA zamiast ~0,5 µA.
+Sonda EDU i EDU Mini dorzuca do tego dialog licencyjny przy każdym flashu.
 
-Narzędzie sprawdza to samo przed wgrywaniem (szuka biblioteki
-`libjlinkarm` w obcych procesach) i pokazuje dialog: *Sprawdziłem - ponów* /
-*Mierz mimo to* / *Przerwij*. Tryb autonomiczny nie blokuje przebiegu
-(może startować bez nikogo przy klawiaturze), ale wpisuje ostrzeżenie do
-`plan.log` i pokazuje je w interfejsie. **Zamykaj całe nRF Connect for
-Desktop**, nie tylko kartę aplikacji.
+Winowajcą jest zwykle **nRF Connect for Desktop**.
+Jego demony `nrfutil device list --hotplug` żyją tak długo, jak otwarta jest aplikacja.
+**Zamykaj całe nRF Connect for Desktop**, nie tylko kartę aplikacji.
+
+Narzędzie szuka biblioteki `libjlinkarm` w obcych procesach przed wgraniem.
+Narzędzie pokazuje wtedy dialog: *Sprawdziłem - ponów* / *Mierz mimo to* / *Przerwij*.
+Tryb autonomiczny nie blokuje przebiegu, bo może startować bez operatora.
+Tryb autonomiczny wpisuje ostrzeżenie do `plan.log` i pokazuje je w interfejsie.
 
 ## Serie pomiarów (sweep parametru)
 
-Seria to jedna karta „Pomiar N", która rozwija się na wiele pomiarów.
+Seria to jedna karta „Pomiar N”, która rozwija się na wiele pomiarów.
 Narzędzie buduje osobny obraz dla każdej wartości parametru.
 Każdy pomiar dostaje osobny wiersz w dzienniku.
 
@@ -136,16 +136,16 @@ static void sensor_read_work_handler(struct k_work *work)
 
 ### 3. Dodaj scenariusz z aplikacją
 
-Naciśnij „Dodaj kod" na ekranie głównym.
-Wpisz ścieżkę do katalogu aplikacji w pole „Ścieżka".
+Naciśnij „Dodaj kod” na ekranie głównym.
+Wpisz ścieżkę do katalogu aplikacji w pole „Ścieżka”.
 Ścieżka względna liczy się od katalogu repo.
 
-Naciśnij „Przeglądaj…", aby wskazać katalog w eksploratorze.
+Naciśnij „Przeglądaj…”, aby wskazać katalog w eksploratorze.
 Eksplorator startuje z katalogu nad repo.
 
 Wpisz nazwę i opis.
 Oba pola są opcjonalne.
-Naciśnij „Dodaj".
+Naciśnij „Dodaj”.
 
 Narzędzie rozpoznaje rodzaj firmware po ścieżce.
 Katalog aplikacji dostaje wariant `source` i build west-em.
@@ -161,14 +161,14 @@ Przenieś wpis do `scenarios.local.toml`, gdy nie chcesz go na remote.
 ### 4. Włącz serię na karcie pomiaru
 
 Uruchom tryb autonomiczny.
-Wybierz swój scenariusz na karcie „Pomiar N".
+Wybierz swój scenariusz na karcie „Pomiar N”.
 Podaj czas jednego pomiaru, na przykład `20m`.
-Rozwiń „Ustawienia zaawansowane".
-Włącz „Seria: sweep parametru (jedna karta = wiele pomiarów)".
+Rozwiń „Ustawienia zaawansowane”.
+Włącz „Seria: sweep parametru (jedna karta = wiele pomiarów)”.
 
 ### 5. Podaj parametr i wartości
 
-Wpisz symbol Kconfig w pole „Parametr".
+Wpisz symbol Kconfig w pole „Parametr”.
 Narzędzie przyjmuje trzy zapisy tej samej nazwy:
 
 ```text
@@ -177,7 +177,7 @@ LPN_SENSOR_INTERVAL_S
 -DCONFIG_LPN_SENSOR_INTERVAL_S
 ```
 
-Wpisz wartości w pole „Wartości".
+Wpisz wartości w pole „Wartości”.
 Rozdziel wartości przecinkiem albo spacją.
 
 ```text
@@ -191,7 +191,7 @@ Zwinięta karta pokazuje dopisek `· sweep CONFIG_LPN_SENSOR_INTERVAL_S ×3`.
 
 ### 6. Sprawdź plan przed startem
 
-Karta „Pomiar N" rozwija się na kroki „Pomiar N.1, N.2, …".
+Karta „Pomiar N” rozwija się na kroki „Pomiar N.1, N.2, …”.
 Każdy krok dostaje jedną flagę builda:
 
 ```sh
@@ -219,6 +219,6 @@ Obrazy nie nadpisują się.
 
 ## Wyniki
 
-Każdy pomiar trafia do wspólnego dziennika `reports/pomiary.csv` - przycisk
-**„Wyniki”** pokazuje go w interfejsie. Pomiary z trybu autonomicznego
-zapisują dodatkowo pełną sesję (dane, etykiety) w `reports/sessions/`.
+Każdy pomiar trafia do wspólnego dziennika `reports/pomiary.csv`.
+Przycisk **„Wyniki”** pokazuje dziennik w interfejsie.
+Tryb autonomiczny zapisuje dodatkowo pełną sesję z danymi i etykietami w `reports/sessions/`.
