@@ -10,12 +10,48 @@ import threading
 import time
 import unittest
 
+import numpy as np
+
 from common import FakeEnv
 from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
 import power_test as core
 from autorun import plan as planmod
 from autorun.engine import AutoRunner
+
+
+class _LossySampler(FakeSampler):
+    """PPK2, który gubi próbki (USB nie nadąża) – oddaje tylko `keep`
+    część tego, co powinno przyjść. Oś liczona próbkami zostaje wtedy
+    w tyle za zegarem."""
+
+    def __init__(self, keep=0.5, **kw):
+        super().__init__(**kw)
+        self.keep = keep
+
+    def read(self):
+        chunk = super().read()
+        return chunk[:int(len(chunk) * self.keep)]
+
+
+class _StepSampler(FakeSampler):
+    """Prąd skacze z `low` na `high` po `switch_s` od startu pomiaru.
+    Średnia z całej sekundy wypada wtedy POŚRODKU obu poziomów, a średnia
+    z krótkiego okna trafia w poziom bieżący – to rozróżnia oba okna."""
+
+    def __init__(self, switch_s=0.5, low=10.0, high=1000.0, **kw):
+        super().__init__(**kw)
+        self.switch_s = switch_s
+        self.low = low
+        self.high = high
+
+    def read(self):
+        chunk = super().read()
+        if not len(chunk):
+            return chunk
+        level = (self.high if time.monotonic() - self._t0 >= self.switch_s
+                 else self.low)
+        return np.full(len(chunk), level, np.float32)
 
 
 def _plan(**step):
@@ -32,6 +68,15 @@ class EngineTest(unittest.TestCase):
         self.manifest = core.load_manifest()
         self.events = []
         self.sampler = FakeSampler(sample_rate=2000)
+        # Podłoga startu po flashu to sekundy realnego czekania – w
+        # testach niepowiązanych z nią zerujemy ją, żeby suite nie
+        # spowolnił. Klasy sprawdzające samą podłogę ustawiają ją same.
+        self._set_min_delay(0.0)
+
+    def _set_min_delay(self, seconds):
+        import autorun.engine as eng
+        old, eng.MIN_START_DELAY_S = eng.MIN_START_DELAY_S, seconds
+        self.addCleanup(setattr, eng, "MIN_START_DELAY_S", old)
 
     def tearDown(self):
         self.env.cleanup()
@@ -155,6 +200,58 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta["state"], "cancelled")
         self.assertGreater(meta["summary"]["samples"], 0)
 
+    def _closed_before_plan_done(self):
+        """Indeks zdarzenia 'plan_done' i liczba zdarzeń w chwili zamknięcia
+        samplera (do porównania kolejności)."""
+        done_at = next(i for i, ev in enumerate(self.events)
+                       if ev.kind == "plan_done")
+        return self._closed_at, done_at
+
+    def _watch_close(self):
+        """Zapamiętaj, ile zdarzeń poleciało, zanim sampler się zamknął."""
+        self._closed_at = None
+        orig = self.sampler.close
+
+        def close():
+            orig()
+            if self._closed_at is None:
+                self._closed_at = len(self.events)
+
+        self.sampler.close = close
+
+    def test_ppk2_zwolnione_przed_ogloszeniem_konca(self):
+        # REGRESJA (#23): 'plan_done' odsłania w UI wyjście z ekranu, a więc
+        # i start kolejnego przebiegu. Gdy PPK2 zamykało się dopiero PO tym
+        # zdarzeniu, następny pomiar trafiał na wciąż otwarte urządzenie –
+        # i nie ruszał bez fizycznego restartu PPK2.
+        self._watch_close()
+        self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
+        closed_at, done_at = self._closed_before_plan_done()
+        self.assertIsNotNone(closed_at, "sampler nie został zamknięty")
+        self.assertLessEqual(closed_at, done_at)
+
+    def test_ppk2_zwolnione_przed_ogloszeniem_przerwania(self):
+        # Ta sama kolejność na ścieżce Esc – to ona zgłoszona w #23.
+        cancel = threading.Event()
+        self._watch_close()
+        plan = _plan(duration_s=30,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind == "state" and ev.text == "measure":
+                threading.Timer(0.3, cancel.set).start()
+
+        rtt = FakeRttReader()
+        AutoRunner(plan, self.manifest, "BTZ #1",
+                   sampler_factory=lambda p: self.sampler,
+                   rtt_factory=lambda prof: rtt,
+                   event_cb=watcher, cancel=cancel).run()
+        closed_at, done_at = self._closed_before_plan_done()
+        self.assertIsNotNone(closed_at, "sampler nie został zamknięty")
+        self.assertLessEqual(closed_at, done_at)
+        self.assertFalse(self.sampler.dut)      # zasilanie płytki odcięte
+
     def test_dangerous_voltage_aborts_before_hardware(self):
         # Napięcie poza twardym limitem: plan pada na walidacji, ZANIM
         # cokolwiek trafi na płytkę (sampler nie dostaje set_voltage).
@@ -201,6 +298,54 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(live)
         self.assertIn("avg_uA", live[-1].data)
         self.assertIn("inst_uA", live[-1].data)
+
+    def test_teraz_pokazuje_krotkie_okno_a_nie_cala_sekunde(self):
+        # REGRESJA: „teraz” liczone z całej sekundy to średnia ze 100 000
+        # próbek – jej błąd standardowy jest tak mały, że na ekranie stała
+        # ta sama liczba do końca pomiaru. Prąd skacze tu w połowie okna:
+        # średnia sekundowa dałaby ~505 (pół na pół), krótkie okno musi
+        # pokazać poziom bieżący.
+        self.sampler = _StepSampler(sample_rate=2000, switch_s=0.5,
+                                    low=10.0, high=1000.0)
+        self._run(_plan(duration_s=1.5,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        live = [ev for ev in self.events if ev.kind == "live"]
+        self.assertTrue(live)
+        inst = live[-1].data["inst_uA"]
+        self.assertGreater(inst, 900,
+                           f"'teraz' = {inst} – wygląda na średnią z całej "
+                           f"sekundy, nie z ostatnich 100 ms")
+        # Kontrola: średnia SKUMULOWANA ma dalej mieszać oba poziomy,
+        # inaczej test przechodziłby też przy zepsutej średniej.
+        avg = live[-1].data["avg_uA"]
+        self.assertLess(avg, 800, f"średnia skumulowana = {avg}")
+
+    def test_status_json_zostaje_przy_sredniej_sekundowej(self):
+        # Pole w status.json nazywa się avg_1s_uA i viewer czyta je jako
+        # średnią SEKUNDOWĄ – skrócenie okna „teraz” w UI nie ma go po
+        # cichu podmienić na wartość z krótkiego okna.
+        from autorun import session as sessmod
+        seen = []
+        orig = sessmod.SessionWriter.update_status
+
+        def spy(writer, state, avg_1s_uA=None):
+            seen.append((state, avg_1s_uA))
+            return orig(writer, state, avg_1s_uA)
+
+        sessmod.SessionWriter.update_status = spy
+        self.addCleanup(setattr, sessmod.SessionWriter, "update_status",
+                        orig)
+        self.sampler = _StepSampler(sample_rate=2000, switch_s=0.5,
+                                    low=10.0, high=1000.0)
+        self._run(_plan(duration_s=1.5,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        vals = [v for state, v in seen
+                if state == "measuring" and v is not None]
+        self.assertTrue(vals, "brak statusu z trwającego pomiaru")
+        # Sekunda miesza oba poziomy (~505); poziom bieżący to 1000.
+        self.assertLess(vals[-1], 900,
+                        f"status.json dostał {vals[-1]} – to wygląda na "
+                        "wartość z krótkiego okna, nie z sekundy")
 
     def test_pause_and_resume(self):
         # Stop (pause) tuż po starcie pomiaru, po chwili wznów – pomiar
@@ -298,6 +443,74 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(cd)
         self.assertIn("remaining_s", cd[0].data)
 
+    def _trigger_wait_s(self, plan, rtt_script=None):
+        """Ile ZEGAROWO minęło od wejścia w stan 'trigger' do otwarcia
+        okna pomiaru (stan 'measure')."""
+        marks = {}
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind != "state":
+                return
+            if ev.text == "trigger":
+                marks["start"] = time.monotonic()
+            elif ev.text == "measure":
+                # setdefault: powtórka pomiaru emituje 'measure' ponownie.
+                marks.setdefault("end", time.monotonic())
+
+        results = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(rtt_script),
+            event_cb=watcher, cancel=threading.Event()).run()
+        return results, marks["end"] - marks["start"]
+
+    def test_start_pomiaru_ma_stala_podloge_po_flashu(self):
+        # Płytka po flashu się resetuje – pierwsze sekundy to prąd
+        # rozruchu, nie scenariusza. Nawet bez „startu po czasie”
+        # odczekujemy podłogę i pokazujemy odliczanie.
+        self._set_min_delay(0.6)
+        results, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2, trigger=planmod.Trigger(type="delay", seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        self.assertGreater(waited, 0.6 - 0.05, f"czekano tylko {waited:.2f} s")
+        self.assertLess(waited, 0.6 + 0.5, f"czekano aż {waited:.2f} s")
+        self.assertTrue([ev for ev in self.events if ev.kind == "countdown"],
+                        "odliczanie musi być widoczne w UI")
+
+    def test_wlasny_czas_startu_zastepuje_podloge_a_nie_dodaje(self):
+        # Sedno: 0.9 s z planu przy podłodze 0.4 s daje 0.9 s, NIE 1.3 s.
+        self._set_min_delay(0.4)
+        _r, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2,
+            trigger=planmod.Trigger(type="delay", seconds=0.9)))
+        self.assertGreater(waited, 0.9 - 0.05)
+        self.assertLess(waited, 0.9 + 0.35,
+                        f"czasy się zsumowały: {waited:.2f} s")
+
+    def test_krotszy_wlasny_czas_podnosi_sie_do_podlogi(self):
+        # Druga strona max(): 0.2 s z planu nie skraca podłogi.
+        self._set_min_delay(0.8)
+        _r, waited = self._trigger_wait_s(_plan(
+            duration_s=0.2,
+            trigger=planmod.Trigger(type="delay", seconds=0.2)))
+        self.assertGreater(waited, 0.8 - 0.05, f"czekano tylko {waited:.2f} s")
+
+    def test_podloga_nie_dotyczy_triggera_rtt(self):
+        # Przy RTT czekaniem jest sam wzorzec. Doliczenie podłogi
+        # groziłoby przegapieniem linii wypisanej tuż po rozruchu.
+        self._set_min_delay(5.0)
+        _r, waited = self._trigger_wait_s(
+            _plan(duration_s=0.2, rtt="trigger",
+                  trigger=planmod.Trigger(type="rtt", pattern="Ready",
+                                          timeout_s=5)),
+            rtt_script=[(0.05, "System Ready now")])
+        # Próg z zapasem: po złapaniu wzorca silnik odłącza J-Linka i daje
+        # płytce ~1 s na uspokojenie – to nie jest podłoga startu.
+        self.assertLess(waited, 2.0,
+                        f"RTT czekał na podłogę zamiast na wzorzec "
+                        f"({waited:.2f} s)")
+
     def test_sweep_distinct_builds_and_csv(self):
         # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość
         # budowana do OSOBNEGO katalogu, a wartość parametru trafia do CSV.
@@ -369,6 +582,121 @@ class EngineTest(unittest.TestCase):
         notes = [ev.text for ev in self.events if ev.kind == "note"]
         self.assertTrue(any("Sondę J-Link trzyma inny program" in n
                             for n in notes), notes)
+
+    def _measure_seconds(self, plan, sampler):
+        """Ile ZEGAROWO trwało samo okno pomiaru (od stanu 'measure' do
+        'step_done')."""
+        marks = {}
+
+        def watcher(ev):
+            self.events.append(ev)
+            if ev.kind == "state" and ev.text == "measure":
+                marks["start"] = time.monotonic()
+            elif ev.kind == "step_done":
+                marks["end"] = time.monotonic()
+
+        self.sampler = sampler
+        results = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: sampler,
+            rtt_factory=lambda prof: FakeRttReader(),
+            event_cb=watcher, cancel=threading.Event()).run()
+        return results, marks["end"] - marks["start"]
+
+    def _allow_lossy(self, fraction=0.95):
+        """Podnieś próg strat na czas testu – tu badamy CZAS trwania okna,
+        nie politykę odrzucania (ta ma własne testy)."""
+        from autorun import engine as eng
+        orig = eng.MAX_LOST_FRACTION
+        eng.MAX_LOST_FRACTION = fraction
+        self.addCleanup(setattr, eng, "MAX_LOST_FRACTION", orig)
+
+    def test_pomiar_konczy_sie_z_zegarem_mimo_zgubionych_probek(self):
+        # REGRESJA: pętla kończyła się dopiero po zebraniu duration_s * rate
+        # PRÓBEK, więc gdy PPK2 gubiło dane, pomiar ciągnął się dalej mimo
+        # wyzerowanego odliczania (obserwacja: +10 s). Okno ma zamykać
+        # zegar; braki to dziury w danych, nie powód do przedłużania.
+        self._allow_lossy()
+        plan = _plan(duration_s=2, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        results, measured_s = self._measure_seconds(
+            plan, _LossySampler(sample_rate=200, keep=0.5))
+        # Połowa próbek przepada: przed poprawką okno trwało ~2x dłużej.
+        self.assertLess(measured_s, 2 + 0.8, f"pomiar trwał {measured_s:.1f} s")
+        self.assertGreater(measured_s, 2 - 0.5)
+        # Dane są krótsze niż okno – i musi to być odnotowane.
+        summary = results[0].summary
+        self.assertLess(summary["samples"], 2 * 100)
+        self.assertGreater(summary["lost_samples"], 0)
+
+    def test_pelny_pomiar_zbiera_komplet_probek(self):
+        # Kontrola do powyższego: gdy nic nie ginie, okno zegarowe daje
+        # pełny komplet próbek (poprawka nie skraca zdrowego pomiaru).
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        results, measured_s = self._measure_seconds(
+            plan, FakeSampler(sample_rate=200))
+        self.assertLess(abs(results[0].summary["samples"] - 100), 12)
+        self.assertEqual(results[0].summary["lost_samples"], 0)
+        self.assertLess(measured_s, 1 + 0.8)
+
+    def test_odliczanie_idzie_zegarem_a_nie_probkami(self):
+        # REGRESJA (#22): odliczanie w trybie autonomicznym „zacinało się”
+        # – ta sama sekunda pokazywała się dwa razy. Powód: UI liczyło
+        # pozostały czas z `elapsed_s`, a ten idzie PRÓBKAMI, więc przy
+        # zgubionych próbkach zostaje w tyle za zegarem. Zdarzenie `live`
+        # musi nieść czas zegarowy pomiaru.
+        self._allow_lossy()
+        self.sampler = _LossySampler(sample_rate=200, keep=0.5)
+        # Okno musi być dłuższe niż kilka sekund siatki statusów – od kiedy
+        # kończy je zegar, krótki pomiar nie zdąży ich wyemitować tylu.
+        self._run(_plan(duration_s=3.2,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        live = [ev for ev in self.events if ev.kind == "live"]
+        self.assertGreaterEqual(len(live), 3, "za mało statusów na żywo")
+        last = live[-1].data
+        self.assertIsNotNone(last.get("wall_elapsed_s"))
+        # Połowa próbek przepadła, więc oś próbek jest ~2x wolniejsza od
+        # zegara – to właśnie ono zatrzymywało odliczanie.
+        self.assertGreater(last["wall_elapsed_s"], last["elapsed_s"] + 0.5)
+        # Zegar idzie równo: kolejne statusy co ~1 s (siatka bez dryfu).
+        stamps = [ev.data["wall_elapsed_s"] for ev in live]
+        for prev, nxt in zip(stamps, stamps[1:]):
+            self.assertAlmostEqual(nxt - prev, 1.0, delta=0.35)
+
+    def test_duze_straty_powtarzaja_pomiar_a_potem_odrzucaja(self):
+        # Obserwacja z pola: PPK2 zgubiło 35% okna. Taki wynik jest
+        # bezwartościowy (średnia nie opisuje przebiegu) i NIE MA prawa
+        # trafić do dziennika jako zdrowy. Polityka: powtórz raz, druga
+        # porażka = błąd kroku.
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        self.sampler = _LossySampler(sample_rate=200, keep=0.5)
+        results = self._run(plan)
+        # Krok kończy się błędem (dalej decyduje polityka planu).
+        self.assertEqual(results[0].status, "error")
+        self.assertIn("zgubiło", results[0].error)
+        # Pomiar poszedł DWA razy (pierwotny + powtórka).
+        measure = [ev for ev in self.events
+                   if ev.kind == "state" and ev.text == "measure"]
+        self.assertEqual(len(measure), 2, "brak automatycznego powtórzenia")
+        # …i nic nie wylądowało w dzienniku jako zdrowy pomiar (dziennik
+        # nawet nie powstał – nie było czego zapisać).
+        if core.CSV_PATH.is_file():
+            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+                self.assertEqual(list(csv.DictReader(f)), [])
+
+    def test_drobne_straty_nie_powtarzaja_pomiaru(self):
+        # Kontrola: braki poniżej progu przechodzą bez powtarzania – inaczej
+        # każdy pomiar kręciłby się dwa razy.
+        plan = _plan(duration_s=1, sample_rate=100,
+                     trigger=planmod.Trigger(type="delay", seconds=0))
+        self.sampler = FakeSampler(sample_rate=200)
+        results = self._run(plan)
+        self.assertEqual(results[0].status, "done")
+        measure = [ev for ev in self.events
+                   if ev.kind == "state" and ev.text == "measure"]
+        self.assertEqual(len(measure), 1)
 
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.

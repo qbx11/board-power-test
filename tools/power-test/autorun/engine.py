@@ -38,6 +38,30 @@ from .session import SessionWriter, _atomic_json, new_session_dir
 # (po 3 nieudanych restartach pomiaru stosowana jest polityka kroku).
 STALL_TIMEOUT_S = 10.0
 READ_INTERVAL_S = 0.01     # ~10 ms między odczytami portu PPK2
+# Ile okna pomiaru wolno zgubić, zanim wynik uznamy za bezwartościowy.
+# Przy takich brakach średnia nie opisuje już przebiegu prądu.
+MAX_LOST_FRACTION = 0.05
+MEASURE_ATTEMPTS = 2       # pierwotny pomiar + jedno powtórzenie
+# Okno wskaźnika „teraz” w UI. Statusy lecą co 1 s, ale liczenie „teraz”
+# z całej sekundy dawało średnią ze 100 000 próbek – jej błąd standardowy
+# to ułamek promila, więc na ekranie stała ta sama liczba do końca pomiaru
+# i wyglądało to jak zawieszony odczyt. Krótsze okno pokazuje, co płytka
+# robi TERAZ, a nie ile wyniosła średnia z ostatniej sekundy.
+INST_WINDOW_S = 0.1
+# Płytka po flashu resetuje się i przechodzi rozruch – pierwsze sekundy
+# to prąd bootowania, nie prąd scenariusza. Dlatego każdy start "po
+# czasie" ma tu podłogę. NIE dodajemy jej do czasu z planu, tylko bierzemy
+# większy z dwóch (30 s w planie = 30 s, nie 35 s).
+MIN_START_DELAY_S = 5.0
+
+
+def effective_delay_s(trigger):
+    """Ile sekund realnie czekamy po flashu przy triggerze 'delay'.
+    Dla RTT/serial 0 – tam czekaniem jest sam wzorzec i doliczenie
+    sekund groziłoby przegapieniem linii wypisanej tuż po rozruchu."""
+    if trigger.type != "delay":
+        return 0.0
+    return max(trigger.seconds, MIN_START_DELAY_S)
 
 
 class AutoRunError(RuntimeError):
@@ -323,13 +347,15 @@ class AutoRunner:
         rtt='continuous' połączenie zostaje otwarte na czas pomiaru."""
         trig = step.trigger
         if trig.type == "delay":
+            # Podłoga, nie doliczenie: plan prosi o 30 s -> czekamy 30 s.
+            delay_s = effective_delay_s(trig)
             self._emit("state", idx, step.scenario, "trigger",
-                       detail=f"start za {trig.seconds:g} s")
-            self._note(f"trigger: delay {trig.seconds:g} s", idx,
+                       detail=f"start za {delay_s:g} s")
+            self._note(f"trigger: delay {delay_s:g} s", idx,
                        step.scenario, files=(run_log,))
             if self.dry_run:
                 return None
-            self._countdown(idx, step, trig.seconds)
+            self._countdown(idx, step, delay_s)
             if step.rtt != "continuous":
                 return None
             reader = self.rtt_factory(self.profile)
@@ -418,7 +444,9 @@ class AutoRunner:
                 break
             self._emit("countdown", idx, step.scenario,
                        data={"remaining_s": round(remaining, 1)})
-            time.sleep(min(0.5, remaining))
+            # Częściej niż raz na sekundę: pojedyncze zacięcie (GC, zajęte
+            # UI) nie zabiera wtedy całej sekundy z odliczania.
+            time.sleep(min(0.25, remaining))
 
     def _start_monitor(self, idx, step, session_dir):
         """Uruchom monitor dongla, jeśli krok podał `monitor_port`. Gdy port
@@ -446,7 +474,7 @@ class AutoRunner:
                         f"{DEFAULT_BAUD}]")
         return mon
 
-    def _do_pause(self, sampler, writer, idx, step):
+    def _do_pause(self, sampler, writer, idx, step, wall_elapsed_s=0.0):
         """Pauza pomiaru (Stop w UI): zatrzymaj sampler i zamroź oś czasu,
         czekaj na wznowienie albo cancel. Płytka zostaje zasilona – to ten
         sam pomiar. Zwraca czas trwania pauzy (do korekty rozliczania
@@ -461,6 +489,7 @@ class AutoRunner:
         self._emit("paused", idx, step.scenario, data={
             "avg_uA": round(avg, 3) if avg is not None else None,
             "elapsed_s": round(writer.elapsed_s, 1),
+            "wall_elapsed_s": round(wall_elapsed_s, 1),
             "duration_s": step.duration_s})
         while self.pause.is_set():
             self._check_cancel()
@@ -474,8 +503,17 @@ class AutoRunner:
 
     def _measure(self, idx, step, writer, rtt_reader):
         """Pętla pomiaru: czytaj PPK2, karm sesję, raportuj na żywo.
-        Koniec, gdy zbierzemy próbki warte duration_s (oś danych) albo
-        cancel. Wątek RTT (continuous) stawia auto-etykiety równolegle."""
+        Koniec, gdy minie OKNO duration_s liczone zegarem (albo wcześniej
+        zbierzemy komplet próbek), albo przy cancel. Wątek RTT
+        (continuous) stawia auto-etykiety równolegle.
+
+        Okno wyznacza zegar, nie licznik próbek: PPK2 potrafi zgubić
+        próbki (USB nie nadąża), a przy warunku „zbieraj, aż będzie
+        duration_s * rate próbek” pomiar ciągnął się o tyle dłużej, ile
+        danych przepadło – nawet kilkanaście sekund po wyzerowaniu
+        odliczania. Braki są danymi, których nie ma, a nie powodem, by
+        trzymać płytkę pod pomiarem dłużej: idą do `gaps` /
+        `lost_samples`."""
         sampler = self._sampler
         # Decymacja 100 kS/s -> wybrana częstotliwość (writer.sample_rate):
         # uśredniamy grupy po `decim` próbek, resztę przenosimy między
@@ -497,18 +535,42 @@ class AutoRunner:
         sampler.start()
         errors = 0
         last_data = time.monotonic()
-        last_status = 0.0
         sec_sum, sec_n = 0.0, 0
         expected_base = time.monotonic()
+        # Odliczanie w UI chodzi po SIATCE co 1 s liczonej od startu pomiaru,
+        # nie „1 s od poprzedniego statusu”: odczyt PPK2 i zapis tierów
+        # potrafią zjeść kilkadziesiąt ms, a przy „od poprzedniego” ten
+        # naddatek kumulował się i sekundy na ekranie robiły się dłuższe.
+        next_status = expected_base
+        # Okno „teraz”: własna, krótsza siatka. `last_inst` trzyma ostatnie
+        # ZAMKNIĘTE okno, żeby wartość nie zależała od tego, ile milisekund
+        # przed statusem akurat wpadł ostatni odczyt.
+        inst_sum, inst_n = 0.0, 0
+        next_inst = expected_base + INST_WINDOW_S
+        last_inst = None
         reported_deficit = 0
         try:
-            while writer.samples_written < target:
+            while True:
                 self._check_cancel()
                 if self.pause.is_set():
-                    expected_base += self._do_pause(
-                        sampler, writer, idx, step)
-                    last_data = last_status = time.monotonic()
+                    paused_s = self._do_pause(
+                        sampler, writer, idx, step,
+                        time.monotonic() - expected_base)
+                    expected_base += paused_s
+                    next_status += paused_s
+                    # Okno „teraz” przesuwamy tak samo i zaczynamy je od
+                    # nowa: próbki sprzed pauzy nie należą do tego samego
+                    # kawałka przebiegu co te po wznowieniu.
+                    next_inst += paused_s
+                    inst_sum, inst_n = 0.0, 0
+                    last_data = time.monotonic()
                     continue
+                # KONIEC: zamknięte okno czasowe (pauzy się nie liczą) albo
+                # komplet próbek. Sprawdzamy PO pauzie, żeby Stop w UI nie
+                # skracał pomiaru.
+                if (time.monotonic() - expected_base >= step.duration_s
+                        or writer.samples_written >= target):
+                    break
                 time.sleep(READ_INTERVAL_S)
                 try:
                     chunk = sampler.read()
@@ -550,29 +612,80 @@ class AutoRunner:
                     if over > 0:
                         chunk = chunk[:len(chunk) - int(over)]
                     writer.write_samples(chunk)
-                    sec_sum += float(chunk.sum())
+                    # Jedna suma karmi oba okna: sekundowe (status.json dla
+                    # viewera) i krótkie („teraz” w UI).
+                    chunk_sum = float(chunk.sum())
+                    sec_sum += chunk_sum
                     sec_n += len(chunk)
-                if now - last_status >= 1.0:
+                    inst_sum += chunk_sum
+                    inst_n += len(chunk)
+                if now >= next_inst:
+                    # Puste okno (niska częstotliwość po decymacji, przerwa
+                    # w danych) NIE kasuje wskazania – zostaje ostatnie
+                    # znane, zamiast migać na „—”.
+                    if inst_n:
+                        last_inst = inst_sum / inst_n
+                    inst_sum, inst_n = 0.0, 0
+                    next_inst += INST_WINDOW_S
+                    if next_inst <= now:
+                        next_inst = now + INST_WINDOW_S
+                if now >= next_status:
                     # Rozliczenie zgubionych próbek: ile powinno przyjść
                     # wg zegara vs ile przyszło (w jednostkach efektywnej
                     # częstotliwości; nadwyżka deficytu -> meta.gaps).
-                    expected = (now - expected_base) * eff_rate
+                    wall_elapsed = now - expected_base
+                    expected = wall_elapsed * eff_rate
                     deficit = int(expected - writer.samples_written
                                   - reported_deficit)
                     if deficit > eff_rate * 0.2:
                         writer.record_gap(deficit)
                         reported_deficit += deficit
-                    inst = sec_sum / sec_n if sec_n else None
+                    # „teraz” = ostatnie zamknięte okno INST_WINDOW_S; przy
+                    # pomiarze krótszym niż to okno bierzemy to, co jest,
+                    # żeby pierwszy status nie pokazywał „—”.
+                    inst = last_inst
+                    if inst is None and inst_n:
+                        inst = inst_sum / inst_n
                     avg = writer.avg_uA           # skumulowana od startu
-                    writer.update_status("measuring", inst)
+                    # status.json zostaje przy średniej SEKUNDOWEJ – pole
+                    # nazywa się avg_1s_uA i viewer czyta je jako sekundę.
+                    writer.update_status(
+                        "measuring", sec_sum / sec_n if sec_n else None)
                     self._emit("live", idx, step.scenario, data={
                         "avg_uA": round(avg, 3) if avg is not None else None,
                         "inst_uA": round(inst, 3) if inst is not None else None,
                         "elapsed_s": round(writer.elapsed_s, 1),
+                        # Czas ZEGAROWY pomiaru (bez pauz) – tylko do
+                        # odliczania w UI. `elapsed_s` liczy się próbkami,
+                        # więc przy zgubionych próbkach zostaje w tyle za
+                        # rzeczywistością i odliczanie potrafiło pokazać tę
+                        # samą sekundę dwa razy z rzędu.
+                        "wall_elapsed_s": round(wall_elapsed, 1),
                         "duration_s": step.duration_s,
                         "samples": writer.samples_written})
                     sec_sum, sec_n = 0.0, 0
-                    last_status = now
+                    # Kolejny punkt siatki; po dłuższym zacięciu (np. restart
+                    # odczytu) łapiemy najbliższą przyszłą sekundę zamiast
+                    # nadrabiać serią zaległych statusów.
+                    next_status += 1.0
+                    if next_status <= now:
+                        next_status = now + 1.0
+            # Domknij rozliczenie braków: między ostatnim statusem a końcem
+            # okna też mogło ich zabraknąć, a od kiedy okno wyznacza zegar,
+            # zgubione próbki to JEDYNY ślad po tym, że dane są dziurawe
+            # (wcześniej widać je było jako przeciągnięty pomiar).
+            missing = int(target - writer.samples_written - reported_deficit)
+            if missing > eff_rate * 0.2:      # ten sam próg co w pętli
+                writer.record_gap(missing)
+                reported_deficit += missing
+            if reported_deficit > eff_rate * 0.5:    # ponad pół sekundy
+                self._note(
+                    f"pomiar {idx} ({step.scenario}): PPK2 zgubiło "
+                    f"{reported_deficit} próbek "
+                    f"(~{reported_deficit / eff_rate:.1f} s z "
+                    f"{step.duration_s:g} s) – USB nie nadążyło; okno "
+                    "pomiaru zamknięte zgodnie z zegarem",
+                    idx, step.scenario)
         finally:
             stop_rtt.set()
             try:
@@ -583,6 +696,46 @@ class AutoRunner:
                 rtt_thread.join(timeout=3)
             if rtt_reader is not None:
                 rtt_reader.detach()
+
+    @staticmethod
+    def _lost_fraction(writer):
+        """Jaka część okna pomiaru przepadła (0..1). Braki są w `gaps`;
+        mianownik to całe okno, czyli to, co przyszło + to, co zginęło."""
+        lost = sum(g[1] for g in writer.gaps)
+        total = lost + writer.samples_written
+        return (lost / total) if total else 0.0
+
+    def _measure_with_retry(self, idx, step, session_dir, writer, rtt_reader,
+                            new_writer, run_log):
+        """Pomiar z kontrolą strat. Gdy PPK2 zgubi więcej niż
+        MAX_LOST_FRACTION okna, wynik jest bezwartościowy – powtarzamy
+        pomiar raz, do świeżej sesji (stara zostaje na dysku jako
+        'discarded', żeby dało się dojść, co się stało). Druga porażka to
+        błąd kroku: śmieciowy pomiar NIE ma prawa trafić do dziennika jako
+        zdrowy. Zwraca (katalog_sesji, writer) użytego pomiaru."""
+        for attempt in range(1, MEASURE_ATTEMPTS + 1):
+            self._measure(idx, step, writer, rtt_reader)
+            lost = self._lost_fraction(writer)
+            if lost <= MAX_LOST_FRACTION:
+                return session_dir, writer
+            msg = (f"pomiar {idx} ({step.scenario}): PPK2 zgubiło "
+                   f"{lost:.0%} okna (limit {MAX_LOST_FRACTION:.0%})")
+            if attempt >= MEASURE_ATTEMPTS:
+                writer.finalize("lossy")
+                raise AutoRunError(
+                    f"{msg} – również przy powtórzeniu. Wynik odrzucony: "
+                    "przy takich brakach średnia nie opisuje przebiegu. "
+                    "Odciąż komputer (zamknij nRF Connect, przeglądarkę), "
+                    "użyj innego portu USB albo obniż 'Próbki na sekundę'")
+            self._note(f"{msg} – powtarzam pomiar", idx, step.scenario,
+                       files=(run_log,))
+            writer.finalize("discarded")
+            session_dir = new_session_dir(self.run_dir, step.scenario)
+            writer = new_writer(session_dir)
+            # UI zaczyna kartę pomiaru od nowa (odliczanie, podgląd sesji).
+            self._emit("state", idx, step.scenario, "measure")
+            self._emit("session", idx, step.scenario,
+                       data={"dir": str(session_dir), "live": True})
 
     def _rtt_label_loop(self, reader, matcher, writer, stop, idx, step):
         """Wątek auto-etykiet (rtt='continuous'): każda linia RTT do
@@ -685,19 +838,24 @@ class AutoRunner:
             eff_rate = hw_rate // decim
             window_ms = max(step.storage.window_ms,
                             math.ceil(1000 / eff_rate))
-            writer = SessionWriter(
-                session_dir,
-                meta=self._session_meta(idx, step, scen, voltage,
-                                        build_dir),
-                sample_rate=eff_rate,
-                storage_mode=step.storage.mode,
-                window_ms=window_ms)
+            def _new_writer(directory):
+                return SessionWriter(
+                    directory,
+                    meta=self._session_meta(idx, step, scen, voltage,
+                                            build_dir),
+                    sample_rate=eff_rate,
+                    storage_mode=step.storage.mode,
+                    window_ms=window_ms)
+
+            writer = _new_writer(session_dir)
             if self.dry_run:
                 summary = writer.finalize("done")
                 return StepResult(idx, step.scenario, "done",
                                   session_dir, summary)
             try:
-                self._measure(idx, step, writer, rtt_reader)
+                session_dir, writer = self._measure_with_retry(
+                    idx, step, session_dir, writer, rtt_reader,
+                    _new_writer, run_log)
             except _Cancelled:
                 summary = writer.finalize("cancelled")
                 self._append_csv(step, scen, voltage, summary,
@@ -761,8 +919,10 @@ class AutoRunner:
                 "build_dir": build_dir if isinstance(build_dir, str)
                 else None,
                 "duration_s": step.duration_s,
+                # `seconds` = realne czekanie (z podłogą), nie życzenie
+                # z planu – meta ma opisywać ten pomiar, nie zamiar.
                 "trigger": {"type": step.trigger.type,
-                            "seconds": step.trigger.seconds,
+                            "seconds": effective_delay_s(step.trigger),
                             "pattern": step.trigger.pattern},
                 "rtt": step.rtt}
 
@@ -878,22 +1038,40 @@ class AutoRunner:
                     raise AutoRunError(
                         f"krok {idx} ({step.scenario}): {result.error}; "
                         "plan ma on_step_error = 'abort'")
+            # PPK2 zwalniamy PRZED ogłoszeniem końca planu: 'plan_done'
+            # odblokowuje w UI wyjście z ekranu, a więc i start kolejnego
+            # przebiegu. Gdy zamykanie zostawało na później, nowy przebieg
+            # trafiał na wciąż otwarte (i wciąż nadające) PPK2 – stąd
+            # „po Esc trzeba zrestartować PPK2”.
+            self._close_sampler()
             self._emit("plan_done", data={
                 "results": [(r.index, r.scenario, r.status)
                             for r in results]})
             return results
         except _Cancelled:
             self._note("przerwano plan (Esc)")
+            self._close_sampler()
             self._emit("plan_done", data={"cancelled": True})
             return results
         finally:
-            if self._sampler is not None:
-                self._ensure_dut_power(False)
-                self._sampler.close()
-                self._sampler = None
+            self._close_sampler()          # awaryjnie, gdy poleciał wyjątek
             if self._plan_log is not None:
                 self._plan_log.close()
                 self._plan_log = None
+
+    def _close_sampler(self):
+        """Odetnij zasilanie płytki i zwolnij PPK2. Idempotentne – wołane
+        na każdej ścieżce wyjścia z run()."""
+        if self._sampler is None:
+            return
+        sampler, self._sampler = self._sampler, None
+        try:
+            if self._dut_on:
+                sampler.dut_power(False)
+                self._dut_on = False
+        except Exception:
+            pass                     # close() i tak odcina zasilanie
+        sampler.close()
 
 
 class _Cancelled(Exception):

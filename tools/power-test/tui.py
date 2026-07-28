@@ -19,6 +19,7 @@
 
 import asyncio
 import csv
+import math
 import os
 import shlex
 import shutil
@@ -445,8 +446,10 @@ class ResultsScreen(ModalScreen):
     # z serii (sweep) miał jaką wartość flagi build.
     MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
                    "prad_uA", "oczekiwane", "uwagi"]
-    AUTO_COLS = ["data", "pomiar_id", "scenariusz", "parametr", "wartosc",
-                 "napiecie_V", "prad_uA", "czas_s"]
+    # 'egzemplarz' jest w OBU trybach: bez niego nie wiadomo, której płytki
+    # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
+    AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
+                 "wartosc", "napiecie_V", "prad_uA", "czas_s"]
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
     # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
@@ -1024,6 +1027,9 @@ class MeasurementCard(Vertical):
                                             "300, 600",
                                 classes="card-sweep-values")
                 # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
+                # Bez niego i tak czekamy MIN_START_DELAY_S na rozruch
+                # płytki; wpisany czas nie dokłada się do tych sekund,
+                # tylko je zastępuje (liczy się większy).
                 yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
                             value=c.get("delay_on", False),
                             classes="card-delay-on")
@@ -1059,7 +1065,7 @@ class MeasurementCard(Vertical):
                                 classes="card-serial-pattern")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
-                        yield Label("Napięcie (V, 2.0–3.3):")
+                        yield Label("Napięcie (V, 1.8–3.6):")
                         yield Input(value=c.get("voltage", "3.0"),
                                     classes="card-voltage")
                     with Vertical(classes="card-col"):
@@ -1235,7 +1241,7 @@ class Ppk2ConnectScreen(ModalScreen):
         with Vertical(classes="dialog"):
             yield Static("[b]Połączenie z PPK2[/b]", classes="dialog-text")
             yield Static("Napięcie: ustawiane per pomiar (domyślnie 3.0 V, "
-                         "limit 2.0–3.3 V).", classes="dialog-text")
+                         "limit 1.8–3.6 V).", classes="dialog-text")
             yield Static("[#888888]PPK2: niesprawdzony[/]", id="ppk2-status")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Połącz / sprawdź", id="ppk2_detect")
@@ -1485,6 +1491,15 @@ class AutoRunScreen(Screen):
         m, sec = divmod(r, 60)
         return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
+    @classmethod
+    def _fmt_countdown(cls, s):
+        """Czas POZOSTAŁY – zaokrąglany w GÓRĘ. Przy round() wartość
+        odczytana chwilę po pełnej sekundzie (np. 9,6 s) pokazywała się
+        jako ta sama liczba co poprzedni odczyt i sekunda na ekranie
+        „stała” dwa takty; ceil daje równe 10, 9, 8, …, a zero pojawia
+        się dopiero, gdy naprawdę nie ma już czasu."""
+        return cls._fmt_time(math.ceil(max(0.0, s)))
+
     @staticmethod
     def _step_label(ev):
         """Etykieta kroku do wyświetlenia: 'N.M' dla serii, inaczej numer."""
@@ -1527,9 +1542,9 @@ class AutoRunScreen(Screen):
             # Wykres (osobne okno) chwilowo wyłączony – zajmiemy się później.
             self.live_session = ev.data.get("dir")
         elif ev.kind == "countdown":
-            status.update(f"{ev.name} · start pomiaru za "
-                          f"[b]{self._fmt_time(ev.data.get('remaining_s', 0))}"
-                          "[/b]")
+            status.update(
+                f"{ev.name} · start pomiaru za "
+                f"[b]{self._fmt_countdown(ev.data.get('remaining_s', 0))}[/b]")
         elif ev.kind == "monitor":
             self._monitor_line(ev.text)
         elif ev.kind == "live":
@@ -1570,13 +1585,24 @@ class AutoRunScreen(Screen):
         self.query_one("#measure-remain", Static).update("")
         self.query_one("#measure-inst", Static).update("")
 
+    @staticmethod
+    def _remaining_s(d):
+        """Ile jeszcze potrwa pomiar. Liczymy z czasu ZEGAROWEGO
+        (`wall_elapsed_s`), a nie z `elapsed_s` liczonego próbkami – ten
+        drugi przy zgubionych próbkach zostaje w tyle i odliczanie
+        „zacinało się” na tej samej sekundzie. Fallback na elapsed_s dla
+        zdarzeń bez czasu zegarowego (pauza starszego silnika)."""
+        elapsed = d.get("wall_elapsed_s")
+        if elapsed is None:
+            elapsed = d.get("elapsed_s") or 0
+        return max(0.0, (d.get("duration_s") or 0) - elapsed)
+
     def _update_measure(self, ev):
         d = ev.data
-        remain = max(0.0, (d.get("duration_s") or 0) - (d.get("elapsed_s") or 0))
         self.query_one("#measure-avg", Static).update(
             f"[b]{self._fmt_uA(d.get('avg_uA'))}[/b]")
         self.query_one("#measure-remain", Static).update(
-            f"pozostało [b]{self._fmt_time(remain)}[/b]")
+            f"pozostało [b]{self._fmt_countdown(self._remaining_s(d))}[/b]")
         self.query_one("#measure-inst", Static).update(
             f"[#888888]teraz {self._fmt_uA(d.get('inst_uA'))} · "
             f"próbek {d.get('samples', 0):,}[/]")
@@ -1602,6 +1628,17 @@ class AutoRunScreen(Screen):
             head.update(f"[b]POMIAR[/b] · {base}")
             btn.label = "Stop"
 
+    def _warn_lost_samples(self, d):
+        """Ostrzeż, gdy PPK2 zgubiło zauważalny kawałek danych. Próg 2%
+        okna – drobne braki na styku odczytów są normalne."""
+        lost = d.get("lost_samples") or 0
+        got = d.get("samples") or 0
+        if not lost or lost < 0.02 * (lost + got):
+            return
+        self.note(f"[#cc9900]⚠ PPK2 zgubiło {lost:,} próbek "
+                  f"({lost / (lost + got):.0%} okna) – USB nie nadążyło; "
+                  "średnia policzona z tego, co dotarło.[/]")
+
     def _finish_step(self, ev):
         """Po pomiarze: usuń okna build/flash tego kroku i dopisz wynik do
         tabelki na górze."""
@@ -1615,6 +1652,10 @@ class AutoRunScreen(Screen):
                       self._fmt_uA(d.get("max_uA")),
                       self._fmt_time(d.get("duration_s") or 0))
         self.query_one("#measure-panel").display = False
+        # Zgubione próbki muszą być WIDAĆ. Okno pomiaru zamyka zegar, więc
+        # braki nie objawiają się już przeciągniętym pomiarem – bez tej
+        # linijki dziurawe dane wyglądałyby jak zdrowe.
+        self._warn_lost_samples(d)
         # Sprzątnij monitor dongla tego kroku (następny odsłoni się sam).
         self.query_one("#dongle-log", Log).clear()
         self.query_one("#dongle-panel").display = False
@@ -2215,15 +2256,34 @@ class PowerTestApp(App):
         self.notify("Zastosowano ustawienia do wszystkich pomiarów.")
 
     def _apply_to_following(self, button):
-        """'…do następnych' – zapamiętaj config jako szablon; każdy KOLEJNY
-        dodany pomiar dostanie te ustawienia (bez zmiany istniejących)."""
+        """'…do następnych' – ustaw config (bez scenariusza) na wszystkich
+        kartach LEŻĄCYCH NIŻEJ i zapamiętaj go jako szablon dla kolejnych
+        dodanych pomiarów. Wcześniej działał tylko szablon, więc przycisk
+        nic nie robił, gdy karty niżej już istniały."""
         card = self._card_of(button)
         if card is None:
             return
         cfg = dict(card.get_config())
         cfg.pop("scenario", None)
         self._card_template = cfg
-        self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
+        # Kolejność z DOM = kolejność kart na ekranie; „niżej” szukamy po
+        # tożsamości widgetu, nie po ==.
+        cards = list(self.query(MeasurementCard))
+        seen = False
+        below = []
+        for other in cards:
+            if other is card:
+                seen = True
+            elif seen:
+                below.append(other)
+        for other in below:
+            other.apply_shared(cfg)
+        self._refresh_card_titles()
+        if below:
+            self.notify(f"Zastosowano ustawienia do {len(below)} kolejnych "
+                        "pomiarów; nowe też je odziedziczą.")
+        else:
+            self.notify("Nowe pomiary będą dziedziczyć te ustawienia.")
 
     def _scenario_added(self, result):
         """Po 'Dodaj kod': nowy scenariusz od razu do wyboru, bez restartu
@@ -2329,7 +2389,9 @@ class PowerTestApp(App):
         """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =
         kolejność kart. Trigger (priorytet): log dongla > RTT 'start po logu'
         > 'start po czasie' > od razu; przy RTT continuous wzorzec staje się
-        auto-etykietą."""
+        auto-etykietą. Przy starcie po czasie (i 'od razu') silnik trzyma
+        własną podłogę na rozruch płytki – bierze WIĘKSZY z dwóch czasów,
+        nie sumę, więc tutaj nic nie doliczamy."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
                                   Trigger, expand_sweep, parse_duration)
 

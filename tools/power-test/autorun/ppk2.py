@@ -10,13 +10,22 @@
 # zwraca próbki w µA jako np.ndarray – dekodowanie robi ppk2-api,
 # my tylko pakujemy wynik w numpy.
 
+import threading
 import time
+from collections import deque
 
 import numpy as np
 
 from .plan import VOLTAGE_MAX_MV, VOLTAGE_MIN_MV
 
 SAMPLE_RATE = 100_000     # PPK2 sampluje stałe 100 kS/s
+BYTES_PER_SAMPLE = 4      # jedna próbka = 4 bajty (~400 kB/s strumienia)
+# Sufit bufora surowych bajtów. Przy zdrowym przebiegu leży tam garść
+# milisekund; tyle danych oznacza, że konsument stanął – i lepiej zgłosić
+# błąd, niż po cichu mielić dane sprzed pół minuty.
+MAX_BUFFER_S = 30
+# Jak długo wątek drenujący czeka na bajty, zanim sprawdzi, czy ma skończyć.
+DRAIN_TIMEOUT_S = 0.1
 
 
 class Ppk2Error(RuntimeError):
@@ -75,7 +84,19 @@ def find_ppk2(port=""):
 class Ppk2ApiSampler:
     """Właściwy sampler na bibliotece ppk2-api. Cykl życia:
     open() -> set_voltage() -> dut_power(True) -> start() ->
-    read()* -> stop() -> close()."""
+    read()* -> stop() -> close().
+
+    PPK2 nadaje SWOBODNIE 100 kS/s (~400 kB/s) – bez kontroli przepływu,
+    bez retransmisji i bez bufora na urządzeniu. Kto nie opróżni portu na
+    czas, tego próbki przepadają na zawsze. Bufor tty starcza na kilkanaście
+    milisekund, a dekodowanie w ppk2-api idzie pętlą Pythona po KAŻDEJ
+    próbce (~1,5 ms na 10 ms strumienia) – gdy port drenowała ta sama pętla,
+    która dekoduje, decymuje i zapisuje tiery, przez większość czasu portu
+    nie czytał NIKT. Stąd braki rzędu dziesiątek procent.
+
+    Dlatego port drenuje osobny wątek, który nie robi NIC poza ser.read()
+    do bufora bajtów. Dekodowanie zostaje u konsumenta (read()) – wartości
+    liczy dokładnie ten sam kod ppk2-api co dotąd."""
 
     sample_rate = SAMPLE_RATE
 
@@ -85,12 +106,32 @@ class Ppk2ApiSampler:
         self._measuring = False
         self._dut_on = False
         self._last_voltage_mv = None
+        # Wątek drenujący port + jego bufor surowych bajtów.
+        self._reader = None
+        self._reader_stop = threading.Event()
+        self._reader_error = None
+        self._chunks = deque()
+        self._buffered = 0
+        self._overflow = False
+        self._lock = threading.Lock()
+        self._max_buffered = 0        # diagnostyka: szczyt zajętości bufora
 
     def open(self):
         from ppk2_api.ppk2_api import PPK2_API
         port = find_ppk2(self._port_hint)
         try:
             self._ppk2 = PPK2_API(port)
+            # Timeout na porcie: bez niego blokujący ser.read() w wątku
+            # drenującym nie wróciłby, gdy urządzenie przestanie nadawać –
+            # i stop() wisiałby na join().
+            try:
+                self._ppk2.ser.timeout = DRAIN_TIMEOUT_S
+            except Exception:
+                pass
+            # PPK2 mogło zostać w trakcie nadawania próbek (poprzednia sesja
+            # przerwana Esc albo ubity proces) – ucisz je, zanim cokolwiek
+            # z niego przeczytamy.
+            self._quiesce()
             # Modyfikatory kalibracyjne z urządzenia – BEZ nich dekodowanie
             # liczy prąd z domyślnych, błędnych stałych (odczyt zawyżony
             # o rzędy wielkości, np. mA zamiast µA).
@@ -110,18 +151,49 @@ class Ppk2ApiSampler:
             raise Ppk2Error(f"nie mogę otworzyć PPK2 na '{port}': {e}")
         self.port = port
 
+    def _drain(self):
+        """Wyrzuć wszystko, co urządzenie zdążyło nadać. Po AVERAGE_STOP
+        PPK2 nadaje jeszcze przez chwilę – zaległe próbki wymieszałyby się
+        z odpowiedzią na następną komendę."""
+        ser = getattr(self._ppk2, "ser", None)
+        if ser is None:
+            return
+        for _ in range(5):
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                return
+            time.sleep(0.05)
+            if not getattr(ser, "in_waiting", 0):
+                return
+
+    def _quiesce(self):
+        """Ucisz urządzenie: zatrzymaj nadawanie i opróżnij bufor. Wołane
+        przy otwarciu ORAZ przy zamknięciu – bez tego PPK2 zostawione
+        w środku strumienia (sesja przerwana Esc) nie umiało oddać
+        metadanych przy następnym otwarciu i jedynym ratunkiem było
+        fizyczne przepięcie kabla USB."""
+        try:
+            self._ppk2.stop_measuring()
+        except Exception:
+            pass
+        self._measuring = False
+        self._drain()
+
     def _load_calibration(self):
         """Niezawodne wczytanie modyfikatorów kalibracji. Odczyt metadanych
         w ppk2-api bywa wyścigowy (szuka 'END' w 5 próbach), a przy porażce
         get_modifiers() zwraca None i BIBLIOTEKA CICHO zostaje przy domyślnych,
-        błędnych stałych. Czyścimy bufor, ponawiamy, a trwały brak kalibracji
-        traktujemy jak twardy błąd (lepiej nie mierzyć niż mierzyć źle)."""
-        ser = getattr(self._ppk2, "ser", None)
+        błędnych stałych. Uciszamy urządzenie, ponawiamy, a trwały brak
+        kalibracji traktujemy jak twardy błąd (lepiej nie mierzyć niż mierzyć
+        źle)."""
         last = None
         for _ in range(15):
             try:
-                if ser is not None:
-                    ser.reset_input_buffer()
+                # Ponowne uciszenie, a nie samo czyszczenie bufora: jeśli
+                # urządzenie wciąż nadaje próbki, sam flush nic nie da –
+                # metadane znowu utoną w strumieniu.
+                self._quiesce()
                 if self._ppk2.get_modifiers():      # True dopiero po sparsie
                     return
             except Exception as e:                  # port jeszcze niegotowy
@@ -146,6 +218,9 @@ class Ppk2ApiSampler:
         time.sleep(0.3)
 
     def start(self):
+        # Nigdy dwa wątki na jednym porcie (pauza/wznowienie, powtórzony
+        # pomiar) – poprzedni musi być domknięty.
+        self._join_reader()
         # WYRÓWNANIE strumienia: PPK2 nadaje ciągłe próbki po 4 bajty, a
         # get_samples() trzyma ciągłość przez `remainder`. Zaległe bajty
         # (ogon metadanych / poprzedniej sesji) albo niepełna reszta po
@@ -158,19 +233,76 @@ class Ppk2ApiSampler:
             except Exception:
                 pass
         self._ppk2.remainder = {"sequence": b"", "len": 0}
+        with self._lock:
+            self._chunks.clear()
+            self._buffered = 0
+            self._max_buffered = 0
+        self._overflow = False
+        self._reader_error = None
         self._ppk2.start_measuring()
         self._measuring = True
+        # Wątek startuje PO start_measuring, żeby nie buforował ogona
+        # sprzed pomiaru.
+        self._reader_stop.clear()
+        self._reader = threading.Thread(target=self._drain_loop, daemon=True,
+                                        name="ppk2-drain")
+        self._reader.start()
+
+    def _drain_loop(self):
+        """Jedyne zadanie: zabierać bajty z portu i odkładać do bufora.
+        Żadnego dekodowania ani zapisu – każda milisekunda spędzona tu na
+        czymkolwiek innym to ryzyko przepełnienia bufora tty. `ser.read()`
+        blokuje w jądrze i oddaje GIL, więc wątek nie kręci się na pusto."""
+        ser = self._ppk2.ser
+        cap = MAX_BUFFER_S * SAMPLE_RATE * BYTES_PER_SAMPLE
+        while not self._reader_stop.is_set():
+            try:
+                data = ser.read(max(1, ser.in_waiting))
+            except Exception as e:
+                self._reader_error = e
+                return
+            if not data:
+                continue
+            with self._lock:
+                if self._buffered + len(data) > cap:
+                    self._overflow = True
+                    continue          # bufor pełny – konsument stanął
+                self._chunks.append(data)
+                self._buffered += len(data)
+                self._max_buffered = max(self._max_buffered, self._buffered)
 
     def read(self):
         """Nowe próbki [µA] od poprzedniego read() (może być pusto –
-        wołający sam decyduje, ile spać między odczytami)."""
-        data = self._ppk2.get_data()
-        if not data:
-            return np.empty(0, np.float32)
+        wołający sam decyduje, ile spać między odczytami). Bajty zebrał
+        już wątek drenujący; tutaj tylko je dekodujemy."""
+        if self._reader_error is not None:
+            err, self._reader_error = self._reader_error, None
+            raise Ppk2Error(f"odczyt z portu PPK2 przerwany: {err}")
+        if self._overflow:
+            self._overflow = False
+            raise Ppk2Error(
+                f"bufor PPK2 przepełniony (>{MAX_BUFFER_S} s surowych "
+                "danych) – konsument nie nadąża z przetwarzaniem")
+        with self._lock:
+            if not self._chunks:
+                return np.empty(0, np.float32)
+            data = b"".join(self._chunks)
+            self._chunks.clear()
+            self._buffered = 0
         samples, _digital = self._ppk2.get_samples(data)
         return np.asarray(samples, np.float32)
 
+    def _join_reader(self):
+        self._reader_stop.set()
+        if self._reader is not None:
+            # Join z zapasem na jeden pełny timeout blokującego read().
+            self._reader.join(timeout=DRAIN_TIMEOUT_S * 10 + 1)
+            self._reader = None
+
     def stop(self):
+        # NAJPIERW wątek: dopóki żyje, walczyłby o port z stop_measuring()
+        # i z opróżnianiem bufora przy zamykaniu.
+        self._join_reader()
         if self._measuring:
             self._ppk2.stop_measuring()
             self._measuring = False
@@ -178,11 +310,24 @@ class Ppk2ApiSampler:
     def close(self):
         if self._ppk2 is None:
             return
+        # Każdy krok w osobnym try: gdy padnie stop(), zasilanie płytki i tak
+        # MUSI zostać odcięte.
         try:
             self.stop()
-            self.dut_power(False)      # ODETNIJ zasilanie płytki
         except Exception:
             pass               # sprzątanie po błędzie – nie maskuj oryginału
+        try:
+            self.dut_power(False)      # ODETNIJ zasilanie płytki
+        except Exception:
+            pass
+        # Zostaw urządzenie ciche i z pustym buforem. Zamknięcie portu
+        # w środku strumienia próbek (przerwanie pomiaru Esc) zostawiało
+        # PPK2 w stanie, w którym następny pomiar nie ruszał bez fizycznego
+        # restartu urządzenia.
+        try:
+            self._quiesce()
+        except Exception:
+            pass
         # Jawnie zwolnij port szeregowy: ppk2-api nie ma metody close/
         # disconnect (port zamyka dopiero __del__/GC), a bez tego kolejne
         # otwarcie PPK2 potrafi trafić na zajęty port.
@@ -193,3 +338,4 @@ class Ppk2ApiSampler:
         except Exception:
             pass
         self._ppk2 = None
+        self._dut_on = False

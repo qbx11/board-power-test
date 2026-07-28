@@ -30,7 +30,7 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             app.query_one(f"#check_{name}", Checkbox).value = True
         app.query_one("#sample", Input).value = sample
         await pilot.pause()
-        await pilot.click("#start")
+        await self.click_ready(pilot, "#start")
         await pilot.pause()
 
     async def wait_until(self, pilot, cond, timeout=15.0, msg="warunek"):
@@ -43,13 +43,58 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
         self.fail(f"timeout: {msg}")
 
     @staticmethod
+    def _laid_out(screen, selector):
+        """Czy `selector` jest już na wierzchnim ekranie I MA ROZMIAR."""
+        # `any`, nie `all`: selektory zbiorcze (np. "Button") trafiają też
+        # w widgety celowo ukryte, które rozmiaru nigdy nie dostaną.
+        return any(n.size.width and n.size.height
+                   for n in screen.query(selector))
+
+    async def wait_for(self, pilot, selector, timeout=15.0):
+        await self.wait_until(
+            pilot, lambda a: self._laid_out(a.screen, selector),
+            timeout=timeout, msg=f"gotowy element {selector}")
+
+    async def click_ready(self, pilot, selector, timeout=15.0):
+        """Kliknij dopiero w UŁOŻONY element.
+
+        `push_screen` podmienia `app.screen` natychmiast, ale compose
+        i layout dzieją się dopiero w kolejnych cyklach pętli komunikatów.
+        Klik w tym oknie kończy się na dwa sposoby, oba widziane w tej
+        klasie testów: albo NoMatches (dziecka jeszcze nie ma), albo –
+        gorzej – widget istnieje, lecz ma rozmiar 0, więc pilot trafia
+        w punkt (0,0), klik przepada bez śladu i test wisi do timeoutu.
+        Dlatego czekamy na niezerowy rozmiar celu, nie na sam typ ekranu."""
+        await self.wait_for(pilot, selector, timeout)
+        await pilot.click(selector)
+
+    async def click_and_close(self, pilot, selector, timeout=15.0):
+        """Klik w przycisk dialogu + pewność, że dialog FAKTYCZNIE zniknął.
+        Bez tego kolejny krok testu ogląda jeszcze zamykany ekran i bierze
+        go za następny dialog (stąd np. szukanie '#flash' na oknie blokady
+        J-Linka)."""
+        screen = pilot.app.screen
+        await self.click_ready(pilot, selector, timeout)
+        await self.wait_until(pilot, lambda a: a.screen is not screen,
+                              timeout=timeout,
+                              msg=f"zamknięcie dialogu po {selector}")
+
+    @staticmethod
     def forward_button(screen):
         """Przycisk „idź dalej" napotkanego dialogu: w oknie pomiaru
-        pomijamy zapis, w oknie wgrywania flashujemy (ChoiceScreen z
-        „Zamknij okno"), w zwykłym potwierdzeniu klikamy 'tak'."""
+        pomijamy zapis, w oknie wgrywania flashujemy, w zwykłym
+        potwierdzeniu klikamy 'tak'.
+
+        ChoiceScreen występuje w KILKU wariantach (wgrywanie, blokada
+        J-Linka), więc rozstrzygamy po przyciskach faktycznie obecnych na
+        ekranie, a nie po samej klasie – inaczej na oknie blokady szukamy
+        '#flash', którego tam nie ma."""
         if isinstance(screen, tui.MeasureScreen):
             return "#skip"
         if isinstance(screen, tui.ChoiceScreen):
+            for candidate in ("#flash", "#ignore"):
+                if screen.query(candidate):
+                    return candidate
             return "#flash"
         return "#yes"
 
@@ -80,13 +125,14 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             if not isinstance(screen, (tui.ConfirmScreen, tui.ChoiceScreen,
                                        tui.MeasureScreen)):
                 return notes  # RunScreen zdjęty – jesteśmy na ekranie głównym
-            button = self.forward_button(screen)
-            # Klik z ponowieniem: pod obciążeniem zdarza się trafić w
-            # dialog, zanim się w pełni ułoży – wtedy klik idzie w pustkę.
+            # Dopiero ułożony dialog mówi, KTÓRY to wariant ChoiceScreen.
+            await self.wait_for(pilot, "Button")
+            button = self.forward_button(app.screen)
+            # Klik z ponowieniem: click_ready czeka na ułożony przycisk,
+            # ale gdyby dialog i tak nie zareagował, próbujemy jeszcze raz.
             for _ in range(5):
-                await pilot.pause()
-                await pilot.click(button)
                 try:
+                    await self.click_ready(pilot, button, timeout=3.0)
                     await self.wait_until(pilot,
                                           lambda a: a.screen is not screen,
                                           timeout=3.0,
@@ -95,7 +141,8 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 except AssertionError:
                     continue
             else:
-                self.fail("dialog nie zamknął się mimo ponawianych kliknięć")
+                self.fail(f"dialog {type(screen).__name__} nie zamknął się "
+                          f"mimo ponawianych kliknięć w {button}")
         self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
 
     async def drive_collecting_confirm_texts(self, pilot):
@@ -115,11 +162,14 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             if not isinstance(screen, (tui.ConfirmScreen, tui.ChoiceScreen,
                                        tui.MeasureScreen)):
                 return texts  # RunScreen zdjęty – koniec przebiegu
-            button = self.forward_button(screen)
+            # Dopiero ułożony dialog mówi, KTÓRY to wariant ChoiceScreen.
+            await self.wait_for(pilot, "Button")
+            button = self.forward_button(app.screen)
+            # Klik z ponowieniem: click_ready czeka na ułożony przycisk,
+            # ale gdyby dialog i tak nie zareagował, próbujemy jeszcze raz.
             for _ in range(5):
-                await pilot.pause()
-                await pilot.click(button)
                 try:
+                    await self.click_ready(pilot, button, timeout=3.0)
                     await self.wait_until(pilot,
                                           lambda a: a.screen is not screen,
                                           timeout=3.0,
@@ -128,7 +178,8 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 except AssertionError:
                     continue
             else:
-                self.fail("dialog nie zamknął się mimo ponawianych kliknięć")
+                self.fail(f"dialog {type(screen).__name__} nie zamknął się "
+                          f"mimo ponawianych kliknięć w {button}")
         self.fail("przebieg nie zakończył się w rozsądnej liczbie dialogów")
 
 
@@ -774,8 +825,12 @@ class TuiJlinkGuardTests(TuiHarness):
         return str(app.screen.query_one(".dialog-text").render())
 
     async def _wait_guard(self, pilot):
+        # Sam typ ekranu nie wystarcza: push_screen podmienia app.screen
+        # od razu, a treść dialogu pojawia się dopiero po compose.
         await self.wait_until(
-            pilot, lambda a: isinstance(a.screen, tui.ChoiceScreen),
+            pilot,
+            lambda a: (isinstance(a.screen, tui.ChoiceScreen)
+                       and self._laid_out(a.screen, ".dialog-text")),
             msg="dialog o zajętym J-Linku")
         text = self._dialog_text(pilot.app)
         self.assertIn("Sondę J-Link trzyma inny program", text)
@@ -787,7 +842,7 @@ class TuiJlinkGuardTests(TuiHarness):
         async with app.run_test(size=(120, 50)) as pilot:
             await self.start_run(pilot, ["zwykly"])
             await self._wait_guard(pilot)
-            await pilot.click("#abort")
+            await self.click_and_close(pilot, "#abort")
             await self.wait_until(
                 pilot,
                 lambda a: not isinstance(a.screen, (tui.RunScreen,
@@ -806,7 +861,7 @@ class TuiJlinkGuardTests(TuiHarness):
             await self.start_run(pilot, ["zwykly"])
             await self._wait_guard(pilot)
             self.env.jlink_owners = []       # udajemy zamknięcie nRF Connect
-            await pilot.click("#retry")
+            await self.click_and_close(pilot, "#retry")
             await self.click_through_run(pilot)
         self.assertTrue(any(c.startswith("west flash")
                             for c in self.env.commands()))
@@ -817,7 +872,7 @@ class TuiJlinkGuardTests(TuiHarness):
         async with app.run_test(size=(120, 50)) as pilot:
             await self.start_run(pilot, ["zwykly"])
             await self._wait_guard(pilot)
-            await pilot.click("#ignore")
+            await self.click_and_close(pilot, "#ignore")
             notes = await self.click_through_run(pilot)
         self.assertTrue(any("J-Link zajęty przez inny program" in n
                             for n in notes), notes)

@@ -100,8 +100,8 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(first.collapsed)
 
     async def test_apply_to_following_templates_new_cards(self):
-        # '…do następnych' zapamiętuje config; kolejny dodany pomiar go
-        # dziedziczy, ale istniejące karty zostają nietknięte.
+        # '…do następnych' zapamiętuje config – kolejny dodany pomiar go
+        # dziedziczy.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 60)) as pilot:
             await pilot.click("#mode-label-auto")
@@ -115,6 +115,43 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             _, second = list(app.query(tui.MeasurementCard))
             self.assertEqual(
                 second.query_one(".card-duration", Input).value, "77s")
+
+    async def test_apply_to_following_zmienia_istniejace_karty_nizej(self):
+        # REGRESJA (#24): przycisk działał tylko jako szablon dla pomiarów
+        # jeszcze nieutworzonych – karty już stojące niżej ignorował.
+        # Ma objąć wszystkie „niższe”, a wyższych nie ruszać.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second, third = list(app.query(tui.MeasurementCard))
+            for card, value in ((first, "1s"), (second, "2s"),
+                                (third, "3s")):
+                card.query_one(".card-duration", Input).value = value
+            second.query_one(".card-voltage", Input).value = "3.3"
+            app._apply_to_following(second.query_one(".card-apply-next",
+                                                     tui.Button))
+            await pilot.pause()
+            # niżej: przejęły ustawienia
+            self.assertEqual(
+                third.query_one(".card-duration", Input).value, "2s")
+            self.assertEqual(
+                third.query_one(".card-voltage", Input).value, "3.3")
+            # wyżej: nietknięte
+            self.assertEqual(
+                first.query_one(".card-duration", Input).value, "1s")
+            self.assertNotEqual(
+                first.query_one(".card-voltage", Input).value, "3.3")
+            # i nadal jest szablonem dla nowo dodanych
+            app.add_measurement()
+            await pilot.pause()
+            fourth = list(app.query(tui.MeasurementCard))[-1]
+            self.assertEqual(
+                fourth.query_one(".card-duration", Input).value, "2s")
 
     async def test_dodany_scenariusz_od_razu_do_wyboru_w_karcie(self):
         # Regresja: 'Dodaj kod' w trybie autonomicznym dopisywał wpis do
@@ -317,6 +354,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
                        "prad_uA": "0.9"})
         auto = {c: "" for c in core.CSV_FIELDS}
         auto.update({"data": "2026-01-02 10:00", "scenariusz": "lpn",
+                     "egzemplarz": "BTZ #7",
                      "prad_uA": "20.5", "pomiar_id": "1.1",
                      "parametr": "CONFIG_LPN_SENSOR_INTERVAL_S",
                      "wartosc": "10", "prad_min_uA": "-0.1",
@@ -349,6 +387,11 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             cols = tui.ResultsScreen.AUTO_COLS
             self.assertEqual(cells[cols.index("prad_uA")], "20.50")
             self.assertEqual(cells[cols.index("czas_s")], "120.00")
+            # REGRESJA: tryb autonomiczny gubił kolumnę z egzemplarzem
+            # płytki, więc w dzienniku z kilku płytek nie dało się
+            # odróżnić, czyj to wynik.
+            self.assertIn("egzemplarz", cols)
+            self.assertEqual(cells[cols.index("egzemplarz")], "BTZ #7")
 
     def test_sweep_str_and_step_label(self):
         S = tui.AutoRunScreen
@@ -479,6 +522,64 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             plan = app._build_auto_plan("btz")
             self.assertEqual(plan.steps[0].sample_rate, 1000)
+
+
+class LostSamplesWarningTest(unittest.TestCase):
+    """Od kiedy okno pomiaru zamyka zegar, zgubione próbki nie objawiają
+    się już przeciągniętym pomiarem – muszą być widoczne wprost."""
+
+    def _warned(self, data):
+        seen = []
+        screen = tui.AutoRunScreen.__new__(tui.AutoRunScreen)
+        screen.note = seen.append
+        tui.AutoRunScreen._warn_lost_samples(screen, data)
+        return seen
+
+    def test_ostrzega_przy_realnej_stracie(self):
+        out = self._warned({"samples": 5000, "lost_samples": 5000})
+        self.assertTrue(out)
+        self.assertIn("5,000", out[0])
+        self.assertIn("50%", out[0])
+
+    def test_milczy_przy_komplecie_i_drobnicy(self):
+        self.assertFalse(self._warned({"samples": 10000,
+                                       "lost_samples": 0}))
+        # drobne braki na styku odczytów (<2% okna) to nie awaria
+        self.assertFalse(self._warned({"samples": 10000,
+                                       "lost_samples": 100}))
+        self.assertFalse(self._warned({"samples": 0}))
+
+
+class CountdownFormatTest(unittest.TestCase):
+    """REGRESJA (#22): odliczanie w trybie autonomicznym zacinało się –
+    ta sama sekunda potrafiła wisieć dwa takty."""
+
+    def test_kolejne_sekundy_sie_nie_powtarzaja(self):
+        # Wartości spadające dokładnie co 1 s muszą dawać ZA KAŻDYM razem
+        # inny napis, niezależnie od tego, w którym miejscu sekundy
+        # wypadł odczyt. round() przy offsecie 0.5 pokazywało tę samą
+        # liczbę dwa razy z rzędu.
+        for offset in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9):
+            shown = [tui.AutoRunScreen._fmt_countdown(s + offset)
+                     for s in range(20, 0, -1)]
+            self.assertEqual(len(set(shown)), len(shown), (offset, shown))
+
+    def test_zero_dopiero_gdy_naprawde_koniec(self):
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(0.4), "00:01")
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(0.0), "00:00")
+        self.assertEqual(tui.AutoRunScreen._fmt_countdown(-3.0), "00:00")
+
+    def test_pozostalo_liczone_zegarem(self):
+        # Czas zegarowy ma pierwszeństwo przed osią próbek (ta przy
+        # zgubionych próbkach stoi w miejscu)…
+        self.assertEqual(
+            tui.AutoRunScreen._remaining_s(
+                {"duration_s": 60, "elapsed_s": 10.0,
+                 "wall_elapsed_s": 25.0}), 35.0)
+        # …ale zdarzenie bez czasu zegarowego nadal działa.
+        self.assertEqual(
+            tui.AutoRunScreen._remaining_s(
+                {"duration_s": 60, "elapsed_s": 10.0}), 50.0)
 
 
 if __name__ == "__main__":
