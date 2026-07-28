@@ -1971,7 +1971,9 @@ class PowerTestApp(App):
         self.scenarios = self.manifest.get("scenarios", {})
         if not self.boards or not self.scenarios:
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
-        self.mode = "standard"          # standard | auto
+        # Start w trybie autonomicznym: to jest tryb, w którym narzędzie
+        # samo mierzy (PPK2). Ręczny zostaje pod kliknięciem w przełącznik.
+        self.mode = "auto"              # standard | auto
         self._card_uid = 0              # licznik kart 'Pomiar N'
         self._card_template = None      # config dziedziczony przez nowe karty
 

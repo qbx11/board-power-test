@@ -37,6 +37,9 @@ przez zadany czas i zapisuje wynik. Kreator kart „Pomiar 1, 2, …” pozwala 
 pomiarów, każdy z własnym czasem, napięciem, warunkiem startu i opcjonalnym
 podglądem logów z portu szeregowego.
 
+Aplikacja startuje w trybie autonomicznym; na ręczny przełącza się
+kliknięciem w napis **„Pomiar ręczny”** u góry ekranu.
+
 ## Scenariusze i płytki
 
 Każdy pomiar to **scenariusz** (firmware repo + flagi, cudza aplikacja albo

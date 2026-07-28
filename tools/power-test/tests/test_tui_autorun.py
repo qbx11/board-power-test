@@ -46,21 +46,33 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
     def _card(self, app):
         return app.query_one(tui.MeasurementCard)
 
-    async def test_mode_toggle_reveals_wizard(self):
+    async def test_start_w_trybie_autonomicznym(self):
+        # Aplikacja startuje w trybie autonomicznym – to on mierzy sam
+        # (PPK2), więc kreator kart ma być widoczny bez klikania.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
-            self.assertEqual(app.mode, "standard")
-            # Karty ukryte, checklista widoczna w trybie ręcznym.
-            self.assertFalse(app.query_one("#measurements").display)
-            self.assertTrue(app.query_one("#scenarios").display)
-            await pilot.click("#mode-label-auto")
-            await pilot.pause()
             self.assertEqual(app.mode, "auto")
             self.assertTrue(app.query_one("#measurements").display)
             self.assertFalse(app.query_one("#scenarios").display)
             self.assertFalse(app.query_one("#swd_reminder").display)
             # Domyślnie jedna karta 'Pomiar 1'.
             self.assertEqual(len(list(app.query(tui.MeasurementCard))), 1)
+
+    async def test_mode_toggle_reveals_wizard(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            # Ręczny: checklista widoczna, karty ukryte.
+            await pilot.click("#mode-label-standard")
+            await pilot.pause()
+            self.assertEqual(app.mode, "standard")
+            self.assertFalse(app.query_one("#measurements").display)
+            self.assertTrue(app.query_one("#scenarios").display)
+            # ...i z powrotem do autonomicznego.
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            self.assertEqual(app.mode, "auto")
+            self.assertTrue(app.query_one("#measurements").display)
+            self.assertFalse(app.query_one("#scenarios").display)
 
     async def test_add_and_remove_measurements(self):
         app = tui.PowerTestApp()

@@ -23,8 +23,17 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
         self.env = FakeEnv()
         self.addCleanup(self.env.cleanup)
 
+    async def manual_mode(self, pilot):
+        """Przełącz na pomiar ręczny. Aplikacja startuje w trybie
+        autonomicznym, więc widgety trybu ręcznego (#scenarios, #check_*,
+        #reset) są wtedy ukryte i nie da się w nie kliknąć."""
+        await self.click_ready(pilot, "#mode-label-standard")
+        await self.wait_until(pilot, lambda a: a.mode == "standard",
+                              msg="przełączenie na tryb ręczny")
+
     async def start_run(self, pilot, names, sample="TEST #1"):
         """Zaznacz scenariusze, wpisz egzemplarz i kliknij Start."""
+        await self.manual_mode(pilot)
         app = pilot.app
         for name in names:
             app.query_one(f"#check_{name}", Checkbox).value = True
@@ -191,6 +200,7 @@ class TuiSetupTests(TuiHarness):
         # zaznaczać.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             checkbox = app.query_one("#check_zwykly", Checkbox)
             desc = app.query_one("#desc_zwykly", Static)
             self.assertFalse(checkbox.value)
@@ -234,6 +244,7 @@ class TuiSetupTests(TuiHarness):
     async def test_zaznacz_wszystkie_odzwierciedla_stan(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             from textual.widgets import Button
             button = app.query_one("#select_all", Button)
             self.assertFalse(button.has_class("pressed"))
@@ -296,6 +307,9 @@ class TuiAddTests(TuiHarness):
     async def test_dodaj_firmware_hex_przez_dialog(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            # Nowy wpis zaznacza się sam tylko w trybie ręcznym – tam
+            # checkbox znaczy „zmierz to”.
+            await self.manual_mode(pilot)
             await pilot.click("#add_fw")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -445,6 +459,7 @@ class TuiRemoveTests(TuiHarness):
     async def test_usuniecie_scenariusza_krzyzykiem(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             await pilot.click("#del_zrodlowy")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -462,6 +477,7 @@ class TuiRemoveTests(TuiHarness):
     async def test_anulowanie_nie_usuwa(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             await pilot.click("#del_zrodlowy")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -489,6 +505,9 @@ class TuiScenariosDialogTests(TuiHarness):
     async def test_przycisk_tylko_w_trybie_autonomicznym(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            # Start jest w trybie autonomicznym, więc przycisk widać od razu.
+            self.assertTrue(app.query_one("#scenarios_btn").display)
+            await self.manual_mode(pilot)
             self.assertFalse(app.query_one("#scenarios_btn").display)
             await pilot.click("#mode-label-auto")
             await pilot.pause()
