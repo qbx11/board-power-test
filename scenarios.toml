@@ -13,7 +13,7 @@
 
 [defaults]
 profile  = "btz"   # domyślny profil płytki (patrz [boards.*])
-voltage  = "3.0"   # napięcie źródła PPK2 [V]; w trybie autonomicznym TWARDY limit 2.0–3.3 V
+voltage  = "3.0"   # napięcie źródła PPK2 [V]; w trybie autonomicznym TWARDY limit 1.8–3.6 V
 settle_s = 5       # ile odczekać po odłączeniu SWD przed odczytem [s]
 
 # --- Profile płytek -----------------------------------------
@@ -88,7 +88,7 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # --- Własne scenariusze (custom) ----------------------------
 # Skopiuj wpis i zmień flagi; własny conf/overlay wrzuć do
 # scenarios/custom/. Napięcie można nadpisać per scenariusz
-# (tryb autonomiczny: TWARDY limit 2.0–3.3 V – wartości spoza zakresu
+# (tryb autonomiczny: TWARDY limit 1.8–3.6 V – wartości spoza zakresu
 # są odrzucane przed startem, żeby nie uszkodzić płytki).
 #
 # [scenarios.moj_test]

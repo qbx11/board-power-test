@@ -1063,7 +1063,7 @@ class MeasurementCard(Vertical):
                                 classes="card-serial-pattern")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
-                        yield Label("Napięcie (V, 2.0–3.3):")
+                        yield Label("Napięcie (V, 1.8–3.6):")
                         yield Input(value=c.get("voltage", "3.0"),
                                     classes="card-voltage")
                     with Vertical(classes="card-col"):
@@ -1239,7 +1239,7 @@ class Ppk2ConnectScreen(ModalScreen):
         with Vertical(classes="dialog"):
             yield Static("[b]Połączenie z PPK2[/b]", classes="dialog-text")
             yield Static("Napięcie: ustawiane per pomiar (domyślnie 3.0 V, "
-                         "limit 2.0–3.3 V).", classes="dialog-text")
+                         "limit 1.8–3.6 V).", classes="dialog-text")
             yield Static("[#888888]PPK2: niesprawdzony[/]", id="ppk2-status")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Połącz / sprawdź", id="ppk2_detect")

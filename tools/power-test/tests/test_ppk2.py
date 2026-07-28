@@ -66,12 +66,12 @@ def _boom(*_a, **_k):
 
 class VoltageGuardTest(unittest.TestCase):
     def test_parse_range_inclusive(self):
-        self.assertEqual(voltage_to_mV("2.0"), VOLTAGE_MIN_MV)
-        self.assertEqual(voltage_to_mV("3.3"), VOLTAGE_MAX_MV)
+        self.assertEqual(voltage_to_mV("1.8"), VOLTAGE_MIN_MV)
+        self.assertEqual(voltage_to_mV("3.6"), VOLTAGE_MAX_MV)
         self.assertEqual(voltage_to_mV(3.0), 3000)
 
     def test_parse_rejects_out_of_range(self):
-        for bad in ("1.9", "3.4", "5.0", "0", "-1"):
+        for bad in ("1.7", "3.7", "5.0", "0", "-1"):
             with self.assertRaises(ValueError, msg=bad):
                 voltage_to_mV(bad)
 
@@ -81,9 +81,9 @@ class VoltageGuardTest(unittest.TestCase):
                 voltage_to_mV(bad)
 
     def test_check_voltage_mV_guard(self):
-        self.assertEqual(ppk2.check_voltage_mV(2000), 2000)
-        self.assertEqual(ppk2.check_voltage_mV(3300), 3300)
-        for bad in (1999, 3301, 5000, 0):
+        self.assertEqual(ppk2.check_voltage_mV(1800), 1800)
+        self.assertEqual(ppk2.check_voltage_mV(3600), 3600)
+        for bad in (1799, 3601, 5000, 0):
             with self.assertRaises(ppk2.Ppk2Error):
                 ppk2.check_voltage_mV(bad)
 
@@ -92,12 +92,12 @@ class VoltageGuardTest(unittest.TestCase):
         groźnego napięcia do urządzenia."""
         s = ppk2.Ppk2ApiSampler()
         s._ppk2 = FakePPK2()
-        s.set_voltage(3300)
-        self.assertEqual(s._ppk2.voltages, [3300])   # bezpieczne przeszło
+        s.set_voltage(3600)
+        self.assertEqual(s._ppk2.voltages, [3600])   # bezpieczne przeszło
         with self.assertRaises(ppk2.Ppk2Error):
             s.set_voltage(5000)                       # groźne odrzucone
         # do urządzenia NIE poszła groźna komenda
-        self.assertEqual(s._ppk2.voltages, [3300])
+        self.assertEqual(s._ppk2.voltages, [3600])
 
     def test_start_realigns_stream(self):
         # start() musi wyczyścić bufor portu i wyzerować `remainder`, żeby

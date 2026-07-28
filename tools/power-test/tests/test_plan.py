@@ -195,14 +195,14 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("profil" in e for e in errs))
 
     def test_voltage_out_of_range_rejected(self):
-        for bad in ("5.0", "1.5", "3.4", "0"):
+        for bad in ("5.0", "1.5", "3.7", "0"):
             errs = planmod.validate_plan(
                 self._plan(voltage=bad), MANIFEST)
             self.assertTrue(any("napięcie" in e for e in errs),
                             f"powinien odrzucić {bad}")
 
     def test_voltage_in_range_ok(self):
-        for good in ("2.0", "3.0", "3.3"):
+        for good in ("1.8", "3.0", "3.6"):
             errs = planmod.validate_plan(
                 self._plan(voltage=good), MANIFEST)
             self.assertEqual(errs, [], f"powinien przyjąć {good}")

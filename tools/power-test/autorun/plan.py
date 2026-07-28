@@ -24,11 +24,11 @@ ERROR_POLICIES = ("skip", "abort")
 # PPK2 fizycznie potrafi 800–5000 mV (a biblioteka ppk2-api klampuje
 # dopiero do 5000 mV), więc bez własnego ograniczenia dałoby się podać
 # na płytkę np. 5 V i ją zniszczyć. Trzymamy bezpieczny zakres dla
-# układów nRF: minimum 2.0 V, maksimum 3.3 V (włącznie). Limit jest
+# układów nRF: minimum 1.8 V, maksimum 3.6 V (włącznie). Limit jest
 # egzekwowany DWUKROTNIE: przy walidacji planu (błąd przed startem) i w
 # sterowniku PPK2 (autorun/ppk2.py) tuż przed komendą do urządzenia.
-VOLTAGE_MIN_MV = 2000
-VOLTAGE_MAX_MV = 3300
+VOLTAGE_MIN_MV = 1800
+VOLTAGE_MAX_MV = 3600
 
 _DUR_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([smh])", re.IGNORECASE)
 
