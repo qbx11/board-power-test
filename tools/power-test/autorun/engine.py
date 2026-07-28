@@ -42,6 +42,12 @@ READ_INTERVAL_S = 0.01     # ~10 ms między odczytami portu PPK2
 # Przy takich brakach średnia nie opisuje już przebiegu prądu.
 MAX_LOST_FRACTION = 0.05
 MEASURE_ATTEMPTS = 2       # pierwotny pomiar + jedno powtórzenie
+# Okno wskaźnika „teraz” w UI. Statusy lecą co 1 s, ale liczenie „teraz”
+# z całej sekundy dawało średnią ze 100 000 próbek – jej błąd standardowy
+# to ułamek promila, więc na ekranie stała ta sama liczba do końca pomiaru
+# i wyglądało to jak zawieszony odczyt. Krótsze okno pokazuje, co płytka
+# robi TERAZ, a nie ile wyniosła średnia z ostatniej sekundy.
+INST_WINDOW_S = 0.1
 # Płytka po flashu resetuje się i przechodzi rozruch – pierwsze sekundy
 # to prąd bootowania, nie prąd scenariusza. Dlatego każdy start "po
 # czasie" ma tu podłogę. NIE dodajemy jej do czasu z planu, tylko bierzemy
@@ -536,6 +542,12 @@ class AutoRunner:
         # potrafią zjeść kilkadziesiąt ms, a przy „od poprzedniego” ten
         # naddatek kumulował się i sekundy na ekranie robiły się dłuższe.
         next_status = expected_base
+        # Okno „teraz”: własna, krótsza siatka. `last_inst` trzyma ostatnie
+        # ZAMKNIĘTE okno, żeby wartość nie zależała od tego, ile milisekund
+        # przed statusem akurat wpadł ostatni odczyt.
+        inst_sum, inst_n = 0.0, 0
+        next_inst = expected_base + INST_WINDOW_S
+        last_inst = None
         reported_deficit = 0
         try:
             while True:
@@ -546,6 +558,11 @@ class AutoRunner:
                         time.monotonic() - expected_base)
                     expected_base += paused_s
                     next_status += paused_s
+                    # Okno „teraz” przesuwamy tak samo i zaczynamy je od
+                    # nowa: próbki sprzed pauzy nie należą do tego samego
+                    # kawałka przebiegu co te po wznowieniu.
+                    next_inst += paused_s
+                    inst_sum, inst_n = 0.0, 0
                     last_data = time.monotonic()
                     continue
                 # KONIEC: zamknięte okno czasowe (pauzy się nie liczą) albo
@@ -595,8 +612,23 @@ class AutoRunner:
                     if over > 0:
                         chunk = chunk[:len(chunk) - int(over)]
                     writer.write_samples(chunk)
-                    sec_sum += float(chunk.sum())
+                    # Jedna suma karmi oba okna: sekundowe (status.json dla
+                    # viewera) i krótkie („teraz” w UI).
+                    chunk_sum = float(chunk.sum())
+                    sec_sum += chunk_sum
                     sec_n += len(chunk)
+                    inst_sum += chunk_sum
+                    inst_n += len(chunk)
+                if now >= next_inst:
+                    # Puste okno (niska częstotliwość po decymacji, przerwa
+                    # w danych) NIE kasuje wskazania – zostaje ostatnie
+                    # znane, zamiast migać na „—”.
+                    if inst_n:
+                        last_inst = inst_sum / inst_n
+                    inst_sum, inst_n = 0.0, 0
+                    next_inst += INST_WINDOW_S
+                    if next_inst <= now:
+                        next_inst = now + INST_WINDOW_S
                 if now >= next_status:
                     # Rozliczenie zgubionych próbek: ile powinno przyjść
                     # wg zegara vs ile przyszło (w jednostkach efektywnej
@@ -608,9 +640,17 @@ class AutoRunner:
                     if deficit > eff_rate * 0.2:
                         writer.record_gap(deficit)
                         reported_deficit += deficit
-                    inst = sec_sum / sec_n if sec_n else None
+                    # „teraz” = ostatnie zamknięte okno INST_WINDOW_S; przy
+                    # pomiarze krótszym niż to okno bierzemy to, co jest,
+                    # żeby pierwszy status nie pokazywał „—”.
+                    inst = last_inst
+                    if inst is None and inst_n:
+                        inst = inst_sum / inst_n
                     avg = writer.avg_uA           # skumulowana od startu
-                    writer.update_status("measuring", inst)
+                    # status.json zostaje przy średniej SEKUNDOWEJ – pole
+                    # nazywa się avg_1s_uA i viewer czyta je jako sekundę.
+                    writer.update_status(
+                        "measuring", sec_sum / sec_n if sec_n else None)
                     self._emit("live", idx, step.scenario, data={
                         "avg_uA": round(avg, 3) if avg is not None else None,
                         "inst_uA": round(inst, 3) if inst is not None else None,

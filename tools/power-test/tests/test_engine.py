@@ -10,6 +10,8 @@ import threading
 import time
 import unittest
 
+import numpy as np
+
 from common import FakeEnv
 from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
@@ -30,6 +32,26 @@ class _LossySampler(FakeSampler):
     def read(self):
         chunk = super().read()
         return chunk[:int(len(chunk) * self.keep)]
+
+
+class _StepSampler(FakeSampler):
+    """Prąd skacze z `low` na `high` po `switch_s` od startu pomiaru.
+    Średnia z całej sekundy wypada wtedy POŚRODKU obu poziomów, a średnia
+    z krótkiego okna trafia w poziom bieżący – to rozróżnia oba okna."""
+
+    def __init__(self, switch_s=0.5, low=10.0, high=1000.0, **kw):
+        super().__init__(**kw)
+        self.switch_s = switch_s
+        self.low = low
+        self.high = high
+
+    def read(self):
+        chunk = super().read()
+        if not len(chunk):
+            return chunk
+        level = (self.high if time.monotonic() - self._t0 >= self.switch_s
+                 else self.low)
+        return np.full(len(chunk), level, np.float32)
 
 
 def _plan(**step):
@@ -276,6 +298,54 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(live)
         self.assertIn("avg_uA", live[-1].data)
         self.assertIn("inst_uA", live[-1].data)
+
+    def test_teraz_pokazuje_krotkie_okno_a_nie_cala_sekunde(self):
+        # REGRESJA: „teraz” liczone z całej sekundy to średnia ze 100 000
+        # próbek – jej błąd standardowy jest tak mały, że na ekranie stała
+        # ta sama liczba do końca pomiaru. Prąd skacze tu w połowie okna:
+        # średnia sekundowa dałaby ~505 (pół na pół), krótkie okno musi
+        # pokazać poziom bieżący.
+        self.sampler = _StepSampler(sample_rate=2000, switch_s=0.5,
+                                    low=10.0, high=1000.0)
+        self._run(_plan(duration_s=1.5,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        live = [ev for ev in self.events if ev.kind == "live"]
+        self.assertTrue(live)
+        inst = live[-1].data["inst_uA"]
+        self.assertGreater(inst, 900,
+                           f"'teraz' = {inst} – wygląda na średnią z całej "
+                           f"sekundy, nie z ostatnich 100 ms")
+        # Kontrola: średnia SKUMULOWANA ma dalej mieszać oba poziomy,
+        # inaczej test przechodziłby też przy zepsutej średniej.
+        avg = live[-1].data["avg_uA"]
+        self.assertLess(avg, 800, f"średnia skumulowana = {avg}")
+
+    def test_status_json_zostaje_przy_sredniej_sekundowej(self):
+        # Pole w status.json nazywa się avg_1s_uA i viewer czyta je jako
+        # średnią SEKUNDOWĄ – skrócenie okna „teraz” w UI nie ma go po
+        # cichu podmienić na wartość z krótkiego okna.
+        from autorun import session as sessmod
+        seen = []
+        orig = sessmod.SessionWriter.update_status
+
+        def spy(writer, state, avg_1s_uA=None):
+            seen.append((state, avg_1s_uA))
+            return orig(writer, state, avg_1s_uA)
+
+        sessmod.SessionWriter.update_status = spy
+        self.addCleanup(setattr, sessmod.SessionWriter, "update_status",
+                        orig)
+        self.sampler = _StepSampler(sample_rate=2000, switch_s=0.5,
+                                    low=10.0, high=1000.0)
+        self._run(_plan(duration_s=1.5,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        vals = [v for state, v in seen
+                if state == "measuring" and v is not None]
+        self.assertTrue(vals, "brak statusu z trwającego pomiaru")
+        # Sekunda miesza oba poziomy (~505); poziom bieżący to 1000.
+        self.assertLess(vals[-1], 900,
+                        f"status.json dostał {vals[-1]} – to wygląda na "
+                        "wartość z krótkiego okna, nie z sekundy")
 
     def test_pause_and_resume(self):
         # Stop (pause) tuż po starcie pomiaru, po chwili wznów – pomiar
