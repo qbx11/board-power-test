@@ -76,22 +76,146 @@ Desktop**, nie tylko kartę aplikacji.
 
 ## Serie pomiarów (sweep parametru)
 
-W trybie autonomicznym każda karta **„Pomiar N"** może być **serią**: w
-ustawieniach zaawansowanych włącz *„Seria: sweep parametru"*, podaj symbol
-Kconfig (np. `CONFIG_LPN_SENSOR_INTERVAL_S`) i listę wartości
-(`1, 2, 5, 10, 20, 30, 60, 120, 300, 600`). Jedna karta rozwija się wtedy na
-osobne pomiary **„Pomiar N.1, N.2, …"** - każdy budowany z inną flagą
-`-DCONFIG_...=<wartość>` (osobny obraz, obrazy się nie nadpisują), mierzony
-niezależnie i zapisany jako **osobny wiersz** w dzienniku. Kolumny
-`parametr`/`wartosc` (oraz `pomiar_id` = „N.M") mówią, której wartości dotyczy
-dany pomiar; wszystkie kroki serii dostają ten sam czas i warunek startu co
-karta.
+Seria to jedna karta „Pomiar N", która rozwija się na wiele pomiarów.
+Narzędzie buduje osobny obraz dla każdej wartości parametru.
+Każdy pomiar dostaje osobny wiersz w dzienniku.
 
-Żeby flaga działała, parametr musi być **symbolem Kconfig** w budowanej
-aplikacji (nie `#define`). Przykład: aplikacje `lpn`/`lpn_mock` mają
-`CONFIG_LPN_SENSOR_INTERVAL_S` (interwał wysyłki temperatury do Frienda,
-domyślnie 10 s) - dodawanie kolejnych parametrów to wpis w `Kconfig` aplikacji
-+ odczyt przez `CONFIG_...` w kodzie.
+Seria działa tylko w trybie autonomicznym.
+Tryb ręczny i pliki planów `plans/*.toml` nie obsługują serii.
+
+Przykład poniżej używa aplikacji LPN.
+Parametr `CONFIG_LPN_SENSOR_INTERVAL_S` ustawia odstęp między publikacjami
+temperatury do Frienda.
+
+### 1. Dodaj parametr do Kconfig aplikacji
+
+Parametr musi być symbolem Kconfig budowanej aplikacji.
+Flaga builda nie zmieni stałej `#define`.
+
+Otwórz plik `Kconfig` w katalogu głównym aplikacji.
+Dopisz symbol z typem, wartością domyślną i zakresem.
+
+```kconfig
+# app/apps/lpn/Kconfig
+config LPN_SENSOR_INTERVAL_S
+	int "Interwal odczytu i publikacji temperatury do Frienda [s]"
+	default 10
+	range 1 86400
+	help
+	  Odstep miedzy kolejnymi publikacjami Sensor Server -> Friend.
+	  Sterowane build-time: -DCONFIG_LPN_SENSOR_INTERVAL_S=<sekundy>.
+
+source "Kconfig.zephyr"
+```
+
+Ustaw wartość domyślną na dotychczasowe zachowanie.
+Build bez flagi daje wtedy ten sam wynik co przedtem.
+
+Ostrzeżenie: plik musi kończyć się linią `source "Kconfig.zephyr"`.
+Bez tej linii build nie widzi symboli Zephyra.
+
+### 2. Odczytaj parametr w kodzie
+
+Zastąp stałą `#define` symbolem Kconfig.
+Zostaw fallback na build bez app-level Kconfig.
+
+```c
+/* app/apps/lpn/src/main.c */
+#ifndef CONFIG_LPN_SENSOR_INTERVAL_S
+#define CONFIG_LPN_SENSOR_INTERVAL_S 10
+#endif
+#define SENSOR_READ_INTERVAL   K_SECONDS(CONFIG_LPN_SENSOR_INTERVAL_S)
+
+static void sensor_read_work_handler(struct k_work *work)
+{
+	model_handler_publish_temp();
+	/* Przeplanuj siebie -> odczyt i publikacja co SENSOR_READ_INTERVAL. */
+	k_work_reschedule(&sensor_read_work, SENSOR_READ_INTERVAL);
+}
+```
+
+### 3. Dodaj scenariusz z aplikacją
+
+Naciśnij „Dodaj kod" na ekranie głównym.
+Wpisz ścieżkę do katalogu aplikacji w pole „Ścieżka".
+Ścieżka względna liczy się od katalogu repo.
+
+Naciśnij „Przeglądaj…", aby wskazać katalog w eksploratorze.
+Eksplorator startuje z katalogu nad repo.
+
+Wpisz nazwę i opis.
+Oba pola są opcjonalne.
+Naciśnij „Dodaj".
+
+Narzędzie rozpoznaje rodzaj firmware po ścieżce.
+Katalog aplikacji dostaje wariant `source` i build west-em.
+Plik `.hex` dostaje wariant `hex` i pomija build.
+
+Ostrzeżenie: seria wymaga wariantu `source`.
+Narzędzie odrzuca serię na wariancie `hex` przed startem przebiegu.
+
+Nowy scenariusz jest od razu na liście kart, bez restartu.
+Narzędzie dopisuje wpis do `scenarios.toml`.
+Przenieś wpis do `scenarios.local.toml`, gdy nie chcesz go na remote.
+
+### 4. Włącz serię na karcie pomiaru
+
+Uruchom tryb autonomiczny.
+Wybierz swój scenariusz na karcie „Pomiar N".
+Podaj czas jednego pomiaru, na przykład `20m`.
+Rozwiń „Ustawienia zaawansowane".
+Włącz „Seria: sweep parametru (jedna karta = wiele pomiarów)".
+
+### 5. Podaj parametr i wartości
+
+Wpisz symbol Kconfig w pole „Parametr".
+Narzędzie przyjmuje trzy zapisy tej samej nazwy:
+
+```text
+CONFIG_LPN_SENSOR_INTERVAL_S
+LPN_SENSOR_INTERVAL_S
+-DCONFIG_LPN_SENSOR_INTERVAL_S
+```
+
+Wpisz wartości w pole „Wartości".
+Rozdziel wartości przecinkiem albo spacją.
+
+```text
+Parametr:  CONFIG_LPN_SENSOR_INTERVAL_S
+Wartości:  10, 30, 50
+```
+
+Narzędzie zachowuje kolejność wartości.
+Narzędzie usuwa duplikaty i zostawia pierwsze wystąpienie.
+Zwinięta karta pokazuje dopisek `· sweep CONFIG_LPN_SENSOR_INTERVAL_S ×3`.
+
+### 6. Sprawdź plan przed startem
+
+Karta „Pomiar N" rozwija się na kroki „Pomiar N.1, N.2, …".
+Każdy krok dostaje jedną flagę builda:
+
+```sh
+west build ... -- -DCONFIG_LPN_SENSOR_INTERVAL_S=10   # Pomiar N.1
+west build ... -- -DCONFIG_LPN_SENSOR_INTERVAL_S=30   # Pomiar N.2
+west build ... -- -DCONFIG_LPN_SENSOR_INTERVAL_S=50   # Pomiar N.3
+```
+
+Wszystkie kroki serii dziedziczą z karty czas, napięcie, warunek startu i zapis.
+Policz czas całego przebiegu przed startem.
+Trzy wartości po 20 minut zajmują godzinę, plus build każdego obrazu.
+
+### 7. Uruchom przebieg
+
+Narzędzie buduje obraz tuż przed jego pomiarem.
+Każda kombinacja flag dostaje własny katalog builda:
+
+```text
+build_lpn         -> CONFIG_LPN_SENSOR_INTERVAL_S=10
+build_lpn_krok2   -> CONFIG_LPN_SENSOR_INTERVAL_S=30
+build_lpn_krok3   -> CONFIG_LPN_SENSOR_INTERVAL_S=50
+```
+
+Obrazy nie nadpisują się.
 
 ## Wyniki
 
