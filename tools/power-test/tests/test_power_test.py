@@ -345,6 +345,39 @@ class BuildSkipTests(unittest.TestCase):
             pristine="always")
         self.assertTrue(core.build_up_to_date(self.build_dir, cmd_pristine))
 
+    def _przygotuj_gotowy_build_sysbuild(self, domena="board-power-test"):
+        """Układ katalogów jak po `west build` z sysbuildem: <build>/zephyr/
+        istnieje, ale obraz leży w <build>/<domena>/zephyr/."""
+        root = core.ROOT / self.build_dir
+        (root / "zephyr").mkdir(parents=True)     # pusty, jak u sysbuilda
+        app = root / domena / "zephyr"
+        app.mkdir(parents=True)
+        (app / "zephyr.hex").write_text(":00000001FF\n")
+        (root / "domains.yaml").write_text(
+            f"default: {domena}\nbuild_dir: {root}\ndomains:\n"
+            f"  - name: {domena}\n    build_dir: {root / domena}\n",
+            encoding="utf-8")
+        core.record_build(self.build_dir, self.cmd)
+
+    def test_gotowy_build_sysbuilda_jest_wykrywany(self):
+        # REGRESJA: sysbuild kładzie obraz w podkatalogu domeny, a
+        # sprawdzanie tylko <build>/zephyr/zephyr.hex dawało "brak obrazu"
+        # przy komplecie plików – każdy przebieg budował wszystko od nowa.
+        self._przygotuj_gotowy_build_sysbuild()
+        self.assertIsNotNone(core.built_hex(self.build_dir))
+        self.assertTrue(core.build_up_to_date(self.build_dir, self.cmd))
+
+    def test_sysbuild_bez_obrazu_wymaga_builda(self):
+        # Sam domains.yaml nie wystarcza – bez hexa build musi ruszyć
+        # (przerwany build zostawia metadane bez obrazu).
+        root = core.ROOT / self.build_dir
+        root.mkdir(parents=True)
+        (root / "domains.yaml").write_text("default: board-power-test\n",
+                                           encoding="utf-8")
+        core.record_build(self.build_dir, self.cmd)
+        self.assertIsNone(core.built_hex(self.build_dir))
+        self.assertFalse(core.build_up_to_date(self.build_dir, self.cmd))
+
     def test_inna_komenda_uniewaznia_build(self):
         self._przygotuj_gotowy_build()
         inne = self.cmd + ["-DEXTRA_CONF_FILE=inny.conf"]
