@@ -526,6 +526,40 @@ def _build_fingerprint(cmd):
     return shlex.join(out)
 
 
+def _default_domain(build_path):
+    """Nazwa domyślnej domeny sysbuilda z domains.yaml (albo None).
+    Czytamy jedną linię zamiast wciągać zależność od parsera YAML –
+    plik generuje west i ma stały, prosty kształt."""
+    try:
+        text = (build_path / "domains.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("default:"):
+            return line.split(":", 1)[1].strip().strip("\"'") or None
+    return None
+
+
+def built_hex(build_dir):
+    """Ścieżka do obrazu zbudowanego w `build_dir` albo None.
+
+    Zwykły build kładzie obraz w <build>/zephyr/zephyr.hex, ale sysbuild
+    (domyślny w nowszych NCS) buduje aplikację do PODKATALOGU domeny –
+    <build>/zephyr/ wtedy istnieje, tylko nie ma w nim hexa. Szukanie
+    obrazu wyłącznie na pierwszej ścieżce sprawiało, że gotowy build
+    nigdy nie był rozpoznawany i każdy przebieg budował od nowa."""
+    d = ROOT / build_dir
+    direct = d / "zephyr" / "zephyr.hex"
+    if direct.is_file():
+        return direct
+    domain = _default_domain(d)
+    if domain:
+        image = d / domain / "zephyr" / "zephyr.hex"
+        if image.is_file():
+            return image
+    return None
+
+
 def build_up_to_date(build_dir, cmd):
     """Czy build_<scenariusz>/ ma gotowy obraz zbudowany DOKŁADNIE tą
     komendą (płytka, flagi, źródło)? Jeśli tak, build można pominąć.
@@ -533,9 +567,8 @@ def build_up_to_date(build_dir, cmd):
     Uwaga: zmiany w samych plikach źródłowych nie są śledzone – od
     wymuszenia świeżego builda jest --pristine (CLI) / 'Wymuś pełny
     rebuild' (TUI)."""
-    d = ROOT / build_dir
-    marker = d / ".bpt_build_cmd"
-    return ((d / "zephyr" / "zephyr.hex").is_file() and marker.is_file()
+    marker = ROOT / build_dir / ".bpt_build_cmd"
+    return (built_hex(build_dir) is not None and marker.is_file()
             and marker.read_text(encoding="utf-8").strip()
             == _build_fingerprint(cmd))
 
