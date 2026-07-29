@@ -327,9 +327,9 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "10m"
-            card.query_one(".card-sweep-param", Input).value = \
+            card.field(".card-sweep-param").value = \
                 "CONFIG_LPN_SENSOR_INTERVAL_S"
-            card.query_one(".card-sweep-values", Input).value = "1, 5, 10"
+            card.field(".card-sweep-values").value = "1, 5, 10"
             await pilot.pause()
             plan = app._build_auto_plan("btz")
             self.assertEqual(len(plan.steps), 3)
@@ -353,10 +353,10 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "10m"
-            card.query_one(".card-sweep-param", Input).value = "CONFIG_P1"
-            card.query_one(".card-sweep-values", Input).value = "10, 20, 30"
-            card.query_one(".card-sweep-param2", Input).value = "CONFIG_P2"
-            card.query_one(".card-sweep-values2", Input).value = "100, 200"
+            card.field(".card-sweep-param").value = "CONFIG_P1"
+            card.field(".card-sweep-values").value = "10, 20, 30"
+            card.field(".card-sweep-param2").value = "CONFIG_P2"
+            card.field(".card-sweep-values2").value = "100, 200"
             await pilot.pause()
             plan = app._build_auto_plan("btz")
             self.assertEqual([s.sweep for s in plan.steps], [
@@ -388,14 +388,14 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "10m"
-            card.query_one(".card-sweep-values", Input).value = "1, 2"
-            card.query_one(".card-sweep-param2", Input).value = "CONFIG_P2"
+            card.field(".card-sweep-values").value = "1, 2"
+            card.field(".card-sweep-param2").value = "CONFIG_P2"
             await pilot.pause()
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
             # Odwrotnie też: wartości bez nazwy parametru.
-            card.query_one(".card-sweep-param2", Input).value = ""
-            card.query_one(".card-sweep-values2", Input).value = "100, 200"
+            card.field(".card-sweep-param2").value = ""
+            card.field(".card-sweep-values2").value = "100, 200"
             await pilot.pause()
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
@@ -412,8 +412,8 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "10m"
-            card.query_one(".card-sweep-param", Input).value = "CONFIG_P1"
-            card.query_one(".card-sweep-values", Input).value = ""
+            card.field(".card-sweep-param").value = "CONFIG_P1"
+            card.field(".card-sweep-values").value = ""
             await pilot.pause()
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
@@ -437,7 +437,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_zakladki_protokolu_karta_startuje_na_ble_mesh(self):
         # Trzy protokoły u góry ustawień zaawansowanych; domyślnie BLE Mesh,
-        # bo tylko on ma dziś wypełnione pola.
+        # bo od niego zaczynaliśmy.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 70)) as pilot:
             await pilot.click("#mode-label-auto")
@@ -450,11 +450,19 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([p.id for p in tabs.query(tui.TabPane)],
                              ["ble_mesh", "thread", "zigbee"])
             self.assertEqual(card.protocol(), "ble_mesh")
-            # Pola serii i monitora siedzą w zakładce BLE Mesh, nie luzem.
-            for cls in (".card-sweep-param", ".card-sweep-values2",
-                        ".card-serial-port", ".card-serial-pattern"):
-                self.assertEqual(len(tabs.get_pane("ble_mesh").query(cls)), 1,
-                                 cls)
+            # Serię ma każdy protokół, monitor dongla wszystkie oprócz
+            # Threada – i wszystko siedzi w swoim panelu, nie luzem w karcie.
+            for proto in ("ble_mesh", "thread", "zigbee"):
+                pane = tabs.get_pane(proto)
+                for cls in (".card-sweep-param", ".card-sweep-values",
+                            ".card-sweep-param2", ".card-sweep-values2"):
+                    self.assertEqual(len(pane.query(cls)), 1,
+                                     f"{proto} {cls}")
+                for cls in (".card-serial-port", ".card-serial-pattern"):
+                    self.assertEqual(len(pane.query(cls)),
+                                     0 if proto == "thread" else 1,
+                                     f"{proto} {cls}")
+                self.assertIsNone(card.field(".card-serial-port", "thread"))
 
     async def test_start_po_czasie_i_rtt_schowane_ale_zywe(self):
         # "Start pomiaru po czasie" i "Konsola RTT" znikają z widoku, ale
@@ -480,10 +488,10 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].trigger.type, "delay")
             self.assertEqual(plan.steps[0].trigger.seconds, 0)
 
-    async def test_protokol_thread_daje_zwykly_pomiar(self):
-        # Thread/Zigbee to na razie TO DO: pomiar ma ruszyć normalnie, ale
-        # bez serii i bez monitora dongla – nawet gdy pola BLE Mesh zostały
-        # wcześniej wypełnione.
+    async def test_pola_protokolow_nie_mieszaja_sie(self):
+        # Każda zakładka ma własne pola: seria wpisana w BLE Mesh nie może
+        # wyjść na Threadzie, bo symbol Kconfig z mesha nie istnieje w tamtym
+        # stosie. Thread nie ma też monitora dongla.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 70)) as pilot:
             await pilot.click("#mode-label-auto")
@@ -491,23 +499,52 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "10m"
-            card.query_one(".card-sweep-param", Input).value = "CONFIG_P1"
-            card.query_one(".card-sweep-values", Input).value = "1, 2, 3"
-            card.query_one(".card-serial-port", Input).value = "/dev/ttyACM1"
-            card.query_one(".card-serial-pattern", Input).value = "gotowe"
+            card.field(".card-sweep-param").value = "CONFIG_MESH"
+            card.field(".card-sweep-values").value = "1, 2, 3"
+            card.field(".card-serial-port").value = "/dev/ttyACM1"
+            card.field(".card-serial-pattern").value = "gotowe"
             card.query_one(".card-proto", tui.TabbedContent).active = "thread"
             await pilot.pause()
             self.assertEqual(card.protocol(), "thread")
             plan = app._build_auto_plan("btz")
-            self.assertEqual(len(plan.steps), 1)
+            self.assertEqual(len(plan.steps), 1)       # pusta zakładka
             self.assertEqual(plan.steps[0].sweep, [])
             self.assertEqual(plan.steps[0].monitor_port, "")
-            self.assertEqual(plan.steps[0].trigger.type, "delay")
             # Zwinięta karta nie obiecuje serii, której nie będzie.
             card.set_collapsed(True)
             await pilot.pause()
             title = str(card.query_one(".card-title", tui.CardTitle).render())
             self.assertNotIn("sweep", title)
+            # Wpisy z BLE Mesh czekają w swojej zakładce nietknięte.
+            self.assertEqual(card.field(".card-sweep-values", "ble_mesh").value,
+                             "1, 2, 3")
+
+    async def test_seria_dziala_w_kazdym_protokole(self):
+        # Serię ma teraz każdy protokół, a Zigbee dodatkowo monitor dongla.
+        for proto, port in (("thread", ""), ("zigbee", "/dev/ttyACM3")):
+            with self.subTest(proto=proto):
+                app = tui.PowerTestApp()
+                async with app.run_test(size=(120, 70)) as pilot:
+                    await pilot.click("#mode-label-auto")
+                    await pilot.pause()
+                    card = self._card(app)
+                    card.query_one(".card-proto",
+                                   tui.TabbedContent).active = proto
+                    await pilot.pause()
+                    card.query_one(".card-scenario", Select).value = "zwykly"
+                    card.query_one(".card-duration", Input).value = "10m"
+                    card.field(".card-sweep-param").value = "CONFIG_X"
+                    card.field(".card-sweep-values").value = "10, 20"
+                    if port:
+                        card.field(".card-serial-port").value = port
+                    await pilot.pause()
+                    plan = app._build_auto_plan("btz")
+                    self.assertEqual([s.label for s in plan.steps],
+                                     ["1.1", "1.2"])
+                    self.assertEqual(plan.steps[1].build_extra_args,
+                                     ["-DCONFIG_X=20"])
+                    self.assertTrue(all(s.monitor_port == port
+                                        for s in plan.steps))
 
     async def test_protokol_przenosi_sie_do_wszystkich_kart(self):
         app = tui.PowerTestApp()
@@ -713,8 +750,8 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card = self._card(app)
             card.query_one(".card-scenario", Select).value = "zwykly"
             card.query_one(".card-duration", Input).value = "30s"
-            card.query_one(".card-serial-port", Input).value = "/dev/ttyACM1"
-            card.query_one(".card-serial-pattern", Input).value = \
+            card.field(".card-serial-port").value = "/dev/ttyACM1"
+            card.field(".card-serial-pattern").value = \
                 "Friendship z LPN nawiazany"
             await pilot.pause()
             plan = app._build_auto_plan("btz")
@@ -731,12 +768,12 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             app.add_measurement()
             await pilot.pause()
             first, second = list(app.query(tui.MeasurementCard))
-            first.query_one(".card-serial-port", Input).value = "/dev/ttyACM2"
+            first.field(".card-serial-port").value = "/dev/ttyACM2"
             await pilot.pause()
             app._apply_to_all(first.query_one(".card-apply", tui.Button))
             await pilot.pause()
             self.assertEqual(
-                second.query_one(".card-serial-port", Input).value,
+                second.field(".card-serial-port").value,
                 "/dev/ttyACM2")
 
     async def test_sample_rate_in_plan(self):

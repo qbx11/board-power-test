@@ -62,8 +62,10 @@ Dodaj nowy profil (target budowania, overlay sprzętowy) wpisem w `scenarios.tom
 Każda karta „Pomiar N” wybiera protokół w „Ustawieniach zaawansowanych”.
 Zakładki u góry: **BLE Mesh**, **Thread**, **Zigbee**.
 
-Zakładka BLE Mesh trzyma dwie rzeczy: serię (sweep) i monitor dongla.
-Oba to zwykłe pola do wpisania, bez checkboxa „włącz”.
+Każda zakładka trzyma serię (sweep).
+BLE Mesh i Zigbee mają dodatkowo monitor dongla; Thread mierzymy bez niego.
+
+To zwykłe pola do wpisania, bez checkboxa „włącz”.
 Wpisana treść włącza funkcję, puste pole ją wyłącza.
 
 ```text
@@ -72,8 +74,9 @@ Port dongla wpisany      -> monitor dongla czyta logi w trakcie pomiaru
 Fragment logu wpisany    -> pomiar startuje po tym logu
 ```
 
-Zakładki Thread i Zigbee są na razie puste (TO DO).
-Pomiar na nich działa normalnie, tylko bez serii i bez monitora dongla.
+Zakładki nie dzielą się wartościami.
+Symbol Kconfig serii mesha nie ma sensu w Zigbee, więc każdy protokół
+pamięta własne wpisy, a pomiar bierze tylko te z wybranej zakładki.
 
 Pod zakładkami leżą napięcie, zapis danych i próbkowanie.
 Dotyczą sprzętu i pomiaru, więc są wspólne dla wszystkich protokołów.
@@ -172,7 +175,8 @@ Uruchom tryb autonomiczny.
 Wybierz swój scenariusz na karcie „Pomiar N”.
 Podaj czas jednego pomiaru, na przykład `20m`.
 Rozwiń „Ustawienia zaawansowane”.
-Zostań na zakładce **„BLE Mesh”** (patrz „Protokoły” niżej).
+Wybierz zakładkę swojego protokołu (patrz „Protokoły” wyżej).
+Serię ma każda z nich; przykład niżej używa BLE Mesh.
 
 Pola serii są od razu gotowe do wpisania, bez włączania checkboxem.
 Puste pola oznaczają zwykły pojedynczy pomiar.
