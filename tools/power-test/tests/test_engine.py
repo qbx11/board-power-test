@@ -112,6 +112,30 @@ class EngineTest(unittest.TestCase):
         self.assertIn("close", self.sampler.log)
         self.assertFalse(self.sampler.dut)          # odcięte po planie
 
+    def test_voltage_reapplied_after_power_on(self):
+        # REGULATOR_SET wysłany przy odciętym wyjściu PPK2 nie zawsze dochodzi
+        # do regulatora – dlatego napięcie idzie ponownie po włączeniu
+        # zasilania ORAZ po power-cycle. Bez tego pierwszy pomiar w sesji
+        # jechał na napięciu z otwarcia PPK2 (zawyżony prąd).
+        #
+        # Napięcie w KAŻDEJ z tych komend pochodzi z kroku planu (pole
+        # "Napięcie" w ustawieniach zaawansowanych), nie ze stałej – dlatego
+        # test podaje wartość inną niż domyślne 3.0 z manifestu.
+        self._run(_plan(voltage="2.5", power_cycle=True,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        self.assertEqual(self.sampler.voltage_mV, 2500)
+        self.assertNotIn("voltage=3000", log)      # nie z manifestu/stałej
+        # Po KAŻDYM włączeniu zasilania (w tym po power-cycle) leci napięcie.
+        for i, entry in enumerate(log):
+            if entry == "dut=ON":
+                self.assertIn("voltage=2500", log[i + 1:i + 3],
+                              f"brak napięcia po dut=ON (poz. {i}): {log}")
+        # Ostatnie 'dut=ON' kroku wypada przed startem pomiaru.
+        self.assertLess(log.index("start"), len(log))
+        self.assertGreater(log.index("start"),
+                           max(i for i, e in enumerate(log) if e == "dut=ON"))
+
     def test_csv_row_written(self):
         self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
         with open(core.CSV_PATH, newline="", encoding="utf-8") as f:

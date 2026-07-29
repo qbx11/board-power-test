@@ -81,8 +81,10 @@ class Trigger:
                  regexa `pattern`,
       'serial' = j.w., ale na logu dongla (fragment `pattern`),
       'chip'   = po flashu sparuj węzeł Matter i otwórz subskrypcję
-                 atrybutu; pomiar startuje na PIERWSZYM raporcie
-                 (patrz scripts/pair_and_subscribe.py). Pola chip_* niżej.
+                 atrybutu; pomiar startuje krótko po PIERWSZYM raporcie
+                 (engine.CHIP_START_SETTLE_S – zapas na uspokojenie się
+                 sieci po parowaniu; patrz scripts/pair_and_subscribe.py).
+                 Pola chip_* niżej.
                  `timeout_s` = ile czekać na pierwszą wartość."""
     type: str = "delay"
     seconds: float = 0.0

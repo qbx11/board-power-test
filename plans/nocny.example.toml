@@ -65,8 +65,9 @@ voltage  = "3.0"
 rtt      = "off"                             # do prądu snu; RTT dodaje narzut
 # trigger 'chip': po flashu narzędzie samo robi (scripts/pair_and_subscribe.py):
 #   rm /tmp/chip_* -> chip-tool pairing ble-thread -> interactive + subscribe.
-# Pomiar PPK2 startuje na PIERWSZYM raporcie MeasuredValue (nie na sztywnym
-# czasie). `timeout` = ile czekać na tę pierwszą wartość (po sparowaniu).
+# Pomiar PPK2 startuje 10 s po PIERWSZYM raporcie MeasuredValue (nie na
+# sztywnym czasie) – te 10 s to zapas na uspokojenie się sieci po parowaniu.
+# `timeout` = ile czekać na tę pierwszą wartość (po sparowaniu).
 trigger = { type = "chip", node_id = "5", discriminator = "3840", pin = "20202021", timeout = "120s", dataset = "0e08000000000001000000030000174a0300000e35060004001fffe00208813ba4b5a068fddf0708fddc8e685e36d6cc0510b840138392a6efbee61680bdca9ae7fd030f4f70656e5468726561642d666236650102fb6e04108c97ec5b81873b78c371537a24886bef0c0402a0f7f8" }
 # Opcjonalne (mają sensowne domyślne):
 #   cluster = "temperaturemeasurement"   attribute = "measured-value"

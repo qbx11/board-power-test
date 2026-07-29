@@ -166,6 +166,10 @@ CHIP_FIRST_VALUE_MARK = "FIRST-VALUE"
 # Skrypt ma własne, ciaśniejsze limity (pairing/wartość) i wychodzi pierwszy –
 # to tylko bezpiecznik na twardo zawieszony proces.
 CHIP_PAIR_ALLOWANCE_S = 240.0
+# Po pierwszym raporcie (FIRST-VALUE) subskrypcja jeszcze się "układa" –
+# pierwsze sekundy to ruch Thread/Matter po parowaniu, nie normalna praca
+# węzła. Odczekaj tyle, żeby ten pik nie wchodził do pomiaru.
+CHIP_START_SETTLE_S = 10.0
 
 
 class _ChipSession:
@@ -440,6 +444,26 @@ class AutoRunner:
             self._sampler.dut_power(on)
             self._dut_on = on
 
+    def _set_voltage(self, voltage):
+        """Napięcie źródła PPK2 (twardy limit w samplerze; Ppk2Error ->
+        AutoRunError, bo o losie kroku decyduje polityka planu).
+
+        Wołane KILKA razy w kroku – przed włączeniem zasilania DUT i po
+        KAŻDYM jego włączeniu. Powód: komenda REGULATOR_SET wysłana przy
+        odciętym wyjściu nie zawsze dochodzi do regulatora (przy otwarciu
+        PPK2 idzie bezpieczne minimum, a właściwe napięcie kroku
+        milisekundy później), więc PIERWSZY pomiar w sesji jechał na tym
+        minimum – przy zasilaniu przez DC/DC prąd wychodził wtedy ~1,5×
+        za duży, mimo 'napiecie_V = 3.0' w raporcie. Ponowna komenda z tą
+        samą wartością przy WŁĄCZONYM wyjściu jest nieszkodliwa (dokładnie
+        to robi suwak w nRF Connect) i wyrównuje stan regulatora."""
+        if self.dry_run or self._sampler is None:
+            return
+        try:
+            self._sampler.set_voltage(voltage_to_mV(voltage))
+        except (ValueError, Ppk2Error) as e:
+            raise AutoRunError(f"napięcie źródła PPK2: {e}")
+
     def _chip_cmd(self, trig):
         """argv skryptu parowania+subskrypcji (scripts/pair_and_subscribe.py)
         z parametrów triggera 'chip'. Puste pola pomijamy – skrypt ma własne
@@ -516,8 +540,9 @@ class AutoRunner:
 
         if trig.type == "chip":
             # Po flashu: sparuj węzeł Matter i otwórz subskrypcję atrybutu;
-            # pomiar startuje na PIERWSZYM raporcie (marker FIRST-VALUE ze
-            # scripts/pair_and_subscribe.py). Subskrypcja żyje przez cały
+            # pomiar startuje CHIP_START_SETTLE_S po PIERWSZYM raporcie
+            # (marker FIRST-VALUE ze scripts/pair_and_subscribe.py), żeby
+            # pominąć poparowaniowy pik. Subskrypcja żyje przez cały
             # pomiar – proces zamyka _run_step (finally) przez self._chip.
             cmd = self._chip_cmd(trig)
             self._emit("state", idx, step.scenario, "trigger",
@@ -548,8 +573,12 @@ class AutoRunner:
             self._emit("cmd_end", idx, step.scenario,
                        data={"rc": 0, "title": title})
             self._chip = chip
-            self._note(f"chip: pierwsza wartość ({chip.value}) – start pomiaru",
+            self._note(f"chip: pierwsza wartość ({chip.value}) – odczekuję "
+                       f"{CHIP_START_SETTLE_S:g} s przed startem pomiaru",
                        idx, step.scenario, files=(run_log,))
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"Matter: start za {CHIP_START_SETTLE_S:g} s")
+            self._sleep_cancellable(CHIP_START_SETTLE_S)
             if step.rtt == "continuous":
                 reader = self.rtt_factory(self.profile)
                 reader.attach()
@@ -966,12 +995,11 @@ class AutoRunner:
             # na płytkę. Błąd zamieniamy na AutoRunError (polityka kroku).
             self._emit("state", idx, step.scenario, "power",
                        detail=f"{voltage} V")
-            if not self.dry_run:
-                try:
-                    self._sampler.set_voltage(voltage_to_mV(voltage))
-                except (ValueError, Ppk2Error) as e:
-                    raise AutoRunError(f"napięcie źródła PPK2: {e}")
-                self._ensure_dut_power(True)
+            self._set_voltage(voltage)
+            self._ensure_dut_power(True)
+            # Powtórka przy WŁĄCZONYM już wyjściu – bez niej pierwszy pomiar
+            # w sesji jechał na napięciu z otwarcia PPK2 (patrz _set_voltage).
+            self._set_voltage(voltage)
 
             self._emit("state", idx, step.scenario, "flash")
             rc = self._run_streamed(
@@ -990,6 +1018,9 @@ class AutoRunner:
                 time.sleep(0.5)
                 self._sampler.dut_power(True)
                 self._dut_on = True
+                # Po odcięciu i podaniu zasilania regulator dostaje wartość
+                # jeszcze raz – pomiar ma jechać na napięciu z planu.
+                self._set_voltage(voltage)
 
             # Monitor dongla (jeśli podano port) startuje PRZED oknem
             # triggera i żyje przez cały pomiar – logi widać przed i podczas.
