@@ -2149,7 +2149,10 @@ class PowerTestApp(App):
     Collapsible { background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text; }
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
-    .cmd-log { height: 14; border: round #555555; background: transparent;
+    /* Rozwinięta sekcja build/flash: 30 wierszy, bo przy buildzie chodzi o
+       to, żeby naraz widzieć kawałek wyjścia westa, a nie przewijać je po
+       kilka linijek. Ta sama reguła obsługuje oba tryby. */
+    .cmd-log { height: 30; border: round #555555; background: transparent;
                margin: 0 1 1 2; overflow-x: auto; }
     /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
        skopiowania. */
