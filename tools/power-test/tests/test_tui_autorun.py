@@ -224,6 +224,130 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.steps[0].trigger.type, "rtt")
             self.assertEqual(plan.steps[0].trigger.pattern, "Ready")
 
+    async def test_chip_trigger_in_plan(self):
+        # Zakładka Thread = pomiar przez Mattera: sam wybór protokołu daje
+        # trigger 'chip', bez żadnego dodatkowego „włącz”. Domyślne wartości
+        # pól wystarczą, żeby plan się zbudował; puste Node ID -> czytelny
+        # błąd (blokuje start planu, zamiast po cichu wrócić do 'delay').
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            await pilot.pause()
+            # BLE Mesh (domyślny protokół) -> zwykły start
+            self.assertEqual(
+                app._build_auto_plan("btz").steps[0].trigger.type, "delay")
+            card.query_one(".card-proto", tui.TabbedContent).active = "thread"
+            await pilot.pause()
+            # Sam Thread, bez dotykania pól -> chip z domyślnymi z karty.
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertEqual(t.type, "chip")
+            self.assertEqual(t.node_id, "5")
+            self.assertEqual(t.discriminator, "3840")
+            self.assertEqual(t.pin, "20202021")
+            self.assertEqual(t.dataset, tui.CHIP_DATASET_DEFAULT)
+            self.assertEqual(t.cluster, "temperaturemeasurement")
+            self.assertEqual(t.attribute, "measured-value")
+            self.assertEqual(t.timeout_s, 120)
+            self.assertFalse(t.skip_pairing)
+            # Wpisane wartości trafiają do triggera.
+            card.field(".card-chip-node").value = "7"
+            card.field(".card-chip-disc").value = "1234"
+            card.field(".card-chip-dataset").text = "0e08aa"
+            card.field(".card-chip-timeout").value = "90s"
+            card.field(".card-chip-endpoint").value = "2"
+            card.field(".card-chip-skip").value = True
+            await pilot.pause()
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertEqual(t.node_id, "7")
+            self.assertEqual(t.discriminator, "1234")
+            self.assertEqual(t.dataset, "0e08aa")
+            self.assertEqual(t.timeout_s, 90)
+            self.assertEqual(t.endpoint, "2")
+            self.assertTrue(t.skip_pairing)
+            # bez Node ID -> błąd
+            card.field(".card-chip-node").value = ""
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
+
+    async def test_matter_bez_datasetu_tylko_gdy_juz_sparowany(self):
+        # Parowanie potrzebuje datasetu i discriminatora; „węzeł już
+        # sparowany” zdejmuje ten wymóg, bo wtedy tylko subskrybujemy.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            card.query_one(".card-proto", tui.TabbedContent).active = "thread"
+            await pilot.pause()
+            card.field(".card-chip-dataset").text = ""
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
+            card.field(".card-chip-skip").value = True
+            await pilot.pause()
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertEqual(t.type, "chip")
+            self.assertTrue(t.skip_pairing)
+            self.assertEqual(t.dataset, "")
+
+    async def test_pola_matter_tylko_w_zakladce_thread(self):
+        # Pola Mattera istnieją WYŁĄCZNIE w panelu Thread – w BLE Mesh i
+        # Zigbee nie ma ich ani w drzewie, ani w konfiguracji karty.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            tabs = card.query_one(".card-proto", tui.TabbedContent)
+            for proto in ("ble_mesh", "thread", "zigbee"):
+                pane = tabs.get_pane(proto)
+                for cls in (".card-chip-node", ".card-chip-disc",
+                            ".card-chip-pin", ".card-chip-dataset",
+                            ".card-chip-cluster", ".card-chip-attr",
+                            ".card-chip-endpoint", ".card-chip-min",
+                            ".card-chip-max", ".card-chip-timeout",
+                            ".card-chip-skip"):
+                    self.assertEqual(len(pane.query(cls)),
+                                     1 if proto == "thread" else 0,
+                                     f"{proto} {cls}")
+            self.assertIsNone(card.field(".card-chip-node", "ble_mesh"))
+            # Konfiguracja BLE Mesh nie niesie ustawień Mattera.
+            cfg = card.get_config()
+            self.assertEqual(cfg["chip_node_id"], "")
+            self.assertEqual(cfg["chip_dataset"], "")
+            self.assertFalse(cfg["chip_skip"])
+
+    async def test_matter_przenosi_sie_do_wszystkich_kart(self):
+        # „Zastosuj do wszystkich” przenosi protokół RAZEM z ustawieniami
+        # Mattera – inaczej druga karta parowałaby się na cudzy węzeł.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second = list(app.query(tui.MeasurementCard))
+            first.query_one(".card-proto", tui.TabbedContent).active = "thread"
+            await pilot.pause()
+            first.field(".card-chip-node").value = "9"
+            first.field(".card-chip-dataset").text = "0e08bb"
+            first.field(".card-chip-skip").value = True
+            await pilot.pause()
+            app._apply_to_all(first.query_one(".card-apply", tui.Button))
+            await pilot.pause()
+            self.assertEqual(second.protocol(), "thread")
+            cfg = second.get_config()
+            self.assertEqual(cfg["chip_node_id"], "9")
+            self.assertEqual(cfg["chip_dataset"], "0e08bb")
+            self.assertTrue(cfg["chip_skip"])
+
     async def test_apply_to_all(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 60)) as pilot:

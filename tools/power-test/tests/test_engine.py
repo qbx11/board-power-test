@@ -17,7 +17,7 @@ from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
 import power_test as core
 from autorun import plan as planmod
-from autorun.engine import AutoRunner
+from autorun.engine import AutoRunError, AutoRunner, _ChipSession
 
 
 class _LossySampler(FakeSampler):
@@ -111,6 +111,30 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.sampler.voltage_mV, 3000)
         self.assertIn("close", self.sampler.log)
         self.assertFalse(self.sampler.dut)          # odcięte po planie
+
+    def test_voltage_reapplied_after_power_on(self):
+        # REGULATOR_SET wysłany przy odciętym wyjściu PPK2 nie zawsze dochodzi
+        # do regulatora – dlatego napięcie idzie ponownie po włączeniu
+        # zasilania ORAZ po power-cycle. Bez tego pierwszy pomiar w sesji
+        # jechał na napięciu z otwarcia PPK2 (zawyżony prąd).
+        #
+        # Napięcie w KAŻDEJ z tych komend pochodzi z kroku planu (pole
+        # "Napięcie" w ustawieniach zaawansowanych), nie ze stałej – dlatego
+        # test podaje wartość inną niż domyślne 3.0 z manifestu.
+        self._run(_plan(voltage="2.5", power_cycle=True,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        self.assertEqual(self.sampler.voltage_mV, 2500)
+        self.assertNotIn("voltage=3000", log)      # nie z manifestu/stałej
+        # Po KAŻDYM włączeniu zasilania (w tym po power-cycle) leci napięcie.
+        for i, entry in enumerate(log):
+            if entry == "dut=ON":
+                self.assertIn("voltage=2500", log[i + 1:i + 3],
+                              f"brak napięcia po dut=ON (poz. {i}): {log}")
+        # Ostatnie 'dut=ON' kroku wypada przed startem pomiaru.
+        self.assertLess(log.index("start"), len(log))
+        self.assertGreater(log.index("start"),
+                           max(i for i, e in enumerate(log) if e == "dut=ON"))
 
     def test_csv_row_written(self):
         self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
@@ -759,6 +783,24 @@ class EngineTest(unittest.TestCase):
                    if ev.kind == "state" and ev.text == "measure"]
         self.assertEqual(len(measure), 1)
 
+    def test_chip_trigger_dry_run(self):
+        # Dry-run z triggerem 'chip': session_dir=None, żaden podproces
+        # chip-toola się nie odpala, krok kończy się 'done'.
+        plan = _plan(scenario="zwykly", duration_s=0.2,
+                     trigger=planmod.Trigger(
+                         type="chip", node_id="5", dataset="0e08aa",
+                         discriminator="3840"))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(None),
+            event_cb=self.events.append, dry_run=True)
+        results = runner.run()
+        self.assertEqual(results[0].status, "done")
+        # w meta triggera został typ chip + parametry subskrypcji
+        notes = [ev.text for ev in self.events if ev.kind == "note"]
+        self.assertTrue(any("chip node=5" in n for n in notes))
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(
@@ -768,6 +810,68 @@ class EngineTest(unittest.TestCase):
         cmds = self.env.commands()
         # Był flash (nrfutil device program), nie było builda hexowego.
         self.assertTrue(any("device program" in c for c in cmds))
+
+
+class _FakeEngine:
+    """Minimalny silnik dla _ChipSession: zbiera linie ze zdarzeń 'line'."""
+
+    def __init__(self):
+        self.lines = []
+
+    def _emit(self, kind, step=0, name="", text="", data=None, **extra):
+        if kind == "line":
+            self.lines.append(text)
+
+
+class ChipSessionTest(unittest.TestCase):
+    """Drenaż stdout skryptu chip: wykrycie markera FIRST-VALUE, wartość,
+    emisja linii do UI i domknięcie procesu."""
+
+    import sys as _sys
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    def _session(self, code):
+        eng = _FakeEngine()
+        log = self._Path(self._tempfile.mkdtemp()) / "chip.log"
+        cmd = [self._sys.executable, "-c", code]
+        return eng, _ChipSession(cmd, eng, log, 1, "end_device")
+
+    def test_first_value_detected(self):
+        eng, chip = self._session(
+            "import time; print('pairing...', flush=True); "
+            "print('FIRST-VALUE 2250', flush=True); time.sleep(30)")
+        chip.start()
+        try:
+            self.assertTrue(chip.first_value.wait(timeout=10))
+            self.assertEqual(chip.value, "2250")
+            # postęp parowania trafił do UI (zdarzenia 'line')
+            self.assertIn("pairing...", eng.lines)
+        finally:
+            chip.stop()
+        # stop() ubił proces skryptu
+        self.assertIsNotNone(chip.proc.poll())
+
+    def test_wait_first_value_timeout(self):
+        # skrypt milczy -> _TriggerTimeout (via wait_first_value deadline)
+        eng, chip = self._session("import time; time.sleep(30)")
+        chip.start()
+        try:
+            with self.assertRaises(Exception) as ctx:
+                chip.wait_first_value(0.5, lambda: None)
+            self.assertIn("pierwsza wartość", str(ctx.exception))
+        finally:
+            chip.stop()
+
+    def test_wait_first_value_process_dies(self):
+        # skrypt pada przed 1. wartością -> AutoRunError, nie timeout
+        eng, chip = self._session("import sys; sys.exit(2)")
+        chip.start()
+        try:
+            with self.assertRaises(AutoRunError):
+                chip.wait_first_value(10, lambda: None)
+        finally:
+            chip.stop()
 
 
 if __name__ == "__main__":

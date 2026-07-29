@@ -26,6 +26,13 @@ BYTES_PER_SAMPLE = 4      # jedna próbka = 4 bajty (~400 kB/s strumienia)
 MAX_BUFFER_S = 30
 # Jak długo wątek drenujący czeka na bajty, zanim sprawdzi, czy ma skończyć.
 DRAIN_TIMEOUT_S = 0.1
+# Odstęp po komendzie REGULATOR_SET. PPK2 nie potwierdza jej niczym, a dwie
+# komendy wysłane pod rząd (bezpieczne minimum przy open() + właściwe napięcie
+# kroku milisekundy później) potrafią skończyć się tak, że druga nie dojdzie
+# do regulatora – płytka jedzie wtedy na napięciu z pierwszej. Nie ma odczytu
+# napięcia z urządzenia, więc jedyne, co możemy zrobić, to nie wysyłać ich
+# seriami i dać regulatorowi chwilę.
+VOLTAGE_SETTLE_S = 0.2
 
 
 class Ppk2Error(RuntimeError):
@@ -210,6 +217,8 @@ class Ppk2ApiSampler:
         mv = check_voltage_mV(millivolts)
         self._ppk2.set_source_voltage(mv)
         self._last_voltage_mv = mv
+        # Chwila na dojście komendy do regulatora – patrz VOLTAGE_SETTLE_S.
+        time.sleep(VOLTAGE_SETTLE_S)
 
     def dut_power(self, on):
         self._ppk2.toggle_DUT_power("ON" if on else "OFF")
@@ -233,6 +242,15 @@ class Ppk2ApiSampler:
             except Exception:
                 pass
         self._ppk2.remainder = {"sequence": b"", "len": 0}
+        # Ta sama zasada dla stanu filtra szpilek/średniej kroczącej w
+        # ppk2-api: przeniesiony z poprzedniego pomiaru dokładałby do
+        # pierwszych próbek poziom sprzed przerwy (biblioteka sama go nie
+        # zeruje). None = "zainicjuj pierwszą próbką".
+        self._ppk2.rolling_avg = None
+        self._ppk2.rolling_avg4 = None
+        self._ppk2.prev_range = None
+        self._ppk2.consecutive_range_samples = 0
+        self._ppk2.after_spike = 0
         with self._lock:
             self._chunks.clear()
             self._buffered = 0
