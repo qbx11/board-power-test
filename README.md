@@ -57,6 +57,31 @@ Wpis jest ostatni w manifeście.
 Wybierz płytkę z listy profili nad scenariuszami.
 Dodaj nowy profil (target budowania, overlay sprzętowy) wpisem w `scenarios.toml`.
 
+## Protokoły
+
+Każda karta „Pomiar N” wybiera protokół w „Ustawieniach zaawansowanych”.
+Zakładki u góry: **BLE Mesh**, **Thread**, **Zigbee**.
+
+Zakładka BLE Mesh trzyma dwie rzeczy: serię (sweep) i monitor dongla.
+Oba to zwykłe pola do wpisania, bez checkboxa „włącz”.
+Wpisana treść włącza funkcję, puste pole ją wyłącza.
+
+```text
+Wartości serii wpisane   -> karta rozwija się na serię pomiarów
+Port dongla wpisany      -> monitor dongla czyta logi w trakcie pomiaru
+Fragment logu wpisany    -> pomiar startuje po tym logu
+```
+
+Zakładki Thread i Zigbee są na razie puste (TO DO).
+Pomiar na nich działa normalnie, tylko bez serii i bez monitora dongla.
+
+Pod zakładkami leżą napięcie, zapis danych i próbkowanie.
+Dotyczą sprzętu i pomiaru, więc są wspólne dla wszystkich protokołów.
+
+„Start pomiaru po czasie” i „Konsola RTT” są schowane z widoku.
+Kod obu został na miejscu, tylko interfejs ich nie pokazuje.
+Pomiar rusza po stałym odczekaniu na rozruch płytki, bez konsoli RTT.
+
 ## Serie pomiarów (sweep parametru)
 
 Seria to jedna karta „Pomiar N”, która rozwija się na wiele pomiarów.
@@ -141,13 +166,16 @@ Nowy scenariusz jest od razu na liście kart, bez restartu.
 Narzędzie dopisuje wpis do `scenarios.toml`.
 Przenieś wpis do `scenarios.local.toml`, gdy nie chcesz go na remote.
 
-### 4. Włącz serię na karcie pomiaru
+### 4. Otwórz ustawienia serii na karcie pomiaru
 
 Uruchom tryb autonomiczny.
 Wybierz swój scenariusz na karcie „Pomiar N”.
 Podaj czas jednego pomiaru, na przykład `20m`.
 Rozwiń „Ustawienia zaawansowane”.
-Włącz „Seria: sweep parametru (jedna karta = wiele pomiarów)”.
+Zostań na zakładce **„BLE Mesh”** (patrz „Protokoły” niżej).
+
+Pola serii są od razu gotowe do wpisania, bez włączania checkboxem.
+Puste pola oznaczają zwykły pojedynczy pomiar.
 
 ### 5. Podaj parametr i wartości
 

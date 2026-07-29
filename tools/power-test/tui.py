@@ -35,7 +35,8 @@ from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
-                             DirectoryTree, Input, Label, Log, Select, Static)
+                             DirectoryTree, Input, Label, Log, Select, Static,
+                             TabbedContent, TabPane)
 
 import power_test as core
 
@@ -987,6 +988,28 @@ class RunScreen(Screen):
             self.note("(Esc = powrót do ustawień)")
 
 
+# --- Protokoły w ustawieniach zaawansowanych karty ---
+# Każda karta „Pomiar N” wybiera protokół zakładką. Pola serii i monitora
+# dongla należą do BLE Mesh; Thread i Zigbee są na razie puste (TO DO) i dają
+# zwykły pomiar prądu wybranego scenariusza – bez serii i bez monitora.
+PROTOCOLS = (("ble_mesh", "BLE Mesh"), ("thread", "Thread"),
+             ("zigbee", "Zigbee"))
+DEFAULT_PROTOCOL = "ble_mesh"
+# Pola BLE Mesh nie mają już checkboxów „włącz” – liczy się to, co wpisane.
+SWEEP_FIELDS = ("sweep_param", "sweep_values", "sweep_param2", "sweep_values2")
+
+
+def _sweep_on(cfg):
+    """Czy karta ma serię: tylko w BLE Mesh i tylko gdy któreś z pól serii
+    jest wypełnione. Zamiast checkboxa decyduje treść pól, więc pusta karta
+    to po prostu jeden pomiar. Wypełniony sam parametr, bez wartości, ZOSTAJE
+    serią – żeby zamiast po cichu pominąć serię powiedzieć wprost, czego
+    brakuje."""
+    if cfg.get("protocol", DEFAULT_PROTOCOL) != "ble_mesh":
+        return False
+    return any(cfg.get(k) for k in SWEEP_FIELDS)
+
+
 def _sweep_axes(cfg):
     """Osie serii z konfiguracji karty -> [(parametr, wartości), …] dla
     expand_sweep(). Druga oś jest opcjonalna: obie pary pól puste = zwykła
@@ -1007,8 +1030,10 @@ def _sweep_axes(cfg):
 
 class MeasurementCard(Vertical):
     """Jedna karta 'Pomiar N' w kreatorze trybu autonomicznego: scenariusz
-    + czas, a start-po-czasie / RTT / napięcie / zapis w zwijanych
-    ustawieniach zaawansowanych (domyślnie schowane i wyłączone).
+    + czas, a reszta w zwijanych ustawieniach zaawansowanych (domyślnie
+    schowanych). Tam u góry zakładki protokołu – BLE Mesh trzyma serię
+    (sweep) i monitor dongla – a pod nimi wspólne dla protokołów
+    start-po-czasie / RTT / napięcie / zapis / próbkowanie.
     Czyta/ustawia własną konfigurację, nie dotyka innych kart."""
 
     def __init__(self, uid, scenarios, number, config=None, collapsed=False):
@@ -1044,74 +1069,92 @@ class MeasurementCard(Vertical):
                         classes="card-duration")
             with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
                              classes="card-adv"):
-                # Seria (sweep): jedna karta -> wiele pomiarów "N.1, N.2, …",
-                # każdy budowany z inną flagą -DCONFIG_...=<wartość>. Pola
-                # pojawiają się po włączeniu.
-                yield Check("Seria: sweep parametru (jedna karta = wiele "
-                            "pomiarów)",
-                            value=c.get("sweep_on", False),
-                            classes="card-sweep-on")
-                with Vertical(classes="card-sweep-box"):
-                    yield Label("Parametr (symbol Kconfig):")
-                    yield Input(
-                        value=c.get("sweep_param",
-                                    "CONFIG_LPN_SENSOR_INTERVAL_S"),
-                        placeholder="CONFIG_LPN_SENSOR_INTERVAL_S",
-                        classes="card-sweep-param")
-                    yield Label("Wartości (po przecinku lub spacji):")
-                    yield Input(value=c.get("sweep_values", ""),
-                                placeholder="1, 2, 5, 10, 20, 30, 60, 120, "
-                                            "300, 600",
-                                classes="card-sweep-values")
-                    # Druga oś jest OPCJONALNA: wypełniona daje iloczyn
-                    # kartezjański (3 wartości × 2 = 6 pomiarów), pusta –
-                    # zwykłą serię po jednym parametrze.
-                    yield Label("Drugi parametr (opcjonalny):")
-                    yield Input(value=c.get("sweep_param2", ""),
-                                placeholder="— pusto = seria po jednym "
-                                            "parametrze —",
-                                classes="card-sweep-param2")
-                    yield Label("Wartości drugiego parametru:")
-                    yield Input(value=c.get("sweep_values2", ""),
-                                placeholder="100, 200",
-                                classes="card-sweep-values2")
-                # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
-                # Bez niego i tak czekamy MIN_START_DELAY_S na rozruch
-                # płytki; wpisany czas nie dokłada się do tych sekund,
-                # tylko je zastępuje (liczy się większy).
-                yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
-                            value=c.get("delay_on", False),
-                            classes="card-delay-on")
-                yield Input(value=c.get("delay_s", "20s"),
-                            placeholder="np. 30s", classes="card-delay-s")
-                # Konsola RTT – opcjonalna; pola pojawiają się po włączeniu.
-                yield Check("Konsola RTT (start po logu / etykiety)",
-                            value=c.get("rtt_on", False),
-                            classes="card-rtt-on")
-                with Vertical(classes="card-rtt-box"):
-                    yield Select([("start po logu", "trigger"),
-                                  ("etykiety (continuous)", "continuous")],
-                                 value=c.get("rtt_mode", "trigger"),
-                                 allow_blank=False, classes="card-rtt")
-                    yield Input(value=c.get("pattern", ""),
-                                placeholder="wzorzec logu RTT",
-                                classes="card-pattern")
-                # Monitor dongla (serial) – logi z osobnego urządzenia (np.
-                # węzeł Friend). Widoczny przed i podczas pomiaru; opcjonalnie
-                # startuje pomiar, gdy w logu pojawi się fragment tekstu.
-                yield Check("Monitor dongla (serial)",
-                            value=c.get("serial_on", False),
-                            classes="card-serial-on")
-                with Vertical(classes="card-serial-box"):
-                    yield Input(value=c.get("serial_port", "/dev/ttyACM0"),
-                                placeholder="/dev/ttyACM0",
-                                classes="card-serial-port")
-                    yield Check("Start pomiaru po logu (zawiera tekst)",
-                                value=c.get("serial_trig", False),
-                                classes="card-serial-trig-on")
-                    yield Input(value=c.get("serial_pattern", ""),
-                                placeholder="np. Friendship z LPN nawiazany",
-                                classes="card-serial-pattern")
+                # Protokół u góry: pola serii i monitora dongla siedzą w
+                # zakładce BLE Mesh, bo tylko tam mają sens. Reszta ustawień
+                # (start, RTT, napięcie, zapis, próbkowanie) zostaje POD
+                # zakładkami – to sprzęt i pomiar, wspólne dla protokołów.
+                with TabbedContent(initial=c.get("protocol",
+                                                 DEFAULT_PROTOCOL),
+                                   classes="card-proto"):
+                    with TabPane("BLE Mesh", id="ble_mesh"):
+                        # Seria (sweep): jedna karta -> wiele pomiarów
+                        # "N.1, N.2, …", każdy budowany z inną flagą
+                        # -DCONFIG_...=<wartość>. Pola są od razu gotowe do
+                        # wpisania – wpisane wartości włączają serię, puste
+                        # zostawiają jeden pomiar.
+                        yield Label("Seria: sweep parametru (jedna karta = "
+                                    "wiele pomiarów)",
+                                    classes="card-section")
+                        yield Label("Parametr (symbol Kconfig):")
+                        yield Input(
+                            value=c.get("sweep_param", ""),
+                            placeholder="CONFIG_LPN_SENSOR_INTERVAL_S",
+                            classes="card-sweep-param")
+                        yield Label("Wartości (po przecinku lub spacji):")
+                        yield Input(value=c.get("sweep_values", ""),
+                                    placeholder="1, 2, 5, 10, 20, 30, 60, "
+                                                "120, 300, 600",
+                                    classes="card-sweep-values")
+                        # Druga oś jest OPCJONALNA: wypełniona daje iloczyn
+                        # kartezjański (3 wartości × 2 = 6 pomiarów), pusta –
+                        # zwykłą serię po jednym parametrze.
+                        yield Label("Drugi parametr (opcjonalny):")
+                        yield Input(value=c.get("sweep_param2", ""),
+                                    placeholder="— pusto = seria po jednym "
+                                                "parametrze —",
+                                    classes="card-sweep-param2")
+                        yield Label("Wartości drugiego parametru:")
+                        yield Input(value=c.get("sweep_values2", ""),
+                                    placeholder="100, 200",
+                                    classes="card-sweep-values2")
+                        # Monitor dongla (serial) – logi z osobnego urządzenia
+                        # (np. węzeł Friend). Widoczny przed i podczas
+                        # pomiaru; wpisany port włącza monitor, a wpisany
+                        # fragment logu – start pomiaru po tym logu.
+                        yield Label("Monitor dongla (serial)",
+                                    classes="card-section")
+                        yield Label("Port dongla:")
+                        yield Input(value=c.get("serial_port", ""),
+                                    placeholder="/dev/ttyACM0",
+                                    classes="card-serial-port")
+                        yield Label("Start pomiaru po logu (zawiera tekst):")
+                        yield Input(
+                            value=c.get("serial_pattern", ""),
+                            placeholder="np. Friendship z LPN nawiazany",
+                            classes="card-serial-pattern")
+                    with TabPane("Thread", id="thread"):
+                        yield Static("TO DO — w przygotowaniu.\nPomiar działa "
+                                     "normalnie, bez serii i monitora dongla.",
+                                     classes="card-todo")
+                    with TabPane("Zigbee", id="zigbee"):
+                        yield Static("TO DO — w przygotowaniu.\nPomiar działa "
+                                     "normalnie, bez serii i monitora dongla.",
+                                     classes="card-todo")
+                # Start po czasie i konsola RTT – SCHOWANE z widoku w trybach
+                # protokołów, ale wciąż w drzewie: plan czyta ich wartości
+                # (domyślnie wyłączone), a wcześniejsze karty i testy dalej
+                # działają. Odsłonięcie to zdjęcie .display = False
+                # w _sync_advanced().
+                with Vertical(classes="card-hidden-adv"):
+                    # Bez startu po czasie i tak czekamy MIN_START_DELAY_S na
+                    # rozruch płytki; wpisany czas nie dokłada się do tych
+                    # sekund, tylko je zastępuje (liczy się większy).
+                    yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
+                                value=c.get("delay_on", False),
+                                classes="card-delay-on")
+                    yield Input(value=c.get("delay_s", "20s"),
+                                placeholder="np. 30s", classes="card-delay-s")
+                    yield Check("Konsola RTT (start po logu / etykiety)",
+                                value=c.get("rtt_on", False),
+                                classes="card-rtt-on")
+                    with Vertical(classes="card-rtt-box"):
+                        yield Select([("start po logu", "trigger"),
+                                      ("etykiety (continuous)", "continuous")],
+                                     value=c.get("rtt_mode", "trigger"),
+                                     allow_blank=False, classes="card-rtt")
+                        yield Input(value=c.get("pattern", ""),
+                                    placeholder="wzorzec logu RTT",
+                                    classes="card-pattern")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
                         yield Label("Napięcie (V, 1.8–3.6):")
@@ -1143,23 +1186,29 @@ class MeasurementCard(Vertical):
         self._refresh_title()
 
     def on_checkbox_changed(self, event):
-        # Checkboxy karty (start-po-czasie / RTT / monitor dongla) sterują
-        # widocznością swoich pól – nie puszczamy zdarzenia wyżej (App liczy
-        # tylko scen-check).
+        # Checkboxy karty (start-po-czasie / RTT) sterują widocznością swoich
+        # pól – nie puszczamy zdarzenia wyżej (App liczy tylko scen-check).
         self._sync_advanced()
         event.stop()
 
+    def on_tabbed_content_tab_activated(self, event):
+        # Zmiana protokołu zmienia to, co karta w ogóle zrobi (Thread/Zigbee
+        # nie mają serii), więc dopisek o serii w tytule musi za tym nadążyć.
+        self._refresh_title()
+        event.stop()
+
     def _sync_advanced(self):
-        self.query_one(".card-sweep-box").display = \
-            self.query_one(".card-sweep-on", Checkbox).value
         self.query_one(".card-delay-s").display = \
             self.query_one(".card-delay-on", Checkbox).value
         self.query_one(".card-rtt-box").display = \
             self.query_one(".card-rtt-on", Checkbox).value
-        self.query_one(".card-serial-box").display = \
-            self.query_one(".card-serial-on", Checkbox).value
-        self.query_one(".card-serial-pattern").display = \
-            self.query_one(".card-serial-trig-on", Checkbox).value
+        # Chowamy dopiero tutaj (post-mount), a nie przez CSS: Select
+        # zamontowany od razu jako display:none nie tworzy overlaya.
+        self.query_one(".card-hidden-adv").display = False
+
+    def protocol(self):
+        """Symbol wybranego protokołu ('ble_mesh' / 'thread' / 'zigbee')."""
+        return str(self.query_one(".card-proto", TabbedContent).active)
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
@@ -1192,12 +1241,13 @@ class MeasurementCard(Vertical):
         title.update(f"▶ {label}{suffix}{self._sweep_title()}")
 
     def _sweep_title(self):
-        """Dopisek do tytułu zwiniętej karty, gdy włączona seria (sweep):
+        """Dopisek do tytułu zwiniętej karty, gdy karta ma serię (sweep):
         ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
         liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
-        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy sweep wyłączony."""
+        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola serii są puste albo
+        protokół nie jest BLE Mesh."""
         try:
-            if not self.query_one(".card-sweep-on", Checkbox).value:
+            if not _sweep_on(self.get_config()):
                 return ""
             axes = [(self.query_one(f".card-sweep-param{s}",
                                     Input).value.strip(),
@@ -1242,7 +1292,7 @@ class MeasurementCard(Vertical):
     def get_config(self):
         return {
             "scenario": self._scenario(),
-            "sweep_on": self.query_one(".card-sweep-on", Checkbox).value,
+            "protocol": self.protocol(),
             "sweep_param":
                 self.query_one(".card-sweep-param", Input).value.strip(),
             "sweep_values":
@@ -1257,11 +1307,8 @@ class MeasurementCard(Vertical):
             "rtt_on": self.query_one(".card-rtt-on", Checkbox).value,
             "rtt_mode": self.query_one(".card-rtt", Select).value,
             "pattern": self.query_one(".card-pattern", Input).value.strip(),
-            "serial_on": self.query_one(".card-serial-on", Checkbox).value,
             "serial_port":
                 self.query_one(".card-serial-port", Input).value.strip(),
-            "serial_trig":
-                self.query_one(".card-serial-trig-on", Checkbox).value,
             "serial_pattern":
                 self.query_one(".card-serial-pattern", Input).value.strip(),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
@@ -1271,7 +1318,7 @@ class MeasurementCard(Vertical):
 
     def apply_shared(self, cfg):
         """Ustaw wszystko OPRÓCZ scenariusza (dla 'Zastosuj do wszystkich')."""
-        self.query_one(".card-sweep-on", Checkbox).value = cfg["sweep_on"]
+        self.query_one(".card-proto", TabbedContent).active = cfg["protocol"]
         self.query_one(".card-sweep-param", Input).value = cfg["sweep_param"]
         self.query_one(".card-sweep-values", Input).value = cfg["sweep_values"]
         self.query_one(".card-sweep-param2", Input).value = cfg["sweep_param2"]
@@ -1283,16 +1330,14 @@ class MeasurementCard(Vertical):
         self.query_one(".card-rtt-on", Checkbox).value = cfg["rtt_on"]
         self.query_one(".card-rtt", Select).value = cfg["rtt_mode"]
         self.query_one(".card-pattern", Input).value = cfg["pattern"]
-        self.query_one(".card-serial-on", Checkbox).value = cfg["serial_on"]
         self.query_one(".card-serial-port", Input).value = cfg["serial_port"]
-        self.query_one(".card-serial-trig-on", Checkbox).value = \
-            cfg["serial_trig"]
         self.query_one(".card-serial-pattern", Input).value = \
             cfg["serial_pattern"]
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
         self._sync_advanced()
+        self._refresh_title()
 
 
 class Ppk2ConnectScreen(ModalScreen):
@@ -1841,19 +1886,28 @@ class PowerTestApp(App):
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-sweep-on, .card-delay-on, .card-rtt-on, .card-serial-on,
-    .card-serial-trig-on {
+    .card-delay-on, .card-rtt-on {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
     .card-sweep-param, .card-sweep-values { width: 100%; }
+    .card-sweep-param2, .card-sweep-values2 { width: 100%; }
     .card-serial-port, .card-serial-pattern { width: 100%; }
-    .card-rtt-box, .card-serial-box, .card-sweep-box { height: auto; }
+    .card-rtt-box, .card-hidden-adv { height: auto; }
+    /* Zakładki protokołu (BLE Mesh / Thread / Zigbee) u góry ustawień
+       zaawansowanych, wyśrodkowane nad panelem. Panel bez własnego tła –
+       karta ma już swoje. */
+    .card-proto { height: auto; background: transparent; }
+    .card-proto #tabs-list { align-horizontal: center; }
+    .card-proto TabPane { height: auto; padding: 0 1; background: transparent; }
+    .card-proto ContentSwitcher { height: auto; }
+    .card-section { text-style: bold; margin-top: 1; }
+    .card-todo { color: #888888; margin: 1 0; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
-    .card-apply-row { height: auto; }
-    .card-apply, .card-apply-next { min-width: 0; margin: 1 2 1 0; }
+    .card-apply-row { height: auto; align-horizontal: center; }
+    .card-apply, .card-apply-next { min-width: 0; margin: 1 1; }
     #add_measurement { min-width: 0; width: 72; max-width: 100%; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
@@ -2484,12 +2538,15 @@ class PowerTestApp(App):
             except ValueError as e:
                 raise ValueError(f"Pomiar {card.number}: {e}")
             rtt = c["rtt_mode"] if c["rtt_on"] else "off"
-            monitor_port = c["serial_port"] if c["serial_on"] else ""
+            # Monitor dongla należy do BLE Mesh; na Thread/Zigbee (TO DO)
+            # zostaje zwykły pomiar, więc portu stamtąd nie bierzemy.
+            ble = c["protocol"] == "ble_mesh"
+            monitor_port = c["serial_port"] if ble else ""
             labels = []
             if rtt == "continuous" and c["pattern"]:
                 labels = [LabelRule(pattern=c["pattern"],
                                     label=c["pattern"])]
-            if c["serial_on"] and c["serial_trig"] and c["serial_pattern"]:
+            if monitor_port and c["serial_pattern"]:
                 trigger = Trigger(type="serial", pattern=c["serial_pattern"],
                                   timeout_s=180.0)
             elif rtt == "trigger":
@@ -2511,7 +2568,7 @@ class PowerTestApp(App):
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
                 labels=labels, pristine=pristine)
-            if c.get("sweep_on"):
+            if _sweep_on(c):
                 # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
                 # Druga oś opcjonalna – wypełniona daje iloczyn kartezjański.
