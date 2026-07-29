@@ -64,6 +64,15 @@ def effective_delay_s(trigger):
     return max(trigger.seconds, MIN_START_DELAY_S)
 
 
+def _sweep_payload(step):
+    """Osie serii kroku dla zdarzeń i meta.json: lista {'param','value'}
+    (kolejność jak w planie) albo None, gdy krok nie jest z serii. None,
+    a nie pusta lista – odbiorcy testują to jednym `if`."""
+    if not step.sweep:
+        return None
+    return [{"param": p, "value": v} for p, v in step.sweep]
+
+
 class AutoRunError(RuntimeError):
     pass
 
@@ -769,9 +778,7 @@ class AutoRunner:
         voltage = self._voltage_for(step)
         # Kontekst dla _emit: etykieta "N.M" (albo numer) i para sweepa.
         self._cur_label = step.label or str(idx)
-        self._cur_sweep = ({"param": step.sweep_param,
-                            "value": step.sweep_value}
-                           if step.sweep_param else None)
+        self._cur_sweep = _sweep_payload(step)
         self._emit("step_start", idx, step.scenario,
                    data={"duration_s": step.duration_s,
                          "voltage": voltage})
@@ -907,9 +914,7 @@ class AutoRunner:
                 "step_label": step.label or str(idx),
                 "scenario": step.scenario,
                 "label": scen.get("label", step.scenario),
-                "sweep": ({"param": step.sweep_param,
-                           "value": step.sweep_value}
-                          if step.sweep_param else None),
+                "sweep": _sweep_payload(step),
                 "flags": core.scenario_flags(scen)
                 + (" " + " ".join(step.build_extra_args)
                    if step.build_extra_args else ""),
@@ -946,8 +951,8 @@ class AutoRunner:
         # wartość, żeby kolumna niosła treść nawet w widokach bez kolumn
         # parametr/wartosc.
         note_default = f"autorun: plan {self.plan.name}"
-        if step.sweep_param:
-            note_default += f" · {step.sweep_param}={step.sweep_value}"
+        for param, value in step.sweep:
+            note_default += f" · {param}={value}"
         row = core.make_row(step.scenario, scen, self.profile,
                             self.sample, voltage, summary["avg_uA"],
                             note or note_default)
@@ -962,9 +967,15 @@ class AutoRunner:
             "prad_max_uA": summary["max_uA"],
             "czas_s": summary["duration_s"],
             "sesja": str(Path(session_dir).relative_to(core.ROOT)),
-            "pomiar_id": step.label,
-            "parametr": step.sweep_param,
-            "wartosc": step.sweep_value})
+            "pomiar_id": step.label})
+        # Osie serii w kolumnach parametr/wartosc i parametr2/wartosc2.
+        # Krok spoza serii zostawia je puste, jednoosiowy – tylko drugą parę.
+        # Dziennik ma dwie pary kolumn (tyle wystawia interfejs); komplet
+        # flag – ile by ich nie było – jest w kolumnie 'flagi' i w 'uwagi'.
+        for (param, value), (col_p, col_v) in zip(
+                step.sweep, (("parametr", "wartosc"),
+                             ("parametr2", "wartosc2"))):
+            row[col_p], row[col_v] = param, value
         core.append_row(row, verbose=False)
 
     # ---------- przebieg ----------

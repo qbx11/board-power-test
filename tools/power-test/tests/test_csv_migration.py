@@ -53,6 +53,37 @@ class CsvMigrationTest(unittest.TestCase):
         self.assertEqual(rows[0]["prad_uA"], "1.5")   # stary zachowany
         self.assertEqual(rows[1]["prad_max_uA"], "12.0")
 
+    def test_migruje_dziennik_sprzed_drugiej_osi_serii(self):
+        # Realny przypadek po dodaniu serii dwuparametrowej: na dysku leży
+        # dziennik ze schematem BEZ parametr2/wartosc2. Nowe kolumny muszą
+        # dojść NA KOŃCU, w tej samej kolejności co CSV_FIELDS – append_row
+        # pisze przez DictWriter(fieldnames=CSV_FIELDS), więc inna kolejność
+        # nagłówka po cichu przesunęłaby wartości w kolumnach.
+        old_fields = [c for c in core.CSV_FIELDS
+                      if c not in ("parametr2", "wartosc2")]
+        core.CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(core.CSV_PATH, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=old_fields)
+            w.writeheader()
+            w.writerow({c: "" for c in old_fields} |
+                       {"scenariusz": "lpn", "prad_uA": "20.5",
+                        "pomiar_id": "1.1", "parametr": "CONFIG_P1",
+                        "wartosc": "10", "sesja": "reports/sessions/x"})
+        row = {c: "" for c in core.CSV_FIELDS}
+        row.update({"scenariusz": "lpn", "prad_uA": "31.2", "pomiar_id": "1.4",
+                    "parametr": "CONFIG_P1", "wartosc": "20",
+                    "parametr2": "CONFIG_P2", "wartosc2": "200",
+                    "sesja": "reports/sessions/y"})
+        core.append_row(row, verbose=False)
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            self.assertEqual(reader.fieldnames, core.CSV_FIELDS)
+            rows = list(reader)
+        self.assertEqual(rows[0]["wartosc"], "10")     # stary nietknięty
+        self.assertEqual(rows[0]["parametr2"], "")     # bez drugiej osi
+        self.assertEqual(rows[1]["parametr2"], "CONFIG_P2")
+        self.assertEqual(rows[1]["wartosc2"], "200")
+
     def test_idempotent(self):
         self._write_old_csv()
         core.ensure_csv_schema()

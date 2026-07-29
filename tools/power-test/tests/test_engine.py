@@ -517,7 +517,7 @@ class EngineTest(unittest.TestCase):
         base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
                     trigger=planmod.Trigger(type="delay", seconds=0))
         steps = planmod.expand_sweep(
-            1, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+            1, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10")], base)
         results = self._run(planmod.Plan(name="serie", board="btz",
                                          steps=steps))
         self.assertEqual([r.status for r in results], ["done"] * 3)
@@ -539,6 +539,36 @@ class EngineTest(unittest.TestCase):
                             for r in rows))
         self.assertEqual([r["wartosc"] for r in rows], ["1", "5", "10"])
         self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=1", rows[0]["flagi"])
+        # Jedna oś nie zapisuje niczego w kolumnach drugiej osi.
+        self.assertTrue(all(not r["parametr2"] and not r["wartosc2"]
+                            for r in rows))
+
+    def test_sweep_dwuosiowy_w_csv(self):
+        # Seria po dwóch parametrach: 3 × 2 = 6 pomiarów, każdy z własnym
+        # katalogiem builda, a obie osie w osobnych kolumnach dziennika.
+        base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_P1", "10, 20, 30"), ("CONFIG_P2", "100, 200")], base)
+        results = self._run(planmod.Plan(name="serie", board="btz",
+                                         steps=steps))
+        self.assertEqual([r.status for r in results], ["done"] * 6)
+
+        build_dirs = [c.split()[c.split().index("-d") + 1]
+                      for c in self.env.commands() if c.startswith("west build")]
+        self.assertEqual(len(set(build_dirs)), 6,
+                         "każda kombinacja powinna mieć własny katalog builda")
+
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([(r["wartosc"], r["wartosc2"]) for r in rows],
+                         [("10", "100"), ("10", "200"), ("20", "100"),
+                          ("20", "200"), ("30", "100"), ("30", "200")])
+        self.assertTrue(all(r["parametr"] == "CONFIG_P1"
+                            and r["parametr2"] == "CONFIG_P2" for r in rows))
+        # Obraz faktycznie zbudowany z obiema flagami naraz.
+        self.assertIn("-DCONFIG_P1=20", rows[3]["flagi"])
+        self.assertIn("-DCONFIG_P2=200", rows[3]["flagi"])
 
     def test_sweep_meta_and_events(self):
         import json
@@ -546,21 +576,21 @@ class EngineTest(unittest.TestCase):
                     trigger=planmod.Trigger(type="delay", seconds=0))
         # Parametr bez prefiksu CONFIG_ też jest akceptowany (normalizacja).
         steps = planmod.expand_sweep(
-            1, "LPN_SENSOR_INTERVAL_S", ["2", "8"], base)
+            1, [("LPN_SENSOR_INTERVAL_S", ["2", "8"])], base)
         results = self._run(planmod.Plan(name="serie", board="btz",
                                          steps=steps))
         meta = json.loads((results[0].session_dir / "meta.json").read_text())
         self.assertEqual(meta["step_label"], "1.1")
         self.assertEqual(meta["sweep"],
-                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
-                          "value": "2"})
+                         [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                           "value": "2"}])
         self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=2", meta["flags"])
         measure = [ev for ev in self.events
                    if ev.kind == "state" and ev.text == "measure"]
         self.assertEqual(measure[0].data.get("label"), "1.1")
         self.assertEqual(measure[0].data.get("sweep"),
-                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
-                          "value": "2"})
+                         [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                           "value": "2"}])
 
     def test_flash_wymusza_reset_i_erase(self):
         # REGRESJA: bez --reset J-Link zostawia układ w stanie po

@@ -7,6 +7,7 @@
 # Sam manifest scenariuszy zostaje nietknięty – plany żyją w osobnych
 # plikach, więc można je wersjonować i wymieniać niezależnie.
 
+import itertools
 import re
 import shlex
 import tomllib
@@ -117,8 +118,11 @@ class PlanStep:
     labels: list = field(default_factory=list)
     # --- seria (sweep): jeden "Pomiar N" rozbity na "Pomiar N.M" ---
     label: str = ""              # etykieta w UI/CSV ("N.M"); puste = numer kroku
-    sweep_param: str = ""        # symbol Kconfig serii, np. CONFIG_LPN_SENSOR_INTERVAL_S
-    sweep_value: str = ""        # wartość tej serii (do wyników), np. "5"
+    # Ustawione parametry serii, po jednym na oś: [(symbol, wartość), …],
+    # np. [("CONFIG_A", "10"), ("CONFIG_B", "100")]. Puste = krok spoza serii.
+    # Lista, a nie para pól, bo osi bywa jedna albo dwie i cały kod
+    # (raport, meta, UI) obsługuje wtedy jedną pętlę zamiast dwóch wariantów.
+    sweep: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------
@@ -126,6 +130,11 @@ class PlanStep:
 #  wartości -> N osobnych kroków "Pomiar N.1 … N.M", każdy budowany z inną
 #  flagą -DCONFIG_...=<wartość>. Silnik nadaje każdej kombinacji flag własny
 #  katalog builda, więc obrazy się nie nadpisują (engine._build_spec).
+#
+#  Osi może być więcej niż jedna – wtedy kroki to ILOCZYN KARTEZJAŃSKI
+#  wartości (p1=10,20,30 i p2=100,200 -> sześć kroków). Pierwsza oś zmienia
+#  się najwolniej, czyli 10/100, 10/200, 20/100, … – ta kolejność grupuje
+#  wyniki wokół pierwszego parametru, co zwykle jest tym "głównym".
 # ------------------------------------------------------------
 
 _SWEEP_PARAM_RE = re.compile(r"^(?:-D)?(?:CONFIG_)?([A-Za-z][A-Za-z0-9_]*)$")
@@ -161,24 +170,38 @@ def parse_sweep_values(raw):
     return out
 
 
-def expand_sweep(number, param, values, base):
+def expand_sweep(number, axes, base):
     """Rozwiń jedną serię (karta 'Pomiar N' z sweepem) na listę PlanStep –
-    po jednym kroku na wartość. Każdy krok dostaje flagę -DCONFIG_...=<v>
-    doklejoną do build_extra_args, etykietę 'N.M' oraz zapamiętaną parę
+    po jednym kroku na KOMBINACJĘ wartości. `axes` to lista par
+    (parametr, wartości), np. [("CONFIG_A", "10, 20"), ("CONFIG_B", "1, 2")];
+    jedna oś daje zwykły sweep, dwie – iloczyn kartezjański (pierwsza oś
+    zmienia się najwolniej). Każdy krok dostaje po jednej fladze
+    -DCONFIG_...=<v> na oś doklejonej do build_extra_args, płaską etykietę
+    'N.M' (M liczone przez wszystkie kombinacje) oraz zapamiętane pary
     (parametr, wartość) do raportu. `base` = wspólne pola PlanStep (scenario,
-    duration_s, trigger, rtt, ...); pola build_extra_args/label/sweep_* z
-    `base` są ignorowane (ustawiamy je per wartość). ValueError przy pustej
-    liście albo złym parametrze."""
-    symbol = normalize_sweep_param(param)
-    vals = parse_sweep_values(values)
+    duration_s, trigger, rtt, ...); pola build_extra_args/label/sweep z
+    `base` są ignorowane (ustawiamy je per kombinacja). ValueError przy braku
+    osi, pustej liście wartości albo złym parametrze."""
+    parsed = [(normalize_sweep_param(p), parse_sweep_values(v))
+              for p, v in axes]
+    if not parsed:
+        raise ValueError("seria bez parametru")
+    # Powtórzony symbol dałby dwie sprzeczne flagi -DCONFIG_X= w jednej
+    # komendzie builda – wygrałaby ostatnia, więc połowa kroków mierzyłaby
+    # to samo pod różnymi etykietami. Lepiej powiedzieć to wprost.
+    symbols = [p for p, _ in parsed]
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("obie osie serii używają tego samego parametru")
     base_extra = list(base.get("build_extra_args", []))
     common = {k: v for k, v in base.items()
-              if k not in ("build_extra_args", "label",
-                           "sweep_param", "sweep_value")}
-    return [PlanStep(build_extra_args=base_extra + [f"-D{symbol}={v}"],
-                     label=f"{number}.{j}", sweep_param=symbol,
-                     sweep_value=v, **common)
-            for j, v in enumerate(vals, 1)]
+              if k not in ("build_extra_args", "label", "sweep")}
+    steps = []
+    for j, combo in enumerate(itertools.product(*[v for _, v in parsed]), 1):
+        pairs = list(zip(symbols, combo))
+        steps.append(PlanStep(
+            build_extra_args=base_extra + [f"-D{s}={v}" for s, v in pairs],
+            label=f"{number}.{j}", sweep=pairs, **common))
+    return steps
 
 
 @dataclass

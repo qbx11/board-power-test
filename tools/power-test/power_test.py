@@ -74,11 +74,14 @@ CSV_PATH = ROOT / "reports" / "pomiary.csv"
 # Wiersze ręczne zostawiają nowe pola puste – ensure_csv_schema()
 # dopisuje brakujące kolumny do starego pliku bez utraty danych.
 # pomiar_id/parametr/wartosc wypełnia tryb autonomiczny dla serii (sweep):
-# etykieta "N.M" oraz sweepowany symbol Kconfig i jego wartość.
+# etykieta "N.M" oraz sweepowany symbol Kconfig i jego wartość. Seria po
+# dwóch parametrach naraz zapisuje drugą oś w parametr2/wartosc2 – osobne
+# kolumny, żeby dało się sortować i filtrować po każdej osi z osobna.
 CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
                    "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
 CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja",
-                      "pomiar_id", "parametr", "wartosc"]
+                      "pomiar_id", "parametr", "wartosc",
+                      "parametr2", "wartosc2"]
 CSV_FIELDS = CSV_BASE_FIELDS + CSV_AUTORUN_FIELDS
 
 
@@ -1061,6 +1064,10 @@ def cmd_report(args):
         die("plik pomiarów jest pusty")
     cols = ["data", "egzemplarz", "scenariusz", "parametr", "wartosc",
             "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
+    # Druga oś serii tylko wtedy, gdy jakiś pomiar ją ma – inaczej dwie
+    # puste kolumny zwężałyby resztę tabeli w każdym zwykłym raporcie.
+    if any(r.get("parametr2") for r in rows):
+        cols[5:5] = ["parametr2", "wartosc2"]
     print_table(tuple(cols), [tuple(r.get(c, "") for c in cols) for r in rows])
     print(f"\n({len(rows)} pomiarów; pełne dane, w tym flagi builda: "
           f"{CSV_PATH.relative_to(ROOT)})")

@@ -246,32 +246,58 @@ class SweepTest(unittest.TestCase):
         base = dict(scenario="app", duration_s=600,
                     build_extra_args=["-DCONFIG_LOG=n"])
         steps = planmod.expand_sweep(
-            2, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+            2, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10")], base)
         self.assertEqual([s.label for s in steps], ["2.1", "2.2", "2.3"])
         self.assertTrue(all(s.scenario == "app" for s in steps))
         self.assertTrue(all(s.duration_s == 600 for s in steps))
-        self.assertTrue(all(
-            s.sweep_param == "CONFIG_LPN_SENSOR_INTERVAL_S" for s in steps))
-        self.assertEqual([s.sweep_value for s in steps], ["1", "5", "10"])
+        self.assertEqual([s.sweep for s in steps],
+                         [[("CONFIG_LPN_SENSOR_INTERVAL_S", v)]
+                          for v in ("1", "5", "10")])
         # Flaga serii doklejona ZA istniejącymi build_extra_args bazy.
         self.assertEqual(steps[1].build_extra_args,
                          ["-DCONFIG_LOG=n",
                           "-DCONFIG_LPN_SENSOR_INTERVAL_S=5"])
 
+    def test_expand_sweep_dwie_osie_daje_iloczyn(self):
+        # Dwie osie -> iloczyn kartezjański, PIERWSZA oś zmienia się
+        # najwolniej: 10/100, 10/200, 20/100, … (kolejność z issue #31).
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_P1", "10, 20, 30"), ("CONFIG_P2", "100, 200")],
+            dict(scenario="app", duration_s=60))
+        self.assertEqual([s.sweep for s in steps], [
+            [("CONFIG_P1", "10"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "10"), ("CONFIG_P2", "200")],
+            [("CONFIG_P1", "20"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "20"), ("CONFIG_P2", "200")],
+            [("CONFIG_P1", "30"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "30"), ("CONFIG_P2", "200")]])
+        # Numeracja płaska przez wszystkie kombinacje, nie siatka N.M.K.
+        self.assertEqual([s.label for s in steps],
+                         ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"])
+        # Każdy krok dostaje po jednej fladze na oś.
+        self.assertEqual(steps[3].build_extra_args,
+                         ["-DCONFIG_P1=20", "-DCONFIG_P2=200"])
+
     def test_expand_sweep_validates(self):
+        base = dict(scenario="app", duration_s=1)
         with self.assertRaises(ValueError):
-            planmod.expand_sweep(1, "zły param", "1", dict(scenario="app",
-                                                           duration_s=1))
+            planmod.expand_sweep(1, [("zły param", "1")], base)
         with self.assertRaises(ValueError):
-            planmod.expand_sweep(1, "CONFIG_X", "", dict(scenario="app",
-                                                         duration_s=1))
+            planmod.expand_sweep(1, [("CONFIG_X", "")], base)
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(1, [], base)          # seria bez parametru
+        # Ten sam symbol na obu osiach: dwie sprzeczne flagi w jednej
+        # komendzie builda, więc połowa kroków mierzyłaby to samo.
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(
+                1, [("CONFIG_X", "1, 2"), ("-DCONFIG_X", "3")], base)
 
     def test_expanded_steps_validate_against_manifest(self):
         # Kroki z ekspansji są zwykłymi PlanStep – przechodzą walidację
         # planu tak jak ręczne kroki z build_extra_args.
         base = dict(scenario="app", duration_s=60)
-        steps = planmod.expand_sweep(1, "CONFIG_LPN_SENSOR_INTERVAL_S",
-                                     "1, 2", base)
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 2")], base)
         plan = planmod.Plan(name="t", board="btz", steps=steps)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
@@ -279,7 +305,7 @@ class SweepTest(unittest.TestCase):
         # Sweep (build_extra_args) na scenariuszu 'hex' -> błąd walidacji,
         # z etykietą kroku "N.M".
         base = dict(scenario="gotowy", duration_s=60)
-        steps = planmod.expand_sweep(3, "CONFIG_X", "1, 2", base)
+        steps = planmod.expand_sweep(3, [("CONFIG_X", "1, 2")], base)
         errs = planmod.validate_plan(
             planmod.Plan(name="t", board="btz", steps=steps), MANIFEST)
         self.assertTrue(any("hex" in e for e in errs))

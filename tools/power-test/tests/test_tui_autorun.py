@@ -337,10 +337,70 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
                              ["1.1", "1.2", "1.3"])
             self.assertTrue(all(s.scenario == "zwykly" for s in plan.steps))
             self.assertTrue(all(s.duration_s == 600 for s in plan.steps))
-            self.assertEqual([s.sweep_value for s in plan.steps],
-                             ["1", "5", "10"])
+            self.assertEqual([s.sweep for s in plan.steps],
+                             [[("CONFIG_LPN_SENSOR_INTERVAL_S", v)]
+                              for v in ("1", "5", "10")])
             self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=5",
                           plan.steps[1].build_extra_args)
+
+    async def test_sweep_dwa_parametry_daja_iloczyn(self):
+        # Drugi (opcjonalny) parametr: 3 wartości × 2 = 6 kroków, w
+        # kolejności z issue #31 – pierwsza oś zmienia się najwolniej.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "10m"
+            card.query_one(".card-sweep-on", tui.Check).value = True
+            card.query_one(".card-sweep-param", Input).value = "CONFIG_P1"
+            card.query_one(".card-sweep-values", Input).value = "10, 20, 30"
+            card.query_one(".card-sweep-param2", Input).value = "CONFIG_P2"
+            card.query_one(".card-sweep-values2", Input).value = "100, 200"
+            await pilot.pause()
+            plan = app._build_auto_plan("btz")
+            self.assertEqual([s.sweep for s in plan.steps], [
+                [("CONFIG_P1", "10"), ("CONFIG_P2", "100")],
+                [("CONFIG_P1", "10"), ("CONFIG_P2", "200")],
+                [("CONFIG_P1", "20"), ("CONFIG_P2", "100")],
+                [("CONFIG_P1", "20"), ("CONFIG_P2", "200")],
+                [("CONFIG_P1", "30"), ("CONFIG_P2", "100")],
+                [("CONFIG_P1", "30"), ("CONFIG_P2", "200")]])
+            self.assertEqual([s.label for s in plan.steps],
+                             [f"1.{i}" for i in range(1, 7)])
+            self.assertEqual(plan.steps[3].build_extra_args,
+                             ["-DCONFIG_P1=20", "-DCONFIG_P2=200"])
+            # Zwinięta karta mówi wprost, ile pomiarów z tego wyjdzie.
+            card.set_collapsed(True)
+            await pilot.pause()
+            title = str(card.query_one(".card-title", tui.CardTitle).render())
+            self.assertIn("CONFIG_P1 ×3", title)
+            self.assertIn("CONFIG_P2 ×2", title)
+            self.assertIn("= 6", title)
+
+    async def test_sweep_druga_os_bez_wartosci_to_blad(self):
+        # Sam parametr drugiej osi, bez wartości, to prawie na pewno
+        # przeoczenie – lepszy czytelny błąd niż po cichu zignorowana oś.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "10m"
+            card.query_one(".card-sweep-on", tui.Check).value = True
+            card.query_one(".card-sweep-values", Input).value = "1, 2"
+            card.query_one(".card-sweep-param2", Input).value = "CONFIG_P2"
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
+            # Odwrotnie też: wartości bez nazwy parametru.
+            card.query_one(".card-sweep-param2", Input).value = ""
+            card.query_one(".card-sweep-values2", Input).value = "100, 200"
+            await pilot.pause()
+            with self.assertRaises(ValueError):
+                app._build_auto_plan("btz")
 
     async def test_sweep_empty_values_raise(self):
         # Seria włączona bez wartości -> czytelny błąd (blokuje start planu).
@@ -405,13 +465,59 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("egzemplarz", cols)
             self.assertEqual(cells[cols.index("egzemplarz")], "BTZ #7")
 
+    async def test_results_screen_pokazuje_druga_os_serii(self):
+        # Kolumny parametr2/wartosc2 doklejają się do tabeli tylko wtedy,
+        # gdy w dzienniku jest pomiar dwuparametrowy (symbole Kconfig są
+        # długie – stale puste kolumny zjadałyby szerokość).
+        row = {c: "" for c in core.CSV_FIELDS}
+        row.update({"data": "2026-01-02 10:00", "scenariusz": "lpn",
+                    "prad_uA": "20.5", "pomiar_id": "1.4",
+                    "parametr": "CONFIG_P1", "wartosc": "20",
+                    "parametr2": "CONFIG_P2", "wartosc2": "200",
+                    "czas_s": "120", "sesja": "reports/sessions/run/x"})
+        core.append_row(row, verbose=False)
+
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 50)) as pilot:
+            app.push_screen(tui.ResultsScreen("auto"))
+            await pilot.pause()
+            table = app.screen.query_one(DataTable)
+            labels = [str(c.label) for c in table.columns.values()]
+            self.assertEqual(
+                labels[labels.index("wartosc") + 1:][:2],
+                ["parametr2", "wartosc2"])   # zaraz za pierwszą osią
+            cells = list(table.get_row_at(0))
+            self.assertEqual(cells[labels.index("wartosc2")], "200")
+
+    async def test_results_screen_bez_drugiej_osi_nie_ma_kolumn(self):
+        row = {c: "" for c in core.CSV_FIELDS}
+        row.update({"data": "2026-01-02 10:00", "scenariusz": "lpn",
+                    "prad_uA": "20.5", "pomiar_id": "1.1",
+                    "parametr": "CONFIG_P1", "wartosc": "20",
+                    "czas_s": "120", "sesja": "reports/sessions/run/x"})
+        core.append_row(row, verbose=False)
+
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 50)) as pilot:
+            app.push_screen(tui.ResultsScreen("auto"))
+            await pilot.pause()
+            labels = [str(c.label) for c in
+                      app.screen.query_one(DataTable).columns.values()]
+            self.assertEqual(labels, tui.ResultsScreen.AUTO_COLS)
+
     def test_sweep_str_and_step_label(self):
         S = tui.AutoRunScreen
         self.assertEqual(S._sweep_str(None), "")
         self.assertEqual(
-            S._sweep_str({"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
-                          "value": "5"}),
+            S._sweep_str([{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                           "value": "5"}]),
             "LPN_SENSOR_INTERVAL_S=5")
+        # Dwie osie po przecinku – nagłówek okna pomiaru i kolumna "seria"
+        # muszą pokazać obie, inaczej połowa kroków wygląda identycznie.
+        self.assertEqual(
+            S._sweep_str([{"param": "CONFIG_P1", "value": "20"},
+                          {"param": "CONFIG_P2", "value": "200"}]),
+            "P1=20, P2=200")
         ev = type("E", (), {"data": {"label": "1.2"}, "step": 1})()
         self.assertEqual(S._step_label(ev), "1.2")
         ev2 = type("E", (), {"data": {}, "step": 3})()

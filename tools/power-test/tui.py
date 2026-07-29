@@ -450,6 +450,10 @@ class ResultsScreen(ModalScreen):
     # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
     AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
                  "wartosc", "napiecie_V", "prad_uA", "czas_s"]
+    # Druga oś serii doklejana za pierwszą tylko wtedy, gdy w dzienniku są
+    # pomiary dwuparametrowe – symbole Kconfig są długie i dwie stale puste
+    # kolumny zjadałyby szerokość potrzebną nazwie scenariusza.
+    AUTO_COLS2 = ["parametr2", "wartosc2"]
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
     # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
@@ -481,17 +485,22 @@ class ResultsScreen(ModalScreen):
         which = "tryb autonomiczny" if auto else "tryb ręczny"
         self.query_one("#results-title", Static).update(
             f"[b]Zebrane pomiary — {which}[/b] · reports/pomiary.csv")
-        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
         table = self.query_one(DataTable)
-        table.add_columns(*cols)
+        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
         if not core.CSV_PATH.is_file():
+            table.add_columns(*cols)
             return
+        # Wiersze wczytujemy PRZED nagłówkiem: dopiero komplet danych mówi,
+        # czy w dzienniku jest w ogóle seria dwuparametrowa.
         with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if bool(row.get("sesja")) != auto:
-                    continue          # wiersz z innego trybu – pomiń
-                table.add_row(*(self._fmt_cell(c, row.get(c, ""))
-                                for c in cols))
+            rows = [r for r in csv.DictReader(f)
+                    if bool(r.get("sesja")) == auto]   # tylko bieżący tryb
+        if auto and any(r.get("parametr2") for r in rows):
+            at = cols.index("wartosc") + 1
+            cols = cols[:at] + self.AUTO_COLS2 + cols[at:]
+        table.add_columns(*cols)
+        for row in rows:
+            table.add_row(*(self._fmt_cell(c, row.get(c, "")) for c in cols))
 
     def on_button_pressed(self, event):
         self.dismiss()
@@ -968,6 +977,24 @@ class RunScreen(Screen):
             self.note("(Esc = powrót do ustawień)")
 
 
+def _sweep_axes(cfg):
+    """Osie serii z konfiguracji karty -> [(parametr, wartości), …] dla
+    expand_sweep(). Druga oś jest opcjonalna: obie pary pól puste = zwykła
+    seria po jednym parametrze. Wypełnienie tylko jednego z dwóch pól drugiej
+    osi to prawie na pewno przeoczenie (albo parametr bez wartości, albo
+    wartości bez parametru), więc mówimy o tym wprost zamiast po cichu
+    ignorować połowę konfiguracji."""
+    axes = [(cfg["sweep_param"], cfg["sweep_values"])]
+    param2, values2 = cfg.get("sweep_param2", ""), cfg.get("sweep_values2", "")
+    if param2 and values2:
+        axes.append((param2, values2))
+    elif param2:
+        raise ValueError("drugi parametr serii nie ma żadnych wartości")
+    elif values2:
+        raise ValueError("wartości drugiej osi serii bez nazwy parametru")
+    return axes
+
+
 class MeasurementCard(Vertical):
     """Jedna karta 'Pomiar N' w kreatorze trybu autonomicznego: scenariusz
     + czas, a start-po-czasie / RTT / napięcie / zapis w zwijanych
@@ -1026,6 +1053,18 @@ class MeasurementCard(Vertical):
                                 placeholder="1, 2, 5, 10, 20, 30, 60, 120, "
                                             "300, 600",
                                 classes="card-sweep-values")
+                    # Druga oś jest OPCJONALNA: wypełniona daje iloczyn
+                    # kartezjański (3 wartości × 2 = 6 pomiarów), pusta –
+                    # zwykłą serię po jednym parametrze.
+                    yield Label("Drugi parametr (opcjonalny):")
+                    yield Input(value=c.get("sweep_param2", ""),
+                                placeholder="— pusto = seria po jednym "
+                                            "parametrze —",
+                                classes="card-sweep-param2")
+                    yield Label("Wartości drugiego parametru:")
+                    yield Input(value=c.get("sweep_values2", ""),
+                                placeholder="100, 200",
+                                classes="card-sweep-values2")
                 # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
                 # Bez niego i tak czekamy MIN_START_DELAY_S na rozruch
                 # płytki; wpisany czas nie dokłada się do tych sekund,
@@ -1144,18 +1183,31 @@ class MeasurementCard(Vertical):
 
     def _sweep_title(self):
         """Dopisek do tytułu zwiniętej karty, gdy włączona seria (sweep):
-        ' · sweep CONFIG_… ×M'. Pusty, gdy sweep wyłączony."""
+        ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
+        liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
+        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy sweep wyłączony."""
         try:
             if not self.query_one(".card-sweep-on", Checkbox).value:
                 return ""
-            param = self.query_one(".card-sweep-param", Input).value.strip()
-            raw = self.query_one(".card-sweep-values", Input).value
-            n = len(raw.replace(",", " ").split())
+            axes = [(self.query_one(f".card-sweep-param{s}",
+                                    Input).value.strip(),
+                     len(self.query_one(f".card-sweep-values{s}", Input)
+                         .value.replace(",", " ").split()))
+                    for s in ("", "2")]
         except Exception:
             return ""
-        if not n:
+        # Druga oś liczy się tylko, gdy użytkownik ją w ogóle zaczął
+        # wypełniać – pusta para pól to zwykła seria jednoparametrowa.
+        axes = [a for i, a in enumerate(axes) if i == 0 or a[0] or a[1]]
+        if any(not n for _, n in axes):
             return " · sweep (brak wartości)"
-        return f" · sweep {param or '?'} ×{n}"
+        text = " · ".join(f"{p or '?'} ×{n}" for p, n in axes)
+        if len(axes) > 1:
+            total = 1
+            for _, n in axes:
+                total *= n
+            text += f" = {total}"
+        return f" · sweep {text}"
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -1185,6 +1237,10 @@ class MeasurementCard(Vertical):
                 self.query_one(".card-sweep-param", Input).value.strip(),
             "sweep_values":
                 self.query_one(".card-sweep-values", Input).value.strip(),
+            "sweep_param2":
+                self.query_one(".card-sweep-param2", Input).value.strip(),
+            "sweep_values2":
+                self.query_one(".card-sweep-values2", Input).value.strip(),
             "duration": self.query_one(".card-duration", Input).value.strip(),
             "delay_on": self.query_one(".card-delay-on", Checkbox).value,
             "delay_s": self.query_one(".card-delay-s", Input).value.strip(),
@@ -1208,6 +1264,9 @@ class MeasurementCard(Vertical):
         self.query_one(".card-sweep-on", Checkbox).value = cfg["sweep_on"]
         self.query_one(".card-sweep-param", Input).value = cfg["sweep_param"]
         self.query_one(".card-sweep-values", Input).value = cfg["sweep_values"]
+        self.query_one(".card-sweep-param2", Input).value = cfg["sweep_param2"]
+        self.query_one(".card-sweep-values2", Input).value = \
+            cfg["sweep_values2"]
         self.query_one(".card-duration", Input).value = cfg["duration"]
         self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
         self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
@@ -1507,13 +1566,14 @@ class AutoRunScreen(Screen):
 
     @staticmethod
     def _sweep_str(sweep):
-        """Para parametr=wartość serii do pokazania (bez prefiksu CONFIG_);
-        pusto, gdy krok nie jest z serii."""
-        if not sweep:
-            return ""
-        param = (sweep.get("param") or "").removeprefix("CONFIG_")
-        value = sweep.get("value") or ""
-        return f"{param}={value}" if param else ""
+        """Pary parametr=wartość serii do pokazania (bez prefiksu CONFIG_,
+        osie po przecinku: 'A=10, B=100'); pusto, gdy krok nie jest z serii."""
+        pairs = []
+        for axis in sweep or ():
+            param = (axis.get("param") or "").removeprefix("CONFIG_")
+            if param:
+                pairs.append(f"{param}={axis.get('value') or ''}")
+        return ", ".join(pairs)
 
     # --- most zdarzenia silnika -> UI (wołane z wątku) ---
 
@@ -2441,10 +2501,10 @@ class PowerTestApp(App):
             if c.get("sweep_on"):
                 # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
+                # Druga oś opcjonalna – wypełniona daje iloczyn kartezjański.
                 try:
                     steps.extend(expand_sweep(
-                        card.number, c["sweep_param"], c["sweep_values"],
-                        base))
+                        card.number, _sweep_axes(c), base))
                 except ValueError as e:
                     raise ValueError(f"Pomiar {card.number}: {e}")
             else:

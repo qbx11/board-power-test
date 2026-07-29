@@ -172,10 +172,37 @@ Narzędzie zachowuje kolejność wartości.
 Narzędzie usuwa duplikaty i zostawia pierwsze wystąpienie.
 Zwinięta karta pokazuje dopisek `· sweep CONFIG_LPN_SENSOR_INTERVAL_S ×3`.
 
+### 5a. Drugi parametr (opcjonalnie)
+
+Pola „Drugi parametr” i „Wartości drugiego parametru” są opcjonalne.
+Zostaw je puste, gdy zmieniasz tylko jeden parametr.
+
+Wypełnione dają wszystkie kombinacje obu list.
+
+```text
+Parametr:    CONFIG_P1     Wartości:    10, 20, 30
+Parametr 2:  CONFIG_P2     Wartości 2:  100, 200
+```
+
+Powyższe daje sześć pomiarów w tej kolejności:
+
+```text
+10/100   10/200   20/100   20/200   30/100   30/200
+```
+
+Pierwszy parametr zmienia się najwolniej.
+Zwinięta karta pokazuje `· sweep CONFIG_P1 ×3 · CONFIG_P2 ×2 = 6`.
+
+Ostrzeżenie: liczba pomiarów to iloczyn, nie suma.
+Dwie listy po dziesięć wartości dają sto pomiarów.
+
+Dziennik zapisuje drugą oś w kolumnach `parametr2` i `wartosc2`.
+
 ### 6. Sprawdź plan przed startem
 
 Karta „Pomiar N” rozwija się na kroki „Pomiar N.1, N.2, …”.
-Każdy krok dostaje jedną flagę builda:
+Kroki numerują się po kolei, także przy dwóch parametrach.
+Każdy krok dostaje po jednej fladze builda na parametr:
 
 ```sh
 west build ... -- -DCONFIG_LPN_SENSOR_INTERVAL_S=10   # Pomiar N.1
