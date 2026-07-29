@@ -1010,6 +1010,8 @@ PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False),
              ("thread", "Thread", False, True),
              ("zigbee", "Zigbee", True, False))
 DEFAULT_PROTOCOL = "ble_mesh"
+# Port dongla wpisywany w karcie od razu (BLE Mesh i Zigbee).
+DEFAULT_DONGLE_PORT = "/dev/ttyACM1"
 # Pola protokołu nie mają checkboxów „włącz” – liczy się to, co wpisane.
 SWEEP_FIELDS = ("sweep_param", "sweep_values", "sweep_param2", "sweep_values2")
 
@@ -1184,9 +1186,15 @@ class MeasurementCard(Vertical):
         # od serii samym odstępem (bez nagłówka), więc kontener istnieje
         # tylko po to, żeby ten odstęp dało się ustawić w CSS.
         with Vertical(classes="card-monitor-box"):
+            # Port wpisany na sztywno (nie placeholder) – dongiel siedzi u nas
+            # zawsze na tym samym /dev/ttyACM1, więc monitor ma być włączony
+            # od razu. Gdy dongla nie ma, silnik pisze „monitor niedostępny”
+            # i mierzy dalej; pomiar przerywa tylko wtedy, gdy to z tego logu
+            # miał ruszyć start.
             yield Label("Port dongla:")
-            yield Input(value=c.get("serial_port", ""),
-                        placeholder="/dev/ttyACM0", classes="card-serial-port")
+            yield Input(value=c.get("serial_port", DEFAULT_DONGLE_PORT),
+                        placeholder=DEFAULT_DONGLE_PORT,
+                        classes="card-serial-port")
             yield Label("Start pomiaru po logu (zawiera tekst):")
             yield Input(value=c.get("serial_pattern", ""),
                         placeholder="np. Friendship z LPN nawiazany",

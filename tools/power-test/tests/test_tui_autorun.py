@@ -557,7 +557,12 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(plan.steps), 1)
             self.assertEqual(plan.steps[0].label, "1")
             self.assertEqual(plan.steps[0].sweep, [])
-            self.assertEqual(plan.steps[0].monitor_port, "")
+            # Port dongla jest w karcie wpisany od razu, więc monitor rusza
+            # bez klikania – ale sam port nie robi z pomiaru serii ani nie
+            # zmienia startu (do tego trzeba jeszcze fragmentu logu).
+            self.assertEqual(plan.steps[0].monitor_port,
+                             tui.DEFAULT_DONGLE_PORT)
+            self.assertEqual(plan.steps[0].trigger.type, "delay")
 
     async def test_zakladki_protokolu_karta_startuje_na_ble_mesh(self):
         # Trzy protokoły u góry ustawień zaawansowanych; domyślnie BLE Mesh,
