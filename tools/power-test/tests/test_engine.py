@@ -511,6 +511,37 @@ class EngineTest(unittest.TestCase):
                         f"RTT czekał na podłogę zamiast na wzorzec "
                         f"({waited:.2f} s)")
 
+    def test_zajetosc_pamieci_trafia_do_dziennika(self):
+        # Tabelka linkera z końca builda -> kolumny flash_B/ram_B (+ %).
+        plan = planmod.Plan(name="p", board="btz", steps=[
+            planmod.PlanStep(scenario="zwykly", duration_s=0.15,
+                             trigger=planmod.Trigger(type="delay",
+                                                     seconds=0))])
+        self._run(plan)
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            row = list(csv.DictReader(f))[0]
+        self.assertEqual(row["flash_B"], "118436")
+        self.assertEqual(row["flash_pct"], "7.53")
+        self.assertEqual(row["ram_B"], "25696")
+        self.assertEqual(row["ram_pct"], "13.35")
+
+    def test_pominiety_build_tez_ma_pamiec_w_dzienniku(self):
+        # REGRESJA: obraz budujemy raz, a mierzymy nim kilka razy (drugi
+        # krok dostaje "ten sam obraz – bez ponownego builda"). Liczby
+        # czytamy wtedy z katalogu builda, więc wiersz NIE jest uboższy
+        # tylko dlatego, że linker nic już nie wypisał.
+        step = dict(scenario="zwykly", duration_s=0.15,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        plan = planmod.Plan(name="p", board="btz",
+                            steps=[planmod.PlanStep(**step),
+                                   planmod.PlanStep(**step)])
+        self._run(plan)
+        builds = [c for c in self.env.commands() if c.startswith("west build")]
+        self.assertEqual(len(builds), 1, "drugi krok nie powinien budować")
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([r["flash_B"] for r in rows], ["118436", "118436"])
+
     def test_sweep_distinct_builds_and_csv(self):
         # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość
         # budowana do OSOBNEGO katalogu, a wartość parametru trafia do CSV.

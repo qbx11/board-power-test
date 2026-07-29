@@ -82,7 +82,11 @@ CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
 CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja",
                       "pomiar_id", "parametr", "wartosc",
                       "parametr2", "wartosc2"]
-CSV_FIELDS = CSV_BASE_FIELDS + CSV_AUTORUN_FIELDS
+# Zajętość pamięci zbudowanego obrazu (tabelka linkera z końca builda).
+# Wypełniane w OBU trybach, bo obraz buduje się tak samo; scenariusz na
+# gotowym hexie zostawia je puste (nie ma builda, więc nie ma tabelki).
+CSV_MEMORY_FIELDS = ["flash_B", "flash_pct", "ram_B", "ram_pct"]
+CSV_FIELDS = CSV_BASE_FIELDS + CSV_AUTORUN_FIELDS + CSV_MEMORY_FIELDS
 
 
 def die(msg):
@@ -261,12 +265,25 @@ def wait_for_free_jlink(dry_run=False):
         ask("[Enter = sprawdź ponownie, Ctrl-C = przerwij] ")
 
 
-def run_cmd(cmd, dry, cwd=ROOT):
-    """Wypisz i (poza --dry-run) wykonaj komendę."""
+def run_cmd(cmd, dry, cwd=ROOT, capture=None):
+    """Wypisz i (poza --dry-run) wykonaj komendę. `capture` = lista, do
+    której dopisujemy wyjście, wypisując je JEDNOCZEŚNIE na ekran (build
+    potrafi trwać minuty – schowanie go za captureem wyglądałoby na
+    zawieszenie)."""
     print(f"\n>>> {shlex.join(cmd)}")
     if dry:
         return
-    rc = subprocess.run(cmd, cwd=cwd, env=child_env()).returncode
+    if capture is None:
+        rc = subprocess.run(cmd, cwd=cwd, env=child_env()).returncode
+    else:
+        with subprocess.Popen(cmd, cwd=cwd, env=child_env(), text=True,
+                              errors="replace", stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT) as proc:
+            for line in proc.stdout:
+                line = line.rstrip()
+                print(line)
+                capture.append(line)
+            rc = proc.wait()
     if rc != 0:
         die(f"komenda zakończyła się kodem {rc} – przerywam scenariusz")
 
@@ -543,6 +560,12 @@ def _default_domain(build_path):
     return None
 
 
+def default_domain(build_dir):
+    """Jak _default_domain, ale po nazwie katalogu builda (względnej wobec
+    repo) – tego kształtu używają wołający spoza tego modułu."""
+    return _default_domain(ROOT / build_dir) if build_dir else None
+
+
 def built_hex(build_dir):
     """Ścieżka do obrazu zbudowanego w `build_dir` albo None.
 
@@ -686,9 +709,11 @@ def cmd_run(args):
             built[name] = build_dir
             continue
         print(f"\n--- build: {name} – {scen.get('description', '')}")
-        run_cmd(cmd, args.dry_run, cwd=workspace)
+        out = []
+        run_cmd(cmd, args.dry_run, cwd=workspace, capture=out)
         if not args.dry_run:
             record_build(build_dir, cmd)
+            record_memory(build_dir, out)
         built[name] = build_dir
 
     # --- FAZA 2: flash + pomiar, scenariusz po scenariuszu ---
@@ -827,7 +852,8 @@ def measure_scenario(name, scen, build_dir, profile, defaults, sample, args,
             print("Podaj liczbę: '0.95' / '7,3' (µA) albo '2.5 mA'.")
 
     uwagi = ask("Uwagi (Enter = brak): ")
-    append_row(make_row(name, scen, profile, sample, voltage, current, uwagi))
+    append_row(make_row(name, scen, profile, sample, voltage, current, uwagi,
+                        build_dir=build_dir))
 
 
 def parse_current(raw, default_unit="uA"):
@@ -844,41 +870,156 @@ def parse_current(raw, default_unit="uA"):
     return round(float(s.strip()) * factor, 6)
 
 
-def parse_memory_report(output):
-    """Wyłuskaj z wyjścia builda tabelkę 'Memory region' (podsumowanie
-    zajętości FLASH/RAM z linkera) i sformatuj ją jako tabelę Markdown –
-    gotową do wklejenia np. do PR-a czy notatki. Zwraca tekst tabeli albo
-    None, gdy w wyjściu jej nie ma (np. przy flashu, nie buildzie)."""
+# Wiersz tabelki: 'NAZWA:  <liczba> <jedn>B  <liczba> <jedn>B  <proc>%'
+# (rozmiary mają spację między liczbą a jednostką, więc łapiemy je regexem
+# zamiast dzielić po białych znakach).
+_MEM_ROW_RE = re.compile(r"^\s*(?P<region>\w[\w.]*)\s*:\s+"
+                         r"(?P<used>[\d,]+\s*[KMGT]?B)\s+"
+                         r"(?P<size>[\d,]+\s*[KMGT]?B)\s+"
+                         r"(?P<pct>[\d.]+\s*%)\s*$")
+# Sysbuild buduje każdy obraz (aplikacja, MCUboot, …) jako osobny podprojekt
+# i ninja zapowiada go tą linią. Dzięki niej wiemy, do którego obrazu należy
+# tabelka drukowana niżej – bez tego nie da się ich odróżnić.
+_MEM_IMAGE_RE = re.compile(r"Performing build step for '([^']+)'")
+# Zephyr drukuje rozmiary w jednostkach 1024-owych.
+_MEM_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2,
+              "GB": 1024 ** 3, "TB": 1024 ** 4}
+# Nazwa pliku z zapamiętaną zajętością pamięci obrazu, w katalogu builda
+# (obok .bpt_build_cmd). Bez niego pominięty build – a pomijamy go zawsze,
+# gdy obraz jest aktualny – nie miałby czego zapisać do dziennika, bo
+# linker nic nie drukuje, kiedy nic nie robi.
+MEMORY_CACHE_NAME = ".bpt_memory.json"
+
+
+def _memory_tables(output):
+    """Wszystkie tabelki 'Memory region' z wyjścia builda:
+    [(nazwa_obrazu|None, [(region, used, size, pct), …]), …]. Zwykły build
+    daje jedną pozycję, sysbuild – po jednej na obraz."""
     lines = output.splitlines() if isinstance(output, str) else list(output)
-    start = next((i for i, ln in enumerate(lines)
-                  if "Memory region" in ln and "Used Size" in ln), None)
-    if start is None:
-        return None
-    # Wiersz: 'NAZWA:  <liczba> <jedn>B  <liczba> <jedn>B  <proc>%'
-    # (rozmiary mają spację między liczbą a jednostką, więc łapiemy je
-    # regexem zamiast dzielić po białych znakach).
-    row_re = re.compile(r"^\s*(?P<region>\w[\w.]*)\s*:\s+"
-                        r"(?P<used>[\d,]+\s*[KMGT]?B)\s+"
-                        r"(?P<size>[\d,]+\s*[KMGT]?B)\s+"
-                        r"(?P<pct>[\d.]+\s*%)\s*$")
 
     def norm(s):
         return re.sub(r"\s+", " ", s).strip()
 
-    rows = []
-    for ln in lines[start + 1:]:
-        m = row_re.match(ln)
+    tables, image = [], None
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        m = _MEM_IMAGE_RE.search(ln)
         if m:
-            rows.append((m["region"], norm(m["used"]), norm(m["size"]),
-                         norm(m["pct"])))
-        elif rows or ln.strip():
-            break  # koniec tabeli (albo zaraz po nagłówku nie ma wierszy)
-    if not rows:
+            image = m.group(1)
+        elif "Memory region" in ln and "Used Size" in ln:
+            rows = []
+            for ln2 in lines[i + 1:]:
+                m2 = _MEM_ROW_RE.match(ln2)
+                if m2:
+                    rows.append((m2["region"], norm(m2["used"]),
+                                 norm(m2["size"]), norm(m2["pct"])))
+                elif rows or ln2.strip():
+                    break     # koniec tabeli (albo pusto zaraz po nagłówku)
+                i += 1
+            if rows:
+                tables.append((image, rows))
+        i += 1
+    return tables
+
+
+def _pick_memory_table(tables, image):
+    """Tabelka obrazu `image`, a gdy nie da się go wskazać – jedyna, jaka
+    jest. None przy kilku obrazach bez rozstrzygnięcia: lepiej nie zapisać
+    nic niż zapisać zajętość bootloadera jako zajętość aplikacji."""
+    if image:
+        for name, rows in tables:
+            if name == image:
+                return rows
+    return tables[0][1] if len(tables) == 1 else None
+
+
+def _to_bytes(text):
+    """'118436 B' / '1536 KB' -> liczba bajtów. None, gdy nie rozumiemy."""
+    m = re.match(r"^([\d,]+)\s*([KMGT]?B)$", text.strip())
+    if not m:
         return None
+    return int(m.group(1).replace(",", "")) * _MEM_UNITS[m.group(2)]
+
+
+def _as_markdown(rows):
     out = ["| Memory region | Used Size | Region Size | %age Used |",
            "| --- | --- | --- | --- |"]
     out += [f"| {r} | {u} | {s} | {p} |" for r, u, s, p in rows]
     return "\n".join(out)
+
+
+def parse_memory_report(output, image=None):
+    """Wyłuskaj z wyjścia builda tabelkę 'Memory region' (podsumowanie
+    zajętości FLASH/RAM z linkera) i sformatuj ją jako tabelę Markdown –
+    gotową do wklejenia np. do PR-a czy notatki. `image` wskazuje obraz
+    sysbuilda; przy kilku obrazach i bez wskazania pokazujemy WSZYSTKIE
+    tabelki (podpisane nazwą obrazu) – na ekranie nadmiar nie szkodzi.
+    Zwraca tekst albo None, gdy tabelki nie ma (np. przy flashu)."""
+    tables = _memory_tables(output)
+    if not tables:
+        return None
+    rows = _pick_memory_table(tables, image)
+    if rows is not None:
+        return _as_markdown(rows)
+    return "\n\n".join(f"**{name}**\n{_as_markdown(rws)}" if name
+                       else _as_markdown(rws) for name, rws in tables)
+
+
+def memory_usage(output, image=None):
+    """Zajętość FLASH/RAM obrazu jako liczby do dziennika:
+    {'flash_B', 'flash_pct', 'ram_B', 'ram_pct'} (brakujące regiony
+    pomijamy). None, gdy nie ma tabelki albo nie wiadomo, który obraz.
+    IDT_LIST i inne regiony nas nie interesują – to nie jest pamięć,
+    o którą ktokolwiek pyta przy porównywaniu firmware'ów."""
+    tables = _memory_tables(output)
+    rows = _pick_memory_table(tables, image) if tables else None
+    if not rows:
+        return None
+    usage = {}
+    for region, used, _size, pct in rows:
+        key = {"FLASH": "flash", "RAM": "ram"}.get(region.upper())
+        if key is None:
+            continue
+        nbytes = _to_bytes(used)
+        if nbytes is not None:
+            usage[f"{key}_B"] = nbytes
+        try:
+            usage[f"{key}_pct"] = float(pct.rstrip("% ").strip())
+        except ValueError:
+            pass
+    return usage or None
+
+
+def record_memory(build_dir, output):
+    """Zapamiętaj zajętość pamięci obok zbudowanego obrazu i zwróć ją.
+    Czytamy nazwę domeny z domains.yaml, żeby przy sysbuildzie wziąć
+    tabelkę APLIKACJI, a nie pierwszego lepszego obrazu (przy MCUboot
+    pierwszy buduje się bootloader). Cicho odpuszczamy, gdy tabelki nie
+    ma albo katalog jest niezapisywalny – to tylko metadane."""
+    usage = memory_usage(output, image=_default_domain(ROOT / build_dir))
+    if not usage:
+        return None
+    try:
+        (ROOT / build_dir / MEMORY_CACHE_NAME).write_text(
+            json.dumps(usage), encoding="utf-8")
+    except OSError:
+        pass
+    return usage
+
+
+def load_memory_usage(build_dir):
+    """Zajętość pamięci zapamiętana przy budowaniu tego katalogu (albo
+    None). Używane, gdy build został POMINIĘTY jako aktualny – obraz jest
+    ten sam, więc liczby też."""
+    if not build_dir:
+        return None
+    try:
+        data = json.loads((ROOT / build_dir / MEMORY_CACHE_NAME)
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def copy_to_clipboard(text):
@@ -925,8 +1066,12 @@ def measure_instructions(scen, voltage, settle_s):
     return text
 
 
-def make_row(name, scen, profile, sample, voltage, current, uwagi):
-    """Wiersz dziennika CSV – wspólny dla CLI i TUI."""
+def make_row(name, scen, profile, sample, voltage, current, uwagi,
+             build_dir=None):
+    """Wiersz dziennika CSV – wspólny dla CLI i TUI. `build_dir` dokłada
+    zajętość pamięci zapamiętaną przy budowaniu obrazu (czytamy ją z
+    katalogu, a nie z wyjścia builda, żeby pominięty build – ten sam obraz –
+    dawał te same liczby co świeży)."""
     return {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "plytka": profile["board"],
@@ -937,6 +1082,7 @@ def make_row(name, scen, profile, sample, voltage, current, uwagi):
         "prad_uA": current,
         "oczekiwane": scen.get("expected", ""),
         "uwagi": uwagi,
+        **(load_memory_usage(build_dir) or {}),
     }
 
 
@@ -945,19 +1091,26 @@ def ensure_csv_schema():
 
     Pierwsza wersja narzędzia zapisywała tylko CSV_BASE_FIELDS; tryb
     autonomiczny dokłada kolumny (min/max, czas, sesja). Jeśli istniejący
-    plik ma węższy nagłówek, przepisujemy go RAZ: nowy nagłówek + stare
+    plik ma inny nagłówek, przepisujemy go RAZ: nowy nagłówek + stare
     wiersze uzupełnione pustymi polami. Bez pliku albo z aktualnym
-    nagłówkiem nic nie robimy."""
+    nagłówkiem nic nie robimy.
+
+    Nagłówek ustawiamy DOKŁADNIE w kolejności CSV_FIELDS, a nie „stary
+    nagłówek + brakujące na końcu”. append_row pisze przez
+    DictWriter(fieldnames=CSV_FIELDS), więc każda inna kolejność w pliku
+    oznacza wartości zapisane pod cudzymi nagłówkami. Rozjeżdżało się to,
+    gdy nowa kolumna dochodziła w ŚRODKU schematu (np. parametr2 przed
+    kolumnami pamięci). Kolumny spoza schematu – z nowszej wersji
+    narzędzia – zostawiamy na końcu, żeby ich nie skasować."""
     if not CSV_PATH.is_file():
         return
     with open(CSV_PATH, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames or []
-        missing = [c for c in CSV_FIELDS if c not in header]
-        if not missing:
+        fields = CSV_FIELDS + [c for c in header if c not in CSV_FIELDS]
+        if header == fields:
             return
         rows = list(reader)
-    fields = header + missing
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()

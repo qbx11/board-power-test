@@ -107,10 +107,12 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             return "#flash"
         return "#yes"
 
-    async def click_through_run(self, pilot):
+    async def click_through_run(self, pilot, current=None):
         """Przeklikaj dialogi FAZY 2 (flash -> SWD -> pomiar 'Pomiń' ->
         podsumowanie) aż RunScreen wróci do ekranu głównego. Zwraca notki
-        z przebiegu (zbierane w locie – po zdjęciu RunScreen już ich nie ma)."""
+        z przebiegu (zbierane w locie – po zdjęciu RunScreen już ich nie ma).
+        `current` = wpisz taki prąd [µA] w oknie pomiaru i ZAPISZ zamiast
+        pomijać (wtedy przebieg dopisuje wiersz do dziennika)."""
         app = pilot.app
         notes = set()
         # Tabelki pamięci też znikają z RunScreen po jego zdjęciu – zbieramy
@@ -136,7 +138,12 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 return notes  # RunScreen zdjęty – jesteśmy na ekranie głównym
             # Dopiero ułożony dialog mówi, KTÓRY to wariant ChoiceScreen.
             await self.wait_for(pilot, "Button")
-            button = self.forward_button(app.screen)
+            if current is not None and isinstance(screen, tui.MeasureScreen):
+                screen.query_one("#current", Input).value = str(current)
+                await pilot.pause()
+                button = "#save"
+            else:
+                button = self.forward_button(app.screen)
             # Klik z ponowieniem: click_ready czeka na ułożony przycisk,
             # ale gdyby dialog i tak nie zareagował, próbujemy jeszcze raz.
             for _ in range(5):
@@ -599,6 +606,23 @@ class TuiScenariosDialogTests(TuiHarness):
 
 
 class TuiRunTests(TuiHarness):
+
+    async def test_pomiar_reczny_zapisuje_zajetosc_pamieci(self):
+        # Tryb ręczny też buduje firmware, więc jego wiersze w dzienniku
+        # dostają zajętość pamięci z tabelki linkera – tak samo jak
+        # autonomiczne. Scenariusz na gotowym hexie builda nie ma, więc
+        # zostaje bez tych kolumn.
+        import csv
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly", "hexowy"])
+            await self.click_through_run(pilot, current=1.5)
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = {r["scenariusz"]: r for r in csv.DictReader(f)}
+        self.assertEqual(rows["zwykly"]["flash_B"], "118436")
+        self.assertEqual(rows["zwykly"]["ram_B"], "25696")
+        self.assertEqual(rows["zwykly"]["flash_pct"], "7.53")
+        self.assertEqual(rows["hexowy"]["flash_B"], "")
 
     async def test_przebieg_mieszany_source_hex_i_regresja(self):
         app = tui.PowerTestApp()

@@ -445,19 +445,23 @@ class ResultsScreen(ModalScreen):
     # nigdy jej nie ustawia). pomiar_id/parametr/wartosc mówią, który pomiar
     # z serii (sweep) miał jaką wartość flagi build.
     MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
-                   "prad_uA", "oczekiwane", "uwagi"]
+                   "prad_uA", "oczekiwane", "flash_B", "flash_pct",
+                   "ram_B", "ram_pct", "uwagi"]
     # 'egzemplarz' jest w OBU trybach: bez niego nie wiadomo, której płytki
     # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
     AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
-                 "wartosc", "napiecie_V", "prad_uA", "czas_s"]
-    # Druga oś serii doklejana za pierwszą tylko wtedy, gdy w dzienniku są
-    # pomiary dwuparametrowe – symbole Kconfig są długie i dwie stale puste
-    # kolumny zjadałyby szerokość potrzebną nazwie scenariusza.
-    AUTO_COLS2 = ["parametr2", "wartosc2"]
+                 "wartosc", "parametr2", "wartosc2", "napiecie_V", "prad_uA",
+                 "flash_B", "flash_pct", "ram_B", "ram_pct", "czas_s"]
+    # Kolumny pokazywane tylko wtedy, gdy JAKIŚ widoczny wiersz je wypełnia.
+    # Bez tego dziennik bez serii dwuparametrowej albo ze scenariuszami na
+    # gotowym hexie (brak builda = brak tabelki pamięci) niósłby stale puste
+    # kolumny, a te zjadają szerokość potrzebną nazwie scenariusza.
+    OPTIONAL_COLS = ("parametr2", "wartosc2",
+                     "flash_B", "flash_pct", "ram_B", "ram_pct")
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
     # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
-    _TWO_DP = ("prad_uA", "czas_s")
+    _TWO_DP = ("prad_uA", "czas_s", "flash_pct", "ram_pct")
 
     def __init__(self, mode=None):
         super().__init__()
@@ -487,17 +491,16 @@ class ResultsScreen(ModalScreen):
             f"[b]Zebrane pomiary — {which}[/b] · reports/pomiary.csv")
         table = self.query_one(DataTable)
         cols = self.AUTO_COLS if auto else self.MANUAL_COLS
-        if not core.CSV_PATH.is_file():
-            table.add_columns(*cols)
-            return
-        # Wiersze wczytujemy PRZED nagłówkiem: dopiero komplet danych mówi,
-        # czy w dzienniku jest w ogóle seria dwuparametrowa.
-        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
-            rows = [r for r in csv.DictReader(f)
-                    if bool(r.get("sesja")) == auto]   # tylko bieżący tryb
-        if auto and any(r.get("parametr2") for r in rows):
-            at = cols.index("wartosc") + 1
-            cols = cols[:at] + self.AUTO_COLS2 + cols[at:]
+        rows = []
+        if core.CSV_PATH.is_file():
+            # Wiersze wczytujemy PRZED nagłówkiem: dopiero komplet danych
+            # mówi, które kolumny opcjonalne mają w ogóle treść.
+            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+                rows = [r for r in csv.DictReader(f)
+                        if bool(r.get("sesja")) == auto]   # tylko ten tryb
+        cols = [c for c in cols
+                if c not in self.OPTIONAL_COLS
+                or any(r.get(c) for r in rows)]
         table.add_columns(*cols)
         for row in rows:
             table.add_row(*(self._fmt_cell(c, row.get(c, "")) for c in cols))
@@ -678,9 +681,10 @@ class RunScreen(Screen):
 
     SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    async def run_west(self, cmd, cwd, title):
+    async def run_west(self, cmd, cwd, title, build_dir=None):
         """Komenda w zwijanej sekcji z animacją w trakcie działania;
-        pełne wyjście po kliknięciu/błędzie."""
+        pełne wyjście po kliknięciu/błędzie. `build_dir` (tylko dla buildów)
+        włącza zapamiętanie zajętości pamięci obok obrazu."""
         out = Log(classes="cmd-log")
         section = Collapsible(out, title=f"{self.SPINNER[0]} {title}",
                               collapsed=True)
@@ -742,8 +746,12 @@ class RunScreen(Screen):
         section.title = f"✓ {title}"
 
         # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown
-        # (od razu do skopiowania). Przy flashu parser zwraca None.
-        report = core.parse_memory_report(lines)
+        # (od razu do skopiowania) i te same liczby zapamiętane obok obrazu,
+        # żeby trafiły do dziennika. Przy flashu parser zwraca None.
+        image = core.default_domain(build_dir) if build_dir else None
+        if build_dir:
+            core.record_memory(build_dir, lines)
+        report = core.parse_memory_report(lines, image=image)
         if report is not None:
             box = Static(report, classes="mem-report", markup=False)
             box.border_title = "pamięć (Markdown — skopiuj)"
@@ -865,7 +873,8 @@ class RunScreen(Screen):
                 build_no += 1
                 status.update(f"FAZA 1/2 · build {build_no}/"
                               f"{len(will_build)} · {name}")
-                await self.run_west(cmd, workspace, f"build {name}")
+                await self.run_west(cmd, workspace, f"build {name}",
+                                    build_dir=build_dir)
                 core.record_build(build_dir, cmd)
                 built[name] = build_dir
             if will_build:
@@ -948,7 +957,8 @@ class RunScreen(Screen):
                     current, notes = result
                     core.append_row(core.make_row(name, scen, self.profile,
                                                   self.sample, voltage,
-                                                  current, notes),
+                                                  current, notes,
+                                                  build_dir=built[name]),
                                     verbose=False)
                     saved.append(f"{name}: {current} µA")
                     self.note(f"Zapisano: {name} = {current} µA")
@@ -1452,7 +1462,10 @@ class AutoRunScreen(Screen):
         self._active_log = None
         self._active_lines = None
         # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown –
-        # ta sama co w trybie ręcznym. Przy flashu parser zwraca None.
+        # ta sama co w trybie ręcznym. Przy flashu parser zwraca None. Tu nie
+        # znamy katalogu builda (zdarzenia niosą tylko linie), więc przy
+        # sysbuildzie z kilkoma obrazami pokazujemy wszystkie tabelki; do
+        # dziennika trafia właściwa – wybiera ją silnik (core.record_memory).
         report = core.parse_memory_report(lines)
         if report is not None:
             box = Static(report, classes="mem-report", markup=False)

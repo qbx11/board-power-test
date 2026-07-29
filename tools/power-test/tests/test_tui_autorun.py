@@ -435,28 +435,36 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
         core.append_row(manual, verbose=False)
         core.append_row(auto, verbose=False)
 
+        def kolumny(table):
+            return [str(c.label) for c in table.columns.values()]
+
+        # Kolumny opcjonalne (druga oś serii, pamięć) odpadają, gdy żaden
+        # widoczny wiersz ich nie wypełnia – zostaje stały trzon.
+        def obowiazkowe(cols):
+            return [c for c in cols
+                    if c not in tui.ResultsScreen.OPTIONAL_COLS]
+
         app = tui.PowerTestApp()
         async with app.run_test(size=(160, 50)) as pilot:
             app.push_screen(tui.ResultsScreen("standard"))
             await pilot.pause()
             table = app.screen.query_one(DataTable)
             self.assertEqual(table.row_count, 1)          # tylko ręczny
-            self.assertEqual(len(table.columns),
-                             len(tui.ResultsScreen.MANUAL_COLS))
+            self.assertEqual(kolumny(table),
+                             obowiazkowe(tui.ResultsScreen.MANUAL_COLS))
             app.pop_screen()
             await pilot.pause()
             app.push_screen(tui.ResultsScreen("auto"))
             await pilot.pause()
             table = app.screen.query_one(DataTable)
             self.assertEqual(table.row_count, 1)          # tylko autonomiczny
-            self.assertEqual(len(table.columns),
-                             len(tui.ResultsScreen.AUTO_COLS))
+            cols = kolumny(table)
+            self.assertEqual(cols, obowiazkowe(tui.ResultsScreen.AUTO_COLS))
             # min/max prądu nie są pokazywane w tabeli.
             self.assertNotIn("prad_min_uA", tui.ResultsScreen.AUTO_COLS)
             self.assertNotIn("prad_max_uA", tui.ResultsScreen.AUTO_COLS)
             # prąd i czas z dokładnością do 2 miejsc po przecinku.
             cells = list(table.get_row_at(0))
-            cols = tui.ResultsScreen.AUTO_COLS
             self.assertEqual(cells[cols.index("prad_uA")], "20.50")
             self.assertEqual(cells[cols.index("czas_s")], "120.00")
             # REGRESJA: tryb autonomiczny gubił kolumnę z egzemplarzem
@@ -503,7 +511,9 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             labels = [str(c.label) for c in
                       app.screen.query_one(DataTable).columns.values()]
-            self.assertEqual(labels, tui.ResultsScreen.AUTO_COLS)
+            self.assertNotIn("parametr2", labels)
+            self.assertNotIn("wartosc2", labels)
+            self.assertIn("parametr", labels)     # pierwsza oś zostaje
 
     def test_sweep_str_and_step_label(self):
         S = tui.AutoRunScreen

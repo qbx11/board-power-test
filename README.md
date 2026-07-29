@@ -232,3 +232,18 @@ Obrazy nie nadpisują się.
 Każdy pomiar trafia do wspólnego dziennika `reports/pomiary.csv`.
 Przycisk **„Wyniki”** pokazuje dziennik w interfejsie.
 Tryb autonomiczny zapisuje dodatkowo pełną sesję z danymi i etykietami w `reports/sessions/`.
+
+### Zajętość pamięci
+
+Tabelka `Memory region` z końca builda trafia do wyników.
+Dziennik dostaje kolumny `flash_B`, `flash_pct`, `ram_B` i `ram_pct`.
+Działa to w obu trybach pomiaru.
+
+Narzędzie zapamiętuje te liczby w katalogu builda (`.bpt_memory.json`).
+Dzięki temu pomiar na gotowym obrazie też je ma, choć build się nie wykonał.
+
+Scenariusz na gotowym pliku `.hex` zostaje bez tych kolumn.
+Nie ma builda, więc nie ma tabelki linkera.
+
+Sysbuild buduje kilka obrazów (aplikacja, MCUboot).
+Do wyników trafia obraz aplikacji, czyli domena domyślna z `domains.yaml`.

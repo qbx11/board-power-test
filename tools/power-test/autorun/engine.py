@@ -233,9 +233,11 @@ class AutoRunner:
             raise _Cancelled()
 
     def _run_streamed(self, cmd, cwd, title, step=0, name="",
-                      log_file=None):
+                      log_file=None, capture=None):
         """Subprocess ze strumieniowaniem linii do zdarzeń i logu –
         odpowiednik tui._stream, ale po stronie silnika (bez UI).
+        `capture` = lista, do której dopisujemy wyjście (build – po tabelkę
+        pamięci); przy None nie trzymamy logu w pamięci.
         Przerwanie (cancel) ubija proces."""
         header = f"$ {shlex.join(cmd)}"
         self._log(f"{title}: {header}", files=(log_file,) if log_file
@@ -256,6 +258,8 @@ class AutoRunner:
                 line = line.rstrip()
                 if log_file is not None:
                     log_file.write(line + "\n")
+                if capture is not None:
+                    capture.append(line)
                 self._emit("line", step, name, line)
                 if self.cancel.is_set():
                     proc.terminate()
@@ -327,8 +331,12 @@ class AutoRunner:
                        f"({build_dir}/) – pomijam", idx, step.scenario)
             return build_dir
         self._emit("state", idx, step.scenario, "build")
+        # Wyjście builda zbieramy, żeby wyłuskać z niego tabelkę zajętości
+        # pamięci – liczby lądują obok obrazu i stamtąd trafiają do
+        # dziennika (także gdy następny krok ten build pominie).
+        out = []
         rc = self._run_streamed(cmd, workspace, f"build {step.scenario}",
-                                idx, step.scenario)
+                                idx, step.scenario, capture=out)
         if rc != 0:
             self._note(f"pomiar {idx} ({step.scenario}): build padł "
                        f"(kod {rc})", idx, step.scenario)
@@ -339,6 +347,7 @@ class AutoRunner:
             return BUILD_FAILED
         if not self.dry_run:
             core.record_build(build_dir, cmd)
+            core.record_memory(build_dir, out)
         self._done_dirs[build_dir] = idx
         return build_dir
 
@@ -866,11 +875,13 @@ class AutoRunner:
             except _Cancelled:
                 summary = writer.finalize("cancelled")
                 self._append_csv(step, scen, voltage, summary,
-                                 session_dir, "przerwano")
+                                 session_dir, "przerwano",
+                                 build_dir=build_dir)
                 return StepResult(idx, step.scenario, "cancelled",
                                   session_dir, summary)
             summary = writer.finalize("done")
-            self._append_csv(step, scen, voltage, summary, session_dir)
+            self._append_csv(step, scen, voltage, summary, session_dir,
+                             build_dir=build_dir)
             self._emit("step_done", idx, step.scenario, data=summary)
             self._note(f"krok {idx} ({step.scenario}): "
                        f"avg {summary.get('avg_uA')} µA, "
@@ -944,7 +955,7 @@ class AutoRunner:
                 **self._session_meta(idx, step, scen, voltage, None)})
 
     def _append_csv(self, step, scen, voltage, summary, session_dir,
-                    note=""):
+                    note="", build_dir=None):
         if not summary.get("samples"):
             return
         # Domyślna 'uwaga': plan + (dla serii) sweepowany parametr i jego
@@ -955,7 +966,9 @@ class AutoRunner:
             note_default += f" · {param}={value}"
         row = core.make_row(step.scenario, scen, self.profile,
                             self.sample, voltage, summary["avg_uA"],
-                            note or note_default)
+                            note or note_default,
+                            build_dir=build_dir if isinstance(build_dir, str)
+                            else None)
         # scenario_flags() nie zna build_extra_args (są per krok, nie w
         # manifeście) – dokładamy je, żeby kolumna 'flagi' oddawała
         # faktycznie zbudowany obraz (bez tego wartość sweepa ginie w CSV).
