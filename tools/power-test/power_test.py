@@ -717,10 +717,13 @@ def cmd_run(args):
         built[name] = build_dir
 
     # --- FAZA 2: flash + pomiar, scenariusz po scenariuszu ---
-    # Dopiero tu potrzebna jest sonda, więc konfliktu o J-Linka pilnujemy
-    # po buildach – budowanie nikomu nie przeszkadza.
+    # Konfliktu o sondę J-Link tu NIE sprawdzamy: pomiar ręczny robi się
+    # w nRF Connect Power Profiler, więc nRF Connect for Desktop musi być
+    # otwarty – a jego demony hotplug trzymają libjlinkarm bez przerwy.
+    # Pytanie o zwolnienie sondy byłoby więc pytaniem bez dobrej odpowiedzi.
+    # Ostrzeżenie zostaje w trybie autonomicznym (cmd_autorun), który
+    # startuje bez operatora i trwa godzinami.
     print(f"\n=== FAZA 2/2: flash + pomiar ({len(names)} scenariusz(y)) ===")
-    wait_for_free_jlink(args.dry_run)
     for name in names:
         measure_scenario(name, scenarios[name], built[name], profile,
                          defaults, sample, args, workspace)

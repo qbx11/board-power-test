@@ -682,38 +682,26 @@ class JlinkConflictTests(unittest.TestCase):
 
 
 class JlinkGuardCliTests(unittest.TestCase):
-    """Blokada CLI: przy zajętej sondzie `run` nie wchodzi do flasha,
-    dopóki użytkownik nie zwolni J-Linka."""
+    """Pomiar ręczny (`run`) NIE pyta o zajętą sondę: robi się go w nRF
+    Connect Power Profiler, więc nRF Connect for Desktop musi być otwarty,
+    a jego demony hotplug trzymają libjlinkarm bez przerwy."""
 
     def setUp(self):
         self.env = FakeEnv()
         self.addCleanup(self.env.cleanup)
 
-    def test_run_czeka_az_jlink_bedzie_wolny(self):
+    def test_run_nie_pyta_o_zajeta_sonde(self):
         self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        answers = iter(["", "", "tak", "2.5 mA", ""])   # 1. Enter = ponów
-
-        def released(prompt=""):
-            # Po pierwszym "sprawdź ponownie" udajemy zamknięcie nRF Connect.
-            self.env.jlink_owners = []
-            return next(answers)
+        # Kolejno: „programator podłączony?”, SWD odłączony, prąd, uwagi.
+        answers = iter(["", "tak", "2.5 mA", ""])
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), \
-                patch("builtins.input", released):
+                patch("builtins.input", lambda prompt="": next(answers)):
             core.cmd_run(run_args(["zwykly"], dry_run=False, sample="T #1"))
-        self.assertIn("Sondę J-Link trzyma inny program", out.getvalue())
-        self.assertIn("pid 4242", out.getvalue())
-        # Flash i tak się wykonał – po zwolnieniu sondy.
+        self.assertNotIn("Sondę J-Link", out.getvalue())
         self.assertTrue(any(c.startswith("west flash")
                             for c in self.env.commands()))
-
-    def test_dry_run_nie_pyta_o_jlink(self):
-        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            core.cmd_run(run_args(["zwykly"]))
-        self.assertNotIn("Sondę J-Link", out.getvalue())
 
 
 if __name__ == "__main__":

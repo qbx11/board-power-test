@@ -802,28 +802,6 @@ class RunScreen(Screen):
             btn.display = False
             hint.update(self.HINT)
 
-    async def _ensure_jlink_free(self):
-        """Nie wchodź do flasha, dopóki sondę J-Link trzyma inny program
-        (patrz core.jlink_owners – cudza sesja zawyża pomiar i wywołuje
-        dialog EDU). Zwraca False, gdy użytkownik wybrał przerwanie."""
-        while True:
-            owners = await asyncio.to_thread(core.jlink_owners)
-            if not owners:
-                return True
-            choice = await self.app.push_screen_wait(ChoiceScreen(
-                "[b]Sondę J-Link trzyma inny program[/b]\n\n"
-                + core.jlink_conflict_message(owners),
-                [("Sprawdziłem – ponów", "retry"),
-                 ("Mierz mimo to", "ignore"),
-                 ("Przerwij", "abort")]))
-            if choice == "retry":
-                continue
-            if choice == "ignore":
-                self.note("J-Link zajęty przez inny program – pomiar może "
-                          "być zawyżony.")
-                return True
-            return False
-
     @work
     async def flow(self):
         status = self.query_one("#status", Static)
@@ -895,10 +873,15 @@ class RunScreen(Screen):
                 self.note("Nic do budowania (same gotowe pliki hex).")
 
             # --- FAZA 2: flash + pomiar ---
-            # Sonda jest potrzebna dopiero tutaj, więc konflikt o J-Linka
-            # sprawdzamy po buildach (budowanie nikomu nie przeszkadza).
-            if not await self._ensure_jlink_free():
-                raise _Aborted()
+            # Konfliktu o sondę J-Link tu NIE sprawdzamy. Tryb ręczny mierzy
+            # w nRF Connect Power Profiler, więc nRF Connect for Desktop MUSI
+            # być otwarty – a jego demony 'nrfutil device list --hotplug'
+            # trzymają libjlinkarm przez cały czas życia aplikacji. Dialog
+            # wyskakiwałby więc przed każdym flashem, zawsze do przeklikania
+            # przez „Mierz mimo to”. Ostrzeżenie o cudzej sesji J-Linka
+            # zostaje tam, gdzie ma sens: przed startem przebiegu
+            # autonomicznego (PowerTestApp._auto_check_jlink) i w logu
+            # kroku (autorun.engine).
             saved = []
             for i, name in enumerate(self.names, 1):
                 scen = scenarios[name]
