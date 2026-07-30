@@ -62,6 +62,12 @@ Dodaj nowy profil (target budowania, overlay sprzętowy) wpisem w `scenarios.tom
 Każda karta „Pomiar N” wybiera protokół w „Ustawieniach zaawansowanych”.
 Zakładki u góry: **BLE Mesh**, **Thread**, **Zigbee**.
 
+Nowa karta startuje BEZ protokołu.
+Naciśnij zakładkę, aby wejść w tryb protokołu.
+Naciśnij AKTYWNĄ zakładkę, aby z niego wyjść.
+Karta bez protokołu jest zwykłym pomiarem: bez serii, monitora i Mattera.
+Wpisane pola czekają w swojej zakładce i wracają po ponownym wejściu.
+
 Każda zakładka trzyma serię (sweep).
 BLE Mesh i Zigbee mają dodatkowo monitor dongla; Thread mierzymy bez niego.
 
@@ -69,6 +75,7 @@ To zwykłe pola do wpisania, bez checkboxa „włącz”.
 Wpisana treść włącza funkcję, puste pole ją wyłącza.
 
 ```text
+Zakładka aktywna         -> karta mierzy w tym protokole
 Wartości serii wpisane   -> karta rozwija się na serię pomiarów
 Port dongla wpisany      -> monitor dongla czyta logi w trakcie pomiaru
 Fragment logu wpisany    -> pomiar startuje po tym logu
@@ -175,15 +182,22 @@ Uruchom tryb autonomiczny.
 Wybierz swój scenariusz na karcie „Pomiar N”.
 Podaj czas jednego pomiaru, na przykład `20m`.
 Rozwiń „Ustawienia zaawansowane”.
-Wybierz zakładkę swojego protokołu (patrz „Protokoły” wyżej).
+Naciśnij zakładkę swojego protokołu (patrz „Protokoły” wyżej).
 Serię ma każda z nich; przykład niżej używa BLE Mesh.
 
 Pola serii są od razu gotowe do wpisania, bez włączania checkboxem.
-Puste pola oznaczają zwykły pojedynczy pomiar.
+Puste pola WARTOŚCI oznaczają zwykły pojedynczy pomiar.
 
 ### 5. Podaj parametr i wartości
 
-Wpisz symbol Kconfig w pole „Parametr”.
+Zakładka BLE Mesh ma dwa pola parametrów z wpisanymi symbolami:
+
+```text
+LPN sensor interval:  CONFIG_LPN_SENSOR_INTERVAL_S
+Poll interval:        CONFIG_BT_MESH_LPN_POLL_TIMEOUT
+```
+
+Zmień symbol w polu, gdy sweepujesz inny parametr.
 Narzędzie przyjmuje trzy zapisy tej samej nazwy:
 
 ```text
@@ -192,28 +206,43 @@ LPN_SENSOR_INTERVAL_S
 -DCONFIG_LPN_SENSOR_INTERVAL_S
 ```
 
-Wpisz wartości w pole „Wartości”.
+Wpisz wartości pod parametrem, który zmieniasz.
 Rozdziel wartości przecinkiem albo spacją.
 
 ```text
-Parametr:  CONFIG_LPN_SENSOR_INTERVAL_S
-Wartości:  10, 30, 50
+LPN sensor interval:  Wartości (s):  10, 30, 50
+Poll interval:        Wartości (s):  (puste – tej osi nie ma)
 ```
+
+O serii decydują WARTOŚCI, nie symbole.
+Sam symbol serii nie robi, bo oba są wpisane domyślnie.
+Sweepuj dowolne z dwóch pól albo oba.
+
+Wartości podajesz w SEKUNDACH w obu polach.
+Kconfig liczy PollTimeout w jednostkach 100 ms, więc narzędzie mnoży ×10.
+
+```text
+Poll interval = 200  ->  -DCONFIG_BT_MESH_LPN_POLL_TIMEOUT=2000
+```
+
+Dziennik zapisuje wartość wpisaną (200); kolumna `flagi` niesie przeliczoną.
+Przelicznik należy do symbolu `CONFIG_BT_MESH_LPN_POLL_TIMEOUT`.
+Inny symbol w tym samym polu dostaje wartości bez zmian.
+
+Ostrzeżenie: Kconfig przyjmuje PollTimeout od 1 s do 24473 s.
+Narzędzie odrzuca wartości poza zakresem przed startem przebiegu.
 
 Narzędzie zachowuje kolejność wartości.
 Narzędzie usuwa duplikaty i zostawia pierwsze wystąpienie.
 Zwinięta karta pokazuje dopisek `· sweep CONFIG_LPN_SENSOR_INTERVAL_S ×3`.
 
-### 5a. Drugi parametr (opcjonalnie)
+### 5a. Dwa parametry naraz (opcjonalnie)
 
-Pola „Drugi parametr” i „Wartości drugiego parametru” są opcjonalne.
-Zostaw je puste, gdy zmieniasz tylko jeden parametr.
-
-Wypełnione dają wszystkie kombinacje obu list.
+Wypełnij oba pola wartości, aby zmierzyć wszystkie kombinacje.
 
 ```text
-Parametr:    CONFIG_P1     Wartości:    10, 20, 30
-Parametr 2:  CONFIG_P2     Wartości 2:  100, 200
+LPN sensor interval:  Wartości (s):  10, 20, 30
+Poll interval:        Wartości (s):  100, 200
 ```
 
 Powyższe daje sześć pomiarów w tej kolejności:
@@ -223,7 +252,7 @@ Powyższe daje sześć pomiarów w tej kolejności:
 ```
 
 Pierwszy parametr zmienia się najwolniej.
-Zwinięta karta pokazuje `· sweep CONFIG_P1 ×3 · CONFIG_P2 ×2 = 6`.
+Zwinięta karta pokazuje `· sweep <parametr 1> ×3 · <parametr 2> ×2 = 6`.
 
 Ostrzeżenie: liczba pomiarów to iloczyn, nie suma.
 Dwie listy po dziesięć wartości dają sto pomiarów.

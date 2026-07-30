@@ -327,6 +327,48 @@ class SweepTest(unittest.TestCase):
             planmod.expand_sweep(
                 1, [("CONFIG_X", "1, 2"), ("-DCONFIG_X", "3")], base)
 
+    def test_sweep_flag_value_przelicza_jednostke_symbolu(self):
+        # Symbole z SWEEP_UNITS podajemy w jednostce karty, a flaga dostaje
+        # jednostkę Kconfiga: poll interval 200 s -> =2000 (100 ms).
+        # Przelicznik należy do SYMBOLU, więc pozostałe idą bez zmian.
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "200"),
+            "2000")
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_LPN_SENSOR_INTERVAL_S", "200"),
+            "200")
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_BT_MESH_LPN_RETRY_TIMEOUT", "8"),
+            "8")
+        # Krańce zakresu Kconfiga (10..244735 jednostek) przechodzą.
+        for secs, flag in (("1", "10"), ("24473.5", "244735")):
+            self.assertEqual(
+                planmod.sweep_flag_value(
+                    "CONFIG_BT_MESH_LPN_POLL_TIMEOUT", secs), flag)
+        # Poza zakresem, nie-liczba i wartość nie dająca całości jednostek.
+        for bad in ("0.9", "24474", "0", "-5", "abc", "0.55"):
+            with self.assertRaises(ValueError, msg=bad):
+                planmod.sweep_flag_value(
+                    "CONFIG_BT_MESH_LPN_POLL_TIMEOUT", bad)
+
+    def test_expand_sweep_przelicza_flage_a_dziennik_trzyma_wpisane(self):
+        # step.sweep (kolumny parametr/wartosc) trzyma wartość WPISANĄ,
+        # a build_extra_args przeliczoną – inaczej na osi X wykresu byłyby
+        # jednostki 100 ms zamiast sekund.
+        base = dict(scenario="app", duration_s=60)
+        steps = planmod.expand_sweep(
+            2, [("BT_MESH_LPN_POLL_TIMEOUT", "120, 200")], base)
+        self.assertEqual([s.sweep for s in steps],
+                         [[("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "120")],
+                          [("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "200")]])
+        self.assertEqual([s.build_extra_args for s in steps],
+                         [["-DCONFIG_BT_MESH_LPN_POLL_TIMEOUT=1200"],
+                          ["-DCONFIG_BT_MESH_LPN_POLL_TIMEOUT=2000"]])
+        # Wartość poza zakresem Kconfiga zatrzymuje plan przed startem.
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(
+                2, [("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "60, 30000")], base)
+
     def test_expanded_steps_validate_against_manifest(self):
         # Kroki z ekspansji są zwykłymi PlanStep – przechodzą walidację
         # planu tak jak ręczne kroki z build_extra_args.

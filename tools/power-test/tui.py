@@ -1005,40 +1005,65 @@ class RunScreen(Screen):
 # nie ma – rolę drugiego urządzenia gra chip-tool. Każda zakładka ma WŁASNY
 # komplet pól – symbol Kconfig serii mesha nie ma sensu w Zigbee, więc
 # przełączenie protokołu nie może przenosić wpisanych wartości.
-#             symbol       etykieta    monitor  matter
-PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False),
-             ("thread", "Thread", False, True),
-             ("zigbee", "Zigbee", True, False))
-DEFAULT_PROTOCOL = "ble_mesh"
+#
+# Pola serii per protokół: (etykieta parametru, domyślny symbol Kconfig,
+# etykieta wartości) dla pierwszej i drugiej osi. BLE Mesh zna oba swoje
+# parametry LPN, więc są wpisane od razu – i w SEKUNDACH, bo tak się o nich
+# myśli. Sensor interval jest w sekundach także w Kconfigu, poll interval
+# w jednostkach 100 ms; przelicza autorun.plan.sweep_flag_value (×10),
+# a dziennik trzyma to, co wpisane.
+MESH_SWEEP = (("LPN sensor interval (symbol Kconfig)",
+               "CONFIG_LPN_SENSOR_INTERVAL_S",
+               "Wartości (s, po przecinku lub spacją)"),
+              ("Poll interval (symbol Kconfig)",
+               "CONFIG_BT_MESH_LPN_POLL_TIMEOUT",
+               "Wartości (s – flaga dostaje ×10)"))
+# Thread i Zigbee nie mają jeszcze ustalonych parametrów serii – pola
+# zostają puste, z ogólnymi etykietami.
+ANY_SWEEP = (("Parametr (symbol Kconfig)", "",
+              "Wartości (po przecinku lub spacją)"),
+             ("Drugi parametr (opcjonalny)", "",
+              "Wartości drugiego parametru"))
+#             symbol       etykieta    monitor  matter  pola serii
+PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False, MESH_SWEEP),
+             ("thread", "Thread", False, True, ANY_SWEEP),
+             ("zigbee", "Zigbee", True, False, ANY_SWEEP))
+# Nowa karta startuje BEZ protokołu: żadna zakładka nie jest aktywna, więc
+# pomiar jest zwykły – bez serii, bez monitora dongla, bez Mattera. Protokół
+# włącza kliknięcie zakładki, a kliknięcie AKTYWNEJ zakładki z niego wychodzi
+# (MeasurementCard.on_click); wpisane pola czekają wtedy w swojej zakładce.
+DEFAULT_PROTOCOL = ""
 # Port dongla wpisywany w karcie od razu (BLE Mesh i Zigbee).
 DEFAULT_DONGLE_PORT = "/dev/ttyACM1"
+
+
 # Pola protokołu nie mają checkboxów „włącz” – liczy się to, co wpisane.
-SWEEP_FIELDS = ("sweep_param", "sweep_values", "sweep_param2", "sweep_values2")
-
-
 def _sweep_on(cfg):
-    """Czy karta ma serię: gdy któreś z pól serii jest wypełnione. Zamiast
-    checkboxa decyduje treść pól, więc pusta karta to po prostu jeden pomiar.
-    Wypełniony sam parametr, bez wartości, ZOSTAJE serią – żeby zamiast po
-    cichu pominąć serię powiedzieć wprost, czego brakuje."""
-    return any(cfg.get(k) for k in SWEEP_FIELDS)
+    """Czy karta ma serię: gdy WARTOŚCI którejś osi są wypełnione. Sama nazwa
+    parametru nie wystarcza, bo symbole Kconfig są w zakładce wpisane
+    domyślnie (PROTOCOLS) – inaczej każda karta byłaby serią bez wartości."""
+    return any(cfg.get(k) for k in ("sweep_values", "sweep_values2"))
 
 
 def _sweep_axes(cfg):
     """Osie serii z konfiguracji karty -> [(parametr, wartości), …] dla
-    expand_sweep(). Druga oś jest opcjonalna: obie pary pól puste = zwykła
-    seria po jednym parametrze. Wypełnienie tylko jednego z dwóch pól drugiej
-    osi to prawie na pewno przeoczenie (albo parametr bez wartości, albo
-    wartości bez parametru), więc mówimy o tym wprost zamiast po cichu
+    expand_sweep(). Oś liczy się, gdy ma WARTOŚCI: puste pole wartości
+    znaczy „tej osi nie ma” (sam wpisany symbol niczego nie mierzy), więc
+    można sweepować dowolną z dwóch osi albo obie. Wartości bez nazwy
+    parametru to przeoczenie – mówimy o tym wprost, zamiast po cichu
     ignorować połowę konfiguracji."""
-    axes = [(cfg["sweep_param"], cfg["sweep_values"])]
-    param2, values2 = cfg.get("sweep_param2", ""), cfg.get("sweep_values2", "")
-    if param2 and values2:
-        axes.append((param2, values2))
-    elif param2:
-        raise ValueError("drugi parametr serii nie ma żadnych wartości")
-    elif values2:
-        raise ValueError("wartości drugiej osi serii bez nazwy parametru")
+    axes = []
+    for suffix in ("", "2"):
+        param = cfg.get(f"sweep_param{suffix}", "")
+        values = cfg.get(f"sweep_values{suffix}", "")
+        if not values:
+            continue
+        if not param:
+            which = "drugiej osi serii" if suffix else "serii"
+            raise ValueError(f"wartości {which} bez nazwy parametru")
+        axes.append((param, values))
+    if not axes:
+        raise ValueError("seria bez wartości")
     return axes
 
 
@@ -1057,6 +1082,8 @@ class MeasurementCard(Vertical):
         self.number = number
         self._config = config or {}
         self.collapsed = collapsed
+        # Protokół aktywny PRZED bieżącym kliknięciem – patrz on_mouse_down.
+        self._proto_before_click = ""
 
     def compose(self):
         c = self._config
@@ -1090,14 +1117,17 @@ class MeasurementCard(Vertical):
                 # i pomiar, wspólne dla protokołów.
                 active = c.get("protocol", DEFAULT_PROTOCOL)
                 with TabbedContent(initial=active, classes="card-proto"):
-                    for proto, label, monitor, matter in PROTOCOLS:
+                    for proto, label, monitor, matter, sweep in PROTOCOLS:
                         with TabPane(label, id=proto):
                             # Pola wypełniamy tylko w zakładce, z której
                             # config pochodzi – reszta protokołów startuje
                             # pusta, żeby karta nie podsuwała symbolu
-                            # Kconfig z cudzego stosu.
+                            # Kconfig z cudzego stosu. Domyślne symbole
+                            # (BLE Mesh) idą z PROTOCOLS, więc są na miejscu
+                            # także w zakładce nieaktywnej.
                             yield from self._protocol_fields(
-                                c if proto == active else {}, monitor, matter)
+                                c if proto == active else {}, monitor, matter,
+                                sweep)
                 # Start po czasie i konsola RTT – SCHOWANE z widoku w trybach
                 # protokołów, ale wciąż w drzewie: plan czyta ich wartości
                 # (domyślnie wyłączone), a wcześniejsze karty i testy dalej
@@ -1147,34 +1177,36 @@ class MeasurementCard(Vertical):
                              classes="card-apply-next")
 
     @staticmethod
-    def _protocol_fields(c, monitor, matter):
-        """Zawartość jednej zakładki protokołu. Każda ma serię (sweep);
-        monitor dongla tylko te z `monitor`, pola Mattera tylko te z
-        `matter`. Klasy pól powtarzają się między zakładkami – dlatego
-        pytamy o nie zawsze przez konkretny panel (MeasurementCard.field),
-        nigdy przez samą kartę."""
+    def _protocol_fields(c, monitor, matter, sweep):
+        """Zawartość jednej zakładki protokołu. Każda ma serię (sweep) –
+        etykiety i domyślne symbole bierze z `sweep` (PROTOCOLS), bo BLE Mesh
+        zna nazwy swoich parametrów, a Thread i Zigbee jeszcze nie. Monitor
+        dongla tylko przy `monitor`, pola Mattera tylko przy `matter`. Klasy
+        pól powtarzają się między zakładkami – dlatego pytamy o nie zawsze
+        przez konkretny panel (MeasurementCard.field), nigdy przez samą
+        kartę."""
         # Seria (sweep): jedna karta -> wiele pomiarów "N.1, N.2, …", każdy
         # budowany z inną flagą -DCONFIG_...=<wartość>. Pola są od razu
-        # gotowe do wpisania – wpisane wartości włączają serię, puste
-        # zostawiają jeden pomiar.
-        yield Label("Parametr (symbol Kconfig):")
-        yield Input(value=c.get("sweep_param", ""),
-                    placeholder="CONFIG_LPN_SENSOR_INTERVAL_S",
+        # gotowe do wpisania – wpisane WARTOŚCI włączają serię (sam symbol
+        # nie, bo bywa wpisany domyślnie), puste zostawiają jeden pomiar.
+        (param1, default1, values1), (param2, default2, values2) = sweep
+        yield Label(f"{param1}:")
+        yield Input(value=c.get("sweep_param", default1),
+                    placeholder="np. CONFIG_MOJ_PARAMETR",
                     classes="card-sweep-param")
-        yield Label("Wartości (po przecinku lub spacji):")
+        yield Label(f"{values1}:")
         yield Input(value=c.get("sweep_values", ""),
-                    placeholder="1, 2, 5, 10, 20, 30, 60, 120, 300, 600",
+                    placeholder="np. 10, 60, 300 — pusto = bez tej osi",
                     classes="card-sweep-values")
-        # Druga oś jest OPCJONALNA: wypełniona daje iloczyn kartezjański
-        # (3 wartości × 2 = 6 pomiarów), pusta – zwykłą serię po jednym
-        # parametrze.
-        yield Label("Drugi parametr (opcjonalny):")
-        yield Input(value=c.get("sweep_param2", ""),
-                    placeholder="— pusto = seria po jednym parametrze —",
+        # Druga oś jest OPCJONALNA: wypełnione wartości dają iloczyn
+        # kartezjański (3 × 2 = 6 pomiarów), puste – serię po jednej osi.
+        yield Label(f"{param2}:")
+        yield Input(value=c.get("sweep_param2", default2),
+                    placeholder="np. CONFIG_MOJ_PARAMETR",
                     classes="card-sweep-param2")
-        yield Label("Wartości drugiego parametru:")
+        yield Label(f"{values2}:")
         yield Input(value=c.get("sweep_values2", ""),
-                    placeholder="100, 200",
+                    placeholder="np. 60, 120, 200 — pusto = bez tej osi",
                     classes="card-sweep-values2")
         if matter:
             yield from MeasurementCard._matter_fields(c)
@@ -1271,6 +1303,12 @@ class MeasurementCard(Vertical):
         # zwijamy kartę – overlaye Selectów już istnieją, więc bezpiecznie.
         self._sync_advanced()
         self.query_one(".card-body").display = not self.collapsed
+        # Karta bez protokołu: Tabs w swoim on_mount SAM podświetla pierwszą
+        # zakładkę, więc pustego stanu nie da się podać w compose – cofamy to
+        # po zamontowaniu całego drzewa (call_after_refresh, nie on_mount, bo
+        # kolejność montowania rodzica i dzieci nie jest gwarantowana).
+        if not self._config.get("protocol", DEFAULT_PROTOCOL):
+            self.call_after_refresh(self.set_protocol, "")
         self._refresh_title()
 
     def on_checkbox_changed(self, event):
@@ -1285,6 +1323,47 @@ class MeasurementCard(Vertical):
         self._refresh_title()
         event.stop()
 
+    def on_tabbed_content_cleared(self, event):
+        # Wyjście z protokołu (żadna zakładka nie jest aktywna) też zmienia
+        # serię – karta staje się zwykłym pomiarem.
+        self._refresh_title()
+        event.stop()
+
+    def on_mouse_down(self, event):
+        """Migawka aktywnego protokołu PRZED kliknięciem. Klik w zakładkę
+        aktywuje ją, zanim Click dojdzie do karty (Tabs konsumuje Tab.Clicked
+        pierwszy), więc bez tej migawki nie da się odróżnić „wybrałem inną
+        zakładkę” od „kliknąłem tę, która już była aktywna”."""
+        self._proto_before_click = self.protocol()
+
+    def on_click(self, event):
+        """Klik w AKTYWNĄ zakładkę protokołu = wyjście z trybu: żadna zakładka
+        nie jest aktywna i karta jest zwykłym pomiarem (bez serii, monitora
+        i Mattera). Wpisane pola zostają w swojej zakładce i wracają po
+        ponownym kliknięciu. Klik w inną zakładkę zmienia protokół jak
+        dotąd – tym zajmuje się sam TabbedContent."""
+        proto = self._clicked_protocol(event.screen_offset)
+        if proto is None or proto != self._proto_before_click:
+            return
+        self.set_protocol("")
+        event.stop()
+
+    def _clicked_protocol(self, screen_offset):
+        """Protokół, w którego ZAKŁADKĘ (nie panel) trafił klik, albo None.
+        Pytamy o region zakładki, nie o widget zdarzenia, bo tak samo robi
+        Textual przy klikaniu podkreślenia zakładek."""
+        tabs = self.query_one(".card-proto", TabbedContent)
+        for proto, *_ in PROTOCOLS:
+            tab = tabs.get_tab(proto)
+            if screen_offset in tab.region:
+                return proto
+        return None
+
+    def set_protocol(self, protocol):
+        """Ustaw protokół karty; '' = żaden (wyjście z trybu)."""
+        self.query_one(".card-proto", TabbedContent).active = protocol
+        self._refresh_title()
+
     def _sync_advanced(self):
         self.query_one(".card-delay-s").display = \
             self.query_one(".card-delay-on", Checkbox).value
@@ -1295,19 +1374,23 @@ class MeasurementCard(Vertical):
         self.query_one(".card-hidden-adv").display = False
 
     def protocol(self):
-        """Symbol wybranego protokołu ('ble_mesh' / 'thread' / 'zigbee')."""
+        """Symbol wybranego protokołu ('ble_mesh' / 'thread' / 'zigbee')
+        albo '' – żaden, czyli karta jest zwykłym pomiarem."""
         return str(self.query_one(".card-proto", TabbedContent).active)
 
     def field(self, selector, protocol=None):
         """Pole protokołu (domyślnie wybranego) albo None, gdy ten protokół
         go nie ma – Thread mierzymy bez dongla, więc nie ma tam pól monitora,
-        a BLE Mesh i Zigbee nie mają pól Mattera. Każda zakładka trzyma
-        własny komplet pól o tych samych klasach, dlatego pytamy przez
-        konkretny panel, a nie przez kartę. Bez wymuszania typu widgetu –
-        w zakładkach są nie tylko Inputy, ale i TextArea (dataset) oraz
-        Checkbox („węzeł już sparowany”)."""
-        pane = self.query_one(".card-proto", TabbedContent).get_pane(
-            protocol or self.protocol())
+        a BLE Mesh i Zigbee nie mają pól Mattera. None także wtedy, gdy żaden
+        protokół nie jest aktywny: nie ma wtedy zakładki, o którą pytać.
+        Każda zakładka trzyma własny komplet pól o tych samych klasach,
+        dlatego pytamy przez konkretny panel, a nie przez kartę. Bez
+        wymuszania typu widgetu – w zakładkach są nie tylko Inputy, ale i
+        TextArea (dataset) oraz Checkbox („węzeł już sparowany”)."""
+        proto = self.protocol() if protocol is None else protocol
+        if not proto:
+            return None
+        pane = self.query_one(".card-proto", TabbedContent).get_pane(proto)
         found = pane.query(selector)
         return found.first() if found else None
 
@@ -1360,23 +1443,24 @@ class MeasurementCard(Vertical):
         """Dopisek do tytułu zwiniętej karty, gdy karta ma serię (sweep):
         ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
         liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
-        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola serii wybranego protokołu
-        są puste."""
+        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola wartości wybranego
+        protokołu są puste albo gdy żaden protokół nie jest aktywny. Osie
+        liczymy tak samo jak plan (_sweep_axes), żeby tytuł nie obiecywał
+        pomiarów, których nie będzie."""
+        from autorun.plan import parse_sweep_values
         try:
             cfg = self.get_config()
             if not _sweep_on(cfg):
                 return ""
-            axes = [(cfg[f"sweep_param{s}"],
-                     len(cfg[f"sweep_values{s}"].replace(",", " ").split()))
-                    for s in ("", "2")]
+            axes = [(p, len(parse_sweep_values(v)))
+                    for p, v in _sweep_axes(cfg)]
+        except ValueError:
+            # Wartości bez nazwy parametru – plan to odrzuci przed startem,
+            # a tytuł mówi wprost, czego brakuje.
+            return " · sweep (brak parametru)"
         except Exception:
             return ""
-        # Druga oś liczy się tylko, gdy użytkownik ją w ogóle zaczął
-        # wypełniać – pusta para pól to zwykła seria jednoparametrowa.
-        axes = [a for i, a in enumerate(axes) if i == 0 or a[0] or a[1]]
-        if any(not n for _, n in axes):
-            return " · sweep (brak wartości)"
-        text = " · ".join(f"{p or '?'} ×{n}" for p, n in axes)
+        text = " · ".join(f"{p} ×{n}" for p, n in axes)
         if len(axes) > 1:
             total = 1
             for _, n in axes:
@@ -1446,7 +1530,8 @@ class MeasurementCard(Vertical):
         self.query_one(".card-proto", TabbedContent).active = cfg["protocol"]
         # Pola przepisujemy do zakładki protokołu Z KONFIGURACJI – zakładki
         # pozostałych protokołów zostają nietknięte, bo ich wartości nie mają
-        # sensu poza własnym stosem.
+        # sensu poza własnym stosem. Karta bez protokołu nie ma czego
+        # przepisywać (field() zwraca None): przenosi się samo wyjście z trybu.
         for key, selector in (("sweep_param", ".card-sweep-param"),
                               ("sweep_values", ".card-sweep-values"),
                               ("sweep_param2", ".card-sweep-param2"),

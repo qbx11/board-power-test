@@ -193,6 +193,54 @@ def parse_sweep_values(raw):
     return out
 
 
+# --- Symbole podawane w interfejsie w INNEJ jednostce niż w Kconfigu ---
+# CONFIG_BT_MESH_LPN_POLL_TIMEOUT liczy PollTimeout w jednostkach 100 ms
+# (Kconfig Zephyra: range 10 244735), a w karcie wpisujemy SEKUNDY: 200 s
+# to flaga =2000. Przeliczamy tutaj, nie w interfejsie, żeby dziennik
+# (kolumny parametr/wartosc) trzymał wartość WPISANĄ, a przeliczona szła
+# tylko do flagi builda – tę widać w kolumnie 'flagi'.
+# Przypisanie jest do SYMBOLU, nie do pola: po podmianie symbolu w tym
+# samym polu wartości idą 1:1, więc nie da się po cichu pomnożyć sekund
+# parametru, który sekundami już jest (np. LPN_RETRY_TIMEOUT).
+# Zakres z Kconfiga sprawdzamy od razu: build z wartością poza zakresem
+# przewraca się dopiero po kilku minutach ("Aborting due to Kconfig
+# warnings"), a tak mówimy o tym przed startem przebiegu.
+# Dotyczy TYLKO serii z interfejsu – `build_extra_args` wpisane wprost
+# w plans/*.toml idą do westa bez zmian (tam podajesz jednostki Kconfiga).
+#            symbol: (mnożnik, jednostka w karcie, min i max W JEDNOSTKACH KCONFIGA)
+SWEEP_UNITS = {
+    "CONFIG_BT_MESH_LPN_POLL_TIMEOUT": (10, "s", 10, 244735),
+}
+
+
+def sweep_flag_value(symbol, value):
+    """Wartość z karty -> wartość do flagi '-DSYMBOL=…'. Symbole z
+    SWEEP_UNITS przelicza z jednostki karty na jednostkę Kconfiga i pilnuje
+    zakresu, pozostałe zwraca bez zmian. ValueError, gdy wartość nie jest
+    liczbą, nie wychodzi całością albo wypada z zakresu Kconfiga."""
+    unit = SWEEP_UNITS.get(symbol)
+    if unit is None:
+        return str(value)
+    scale, name, lo, hi = unit
+    try:
+        typed = float(str(value))
+    except ValueError:
+        raise ValueError(f"{symbol}: '{value}' nie jest liczbą – wartości "
+                         f"podajemy w {name}")
+    scaled = typed * scale
+    if scaled != int(scaled):
+        raise ValueError(
+            f"{symbol}: {typed:g} {name} nie wychodzi całością w jednostce "
+            f"Kconfiga (1 {name} = {scale}) – podaj wielokrotność "
+            f"{1 / scale:g} {name}")
+    scaled = int(scaled)
+    if not (lo <= scaled <= hi):
+        raise ValueError(
+            f"{symbol}: {typed:g} {name} poza zakresem Kconfiga "
+            f"({lo / scale:g}–{hi / scale:g} {name})")
+    return str(scaled)
+
+
 def expand_sweep(number, axes, base):
     """Rozwiń jedną serię (karta 'Pomiar N' z sweepem) na listę PlanStep –
     po jednym kroku na KOMBINACJĘ wartości. `axes` to lista par
@@ -201,10 +249,12 @@ def expand_sweep(number, axes, base):
     zmienia się najwolniej). Każdy krok dostaje po jednej fladze
     -DCONFIG_...=<v> na oś doklejonej do build_extra_args, płaską etykietę
     'N.M' (M liczone przez wszystkie kombinacje) oraz zapamiętane pary
-    (parametr, wartość) do raportu. `base` = wspólne pola PlanStep (scenario,
-    duration_s, trigger, rtt, ...); pola build_extra_args/label/sweep z
-    `base` są ignorowane (ustawiamy je per kombinacja). ValueError przy braku
-    osi, pustej liście wartości albo złym parametrze."""
+    (parametr, wartość) do raportu – w jednostce WPISANEJ w karcie, nawet gdy
+    flaga dostaje przeliczoną (patrz SWEEP_UNITS). `base` = wspólne pola
+    PlanStep (scenario, duration_s, trigger, rtt, ...); pola
+    build_extra_args/label/sweep z `base` są ignorowane (ustawiamy je per
+    kombinacja). ValueError przy braku osi, pustej liście wartości, złym
+    parametrze albo wartości poza zakresem przeliczanego symbolu."""
     parsed = [(normalize_sweep_param(p), parse_sweep_values(v))
               for p, v in axes]
     if not parsed:
@@ -222,7 +272,8 @@ def expand_sweep(number, axes, base):
     for j, combo in enumerate(itertools.product(*[v for _, v in parsed]), 1):
         pairs = list(zip(symbols, combo))
         steps.append(PlanStep(
-            build_extra_args=base_extra + [f"-D{s}={v}" for s, v in pairs],
+            build_extra_args=base_extra + [f"-D{s}={sweep_flag_value(s, v)}"
+                                           for s, v in pairs],
             label=f"{number}.{j}", sweep=pairs, **common))
     return steps
 
