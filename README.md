@@ -77,6 +77,25 @@ Wpisane pola czekają w swojej zakładce i wracają po ponownym wejściu.
 Każda zakładka trzyma serię (sweep).
 BLE Mesh i Zigbee mają dodatkowo monitor dongla; Thread mierzymy bez niego.
 
+W zakładce Thread wybierasz, **co narzędzie robi po flashu**:
+
+```text
+Parowanie + subskrypcja                       -> węzeł zostaje SIT-em
+Parowanie z rejestracją ICD + subskrypcja     -> tryb LIT
+Tylko subskrypcja (węzeł już sparowany)       -> bez parowania
+```
+
+Trzy tryby wykluczają się nawzajem, więc jest to jeden wybór.
+Rejestracja idzie wyłącznie w trakcie parowania, więc nie da się jej
+połączyć z „już sparowany”.
+
+Wybierz wariant z rejestracją, gdy mierzysz długie interwały pollowania.
+Bez rejestracji urządzenie z `CHIP_ICD_LIT_SUPPORT` pracuje jako SIT.
+SIT pollue co najwyżej co `CHIP_ICD_SIT_SLOW_POLL_LIMIT`, cokolwiek
+stoi w `CHIP_ICD_SLOW_POLL_INTERVAL`.
+Narzędzie odczytuje wtedy `OperatingMode` przed pomiarem i przerywa
+krok, jeśli węzeł mimo wszystko jedzie w SIT.
+
 To zwykłe pola do wpisania, bez checkboxa „włącz”.
 Wpisana treść włącza funkcję, puste pole ją wyłącza.
 

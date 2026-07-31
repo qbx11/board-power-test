@@ -277,7 +277,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             card.field(".card-chip-dataset").text = "0e08aa"
             card.field(".card-chip-timeout").value = "90s"
             card.field(".card-chip-endpoint").value = "2"
-            card.field(".card-chip-skip").value = True
+            card.set_chip_mode("skip")
             await pilot.pause()
             t = app._build_auto_plan("btz").steps[0].trigger
             self.assertEqual(t.node_id, "7")
@@ -291,6 +291,39 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
+
+    async def test_matter_wybor_trybu(self):
+        # Trzy tryby triggera Matter to jeden wybór (RadioSet), więc
+        # rejestracja i "już sparowany" nie mogą się wykluczyć w locie.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            card.query_one(".card-proto", tui.TabbedContent).active = "thread"
+            await pilot.pause()
+            # Domyślnie: parowanie bez rejestracji (ścieżka SIT).
+            self.assertEqual(card.chip_mode(), "pair")
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertFalse(t.icd_registration)
+            self.assertFalse(t.skip_pairing)
+            # Parowanie z rejestracją -> LIT.
+            card.set_chip_mode("icd")
+            await pilot.pause()
+            self.assertEqual(card.chip_mode(), "icd")
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertTrue(t.icd_registration)
+            self.assertFalse(t.skip_pairing)
+            self.assertEqual(t.icd_stay_active_ms, 30000)
+            # Przełączenie na "tylko subskrypcja" ZDEJMUJE rejestrację -
+            # tej kombinacji nie da się już zbudować z UI.
+            card.set_chip_mode("skip")
+            await pilot.pause()
+            t = app._build_auto_plan("btz").steps[0].trigger
+            self.assertTrue(t.skip_pairing)
+            self.assertFalse(t.icd_registration)
 
     async def test_matter_bez_datasetu_tylko_gdy_juz_sparowany(self):
         # Parowanie potrzebuje datasetu i discriminatora; „węzeł już
@@ -308,7 +341,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             with self.assertRaises(ValueError):
                 app._build_auto_plan("btz")
-            card.field(".card-chip-skip").value = True
+            card.set_chip_mode("skip")
             await pilot.pause()
             t = app._build_auto_plan("btz").steps[0].trigger
             self.assertEqual(t.type, "chip")
@@ -331,7 +364,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
                             ".card-chip-cluster", ".card-chip-attr",
                             ".card-chip-endpoint", ".card-chip-min",
                             ".card-chip-max", ".card-chip-timeout",
-                            ".card-chip-skip"):
+                            ".card-chip-mode"):
                     self.assertEqual(len(pane.query(cls)),
                                      1 if proto == "thread" else 0,
                                      f"{proto} {cls}")
@@ -340,7 +373,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             cfg = card.get_config()
             self.assertEqual(cfg["chip_node_id"], "")
             self.assertEqual(cfg["chip_dataset"], "")
-            self.assertFalse(cfg["chip_skip"])
+            self.assertEqual(cfg["chip_mode"], "pair")
 
     async def test_matter_przenosi_sie_do_wszystkich_kart(self):
         # „Zastosuj do wszystkich” przenosi protokół RAZEM z ustawieniami
@@ -356,7 +389,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             first.field(".card-chip-node").value = "9"
             first.field(".card-chip-dataset").text = "0e08bb"
-            first.field(".card-chip-skip").value = True
+            first.set_chip_mode("skip")
             await pilot.pause()
             app._apply_to_all(first.query_one(".card-apply", tui.Button))
             await pilot.pause()
@@ -364,7 +397,7 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             cfg = second.get_config()
             self.assertEqual(cfg["chip_node_id"], "9")
             self.assertEqual(cfg["chip_dataset"], "0e08bb")
-            self.assertTrue(cfg["chip_skip"])
+            self.assertEqual(cfg["chip_mode"], "skip")
 
     async def test_apply_to_all(self):
         app = tui.PowerTestApp()

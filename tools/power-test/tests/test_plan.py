@@ -104,6 +104,36 @@ label = "Friend Poll"
         self.assertEqual(len(step.labels), 1)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
+    def test_chip_trigger_icd_fields(self):
+        p = _write_plan(self.dir, """
+[plan]
+name = "t"
+[[plan.steps]]
+scenario = "reset_only"
+duration = "30s"
+trigger = { type = "chip", node_id = "5", dataset = "0e08aa", \
+discriminator = "3840", icd_registration = true, icd_stay_active_ms = 15000 }
+""")
+        plan = planmod.load_plan(p)
+        trig = plan.steps[0].trigger
+        self.assertTrue(trig.icd_registration)
+        self.assertEqual(trig.icd_stay_active_ms, 15000)
+        self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
+
+    def test_chip_trigger_icd_defaults_off(self):
+        p = _write_plan(self.dir, """
+[plan]
+name = "t"
+[[plan.steps]]
+scenario = "reset_only"
+duration = "30s"
+trigger = { type = "chip", node_id = "5", dataset = "0e08aa", \
+discriminator = "3840" }
+""")
+        trig = planmod.load_plan(p).steps[0].trigger
+        self.assertFalse(trig.icd_registration)
+        self.assertEqual(trig.icd_stay_active_ms, 30000)
+
     def test_missing_sections(self):
         with self.assertRaises(ValueError):
             planmod.load_plan(_write_plan(self.dir, '[plan]\nname="t"\n'))
@@ -181,6 +211,37 @@ class ValidateTest(unittest.TestCase):
         errs = planmod.validate_plan(planmod.Plan(name="t", steps=[badre]),
                                      MANIFEST)
         self.assertTrue(any("match" in e for e in errs))
+
+    def test_icd_registration_excludes_skip_pairing(self):
+        # Rejestracja ICD idzie wyłącznie w commissioningu, więc razem
+        # ze skip_pairing byłaby cicho zignorowana -> błąd, nie milczenie.
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True,
+                                    icd_registration=True))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("icd_registration" in e for e in errs))
+        # Sama rejestracja przy normalnym parowaniu przechodzi.
+        ok = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840",
+                                    icd_registration=True))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
+                                  MANIFEST), [])
+
+    def test_icd_stay_active_must_be_positive(self):
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840",
+                                    icd_stay_active_ms=0))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("icd_stay_active_ms" in e for e in errs))
 
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(

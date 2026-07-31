@@ -106,6 +106,12 @@ class Trigger:
     match: str = ""              # regex 1. wartości; puste = domyślny skryptu
     skip_pairing: bool = False   # węzeł już sparowany – tylko subskrypcja
     no_wipe: bool = False        # nie kasuj /tmp/chip_* przed parowaniem
+    # Rejestracja ICD: bez niej urządzenie z CHIP_ICD_LIT_SUPPORT pracuje
+    # jako SIT i pollue co najwyżej co SIT_SLOW_POLL_LIMIT, cokolwiek by nie
+    # stało w CHIP_ICD_SLOW_POLL_INTERVAL. Włącza też weryfikację
+    # OperatingMode przed pomiarem (--verify-icd).
+    icd_registration: bool = False
+    icd_stay_active_ms: int = 30000  # okno na subskrypcję po parowaniu
 
 
 @dataclass
@@ -313,7 +319,9 @@ def _step_from_toml(raw, idx):
         chip_tool=str(trig_raw.get("chip_tool", "")),
         match=str(trig_raw.get("match", "")),
         skip_pairing=bool(trig_raw.get("skip_pairing", False)),
-        no_wipe=bool(trig_raw.get("no_wipe", False)))
+        no_wipe=bool(trig_raw.get("no_wipe", False)),
+        icd_registration=bool(trig_raw.get("icd_registration", False)),
+        icd_stay_active_ms=int(trig_raw.get("icd_stay_active_ms", 30000)))
     stor_raw = raw.get("storage", {})
     storage = Storage(mode=stor_raw.get("mode", "downsampled"),
                       window_ms=int(stor_raw.get("window_ms", 1)))
@@ -439,6 +447,16 @@ def validate_plan(plan, manifest):
             if step.trigger.match and not _regex_ok(step.trigger.match):
                 errors.append(f"{who}: trigger chip 'match' nie jest poprawnym "
                               f"regexem: '{step.trigger.match}'")
+            if step.trigger.icd_registration and step.trigger.skip_pairing:
+                # Rejestracja idzie WYŁĄCZNIE w trakcie commissioningu, więc
+                # przy pominiętym parowaniu byłaby cicho zignorowana –
+                # a pomiar wyszedłby z trybu SIT bez śladu w dzienniku.
+                errors.append(f"{who}: trigger chip – 'icd_registration' "
+                              "wymaga parowania, a 'skip_pairing' je pomija; "
+                              "zostaw jedno")
+            if step.trigger.icd_stay_active_ms < 1:
+                errors.append(f"{who}: trigger chip – 'icd_stay_active_ms' "
+                              "musi być dodatnie")
         if step.labels and step.rtt != "continuous":
             errors.append(f"{who}: auto-etykiety (labels) działają tylko "
                           "przy rtt = 'continuous' – znaczniki powstają "

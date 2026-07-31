@@ -35,8 +35,9 @@ from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
-                             DirectoryTree, Input, Label, Log, Select, Static,
-                             TabbedContent, TabPane, TextArea)
+                             DirectoryTree, Input, Label, Log, RadioButton,
+                             RadioSet, Select, Static, TabbedContent, TabPane,
+                             TextArea)
 
 import power_test as core
 
@@ -1018,6 +1019,12 @@ PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False, MESH_SWEEP),
 DEFAULT_PROTOCOL = ""
 # Port dongla wpisywany w karcie od razu (BLE Mesh i Zigbee).
 DEFAULT_DONGLE_PORT = "/dev/ttyACM1"
+# Tryby pracy triggera Matter (zakładka Thread), w kolejności z RadioSet:
+#   pair – parowanie + subskrypcja (urządzenie zostaje SIT-em),
+#   icd  – parowanie z rejestracją klienta check-in + subskrypcja (LIT),
+#   skip – tylko subskrypcja, węzeł już jest w fabryce.
+CHIP_MODES = ("pair", "icd", "skip")
+CHIP_MODE_DEFAULT = "pair"
 
 
 # Pola protokołu nie mają checkboxów „włącz” – liczy się to, co wpisane.
@@ -1276,10 +1283,25 @@ class MeasurementCard(Vertical):
                     yield Input(value=c.get("chip_timeout", "120s"),
                                 placeholder="120s",
                                 classes="card-chip-timeout")
-            yield Check("Węzeł już sparowany (pomiń parowanie, "
-                        "tylko subskrypcja)",
-                        value=c.get("chip_skip", False),
-                        classes="card-chip-skip")
+            # Trzy tryby wykluczają się nawzajem, więc jeden wybór, a nie
+            # osobne checkboxy: rejestracja ICD idzie WYŁĄCZNIE w trakcie
+            # commissioningu, więc „z rejestracją” i „już sparowany” nie mogą
+            # być zaznaczone naraz. Przy wyborze nie da się tego pomylić.
+            # RadioSet, nie Select – zakładka Thread powstaje niewidoczna
+            # (aktywne jest BLE Mesh), a Select zamontowany jako display:none
+            # nie tworzy overlaya (patrz komentarz przy datasecie).
+            yield Label("Co robimy po flashu:")
+            mode = c.get("chip_mode", CHIP_MODE_DEFAULT)
+            with RadioSet(classes="card-chip-mode"):
+                yield RadioButton("Parowanie + subskrypcja",
+                                  value=mode == "pair",
+                                  classes="chip-mode-pair")
+                yield RadioButton(
+                    "Parowanie z rejestracją ICD + subskrypcja (tryb LIT)",
+                    value=mode == "icd", classes="chip-mode-icd")
+                yield RadioButton(
+                    "Tylko subskrypcja (węzeł już sparowany)",
+                    value=mode == "skip", classes="chip-mode-skip")
 
     def on_mount(self):
         # Post-mount: dopiero teraz ukrywamy zaawansowane pola i (ewentualnie)
@@ -1392,6 +1414,28 @@ class MeasurementCard(Vertical):
         widget = self.field(selector)
         return bool(widget.value) if widget is not None else False
 
+    def chip_mode(self, protocol=None):
+        """Wybrany tryb triggera Matter ('pair' | 'icd' | 'skip').
+        Poza zakładką Thread RadioSetu nie ma – wtedy domyślny."""
+        rs = self.field(".card-chip-mode", protocol)
+        if rs is None:
+            return CHIP_MODE_DEFAULT
+        idx = rs.pressed_index
+        return CHIP_MODES[idx] if 0 <= idx < len(CHIP_MODES) \
+            else CHIP_MODE_DEFAULT
+
+    def set_chip_mode(self, mode, protocol=None):
+        """Zaznacz tryb. RadioSet nie ma settera na pressed_index – wybór
+        ustawia się przez .value przycisku, a RadioSet sam odznacza resztę."""
+        rs = self.field(".card-chip-mode", protocol)
+        if rs is None:
+            return
+        cls = {"pair": ".chip-mode-pair", "icd": ".chip-mode-icd",
+               "skip": ".chip-mode-skip"}.get(mode)
+        if cls is None:
+            return
+        rs.query_one(cls, RadioButton).value = True
+
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
 
@@ -1502,7 +1546,7 @@ class MeasurementCard(Vertical):
             "chip_min": self._field_value(".card-chip-min"),
             "chip_max": self._field_value(".card-chip-max"),
             "chip_timeout": self._field_value(".card-chip-timeout"),
-            "chip_skip": self._field_flag(".card-chip-skip"),
+            "chip_mode": self.chip_mode(),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
@@ -1529,8 +1573,7 @@ class MeasurementCard(Vertical):
                               ("chip_endpoint", ".card-chip-endpoint"),
                               ("chip_min", ".card-chip-min"),
                               ("chip_max", ".card-chip-max"),
-                              ("chip_timeout", ".card-chip-timeout"),
-                              ("chip_skip", ".card-chip-skip")):
+                              ("chip_timeout", ".card-chip-timeout")):
             widget = self.field(selector, cfg["protocol"])
             if widget is not None:
                 widget.value = cfg[key]
@@ -1538,6 +1581,8 @@ class MeasurementCard(Vertical):
         dataset = self.field(".card-chip-dataset", cfg["protocol"])
         if dataset is not None:
             dataset.text = cfg["chip_dataset"]
+        # Tryb Mattera osobno – RadioSet nie ma .value (patrz set_chip_mode).
+        self.set_chip_mode(cfg["chip_mode"], cfg["protocol"])
         self.query_one(".card-duration", Input).value = cfg["duration"]
         self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
         self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
@@ -2097,7 +2142,7 @@ class PowerTestApp(App):
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-delay-on, .card-rtt-on, .card-chip-skip {
+    .card-delay-on, .card-rtt-on {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
@@ -2117,6 +2162,16 @@ class PowerTestApp(App):
     .card-monitor-box, .card-chip-box { height: auto; margin-top: 2; }
     .card-chip-cluster { width: 100%; }
     .card-chip-dataset { width: 100%; height: 6; border: round #555555; }
+    /* Wybór trybu Mattera: ta sama okrągła ramka co dataset, żeby oba
+       segmenty zakładki wyglądały jak jedna rodzina. Domyślna ramka
+       RadioSetu jest gruba i ciągnie na siebie uwagę. */
+    .card-chip-mode { width: 100%; height: auto; margin-top: 1;
+                      border: round #555555; background: transparent;
+                      padding: 0 1; }
+    .card-chip-mode RadioButton { width: 100%; height: 1;
+                                  border: none; background: transparent;
+                                  padding: 0; }
+    .card-chip-mode RadioButton:hover { background: #333333; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
@@ -2779,15 +2834,15 @@ class PowerTestApp(App):
                 if not c["chip_node_id"]:
                     raise ValueError(
                         f"Pomiar {card.number}: Matter – podaj Node ID.")
-                if not c["chip_skip"]:
+                if c["chip_mode"] != "skip":
                     if not c["chip_dataset"]:
                         raise ValueError(
                             f"Pomiar {card.number}: Matter – podaj dataset "
-                            "Thread (hex) albo zaznacz 'węzeł już sparowany'.")
+                            "Thread (hex) albo wybierz 'tylko subskrypcja'.")
                     if not c["chip_discriminator"]:
                         raise ValueError(
                             f"Pomiar {card.number}: Matter – podaj "
-                            "discriminator albo 'węzeł już sparowany'.")
+                            "discriminator albo 'tylko subskrypcja'.")
                 try:
                     chip_to = (parse_duration(c["chip_timeout"])
                                if c["chip_timeout"] else 120.0)
@@ -2806,7 +2861,8 @@ class PowerTestApp(App):
                     endpoint=c["chip_endpoint"] or "1",
                     min_interval=c["chip_min"] or "1",
                     max_interval=c["chip_max"] or "60",
-                    skip_pairing=c["chip_skip"])
+                    skip_pairing=c["chip_mode"] == "skip",
+                    icd_registration=c["chip_mode"] == "icd")
             elif monitor_port and c["serial_pattern"]:
                 trigger = Trigger(type="serial", pattern=c["serial_pattern"],
                                   timeout_s=180.0)

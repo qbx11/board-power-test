@@ -615,6 +615,12 @@ class AutoRunner:
             cmd.append("--skip-pairing")
         if trig.no_wipe:
             cmd.append("--no-wipe")
+        if trig.icd_registration:
+            # Weryfikacja OperatingMode idzie w komplecie z rejestracją: to
+            # jedyny sposób, żeby przy CONFIG_LOG=n wyłapać, że węzeł jednak
+            # jechał w SIT, zanim zapiszemy wiersz pomiaru.
+            cmd += ["--icd-registration", "--verify-icd",
+                    "--icd-stay-active-duration", str(trig.icd_stay_active_ms)]
         return cmd
 
     def _wait_trigger(self, idx, step, session_dir, run_log, monitor=None):
@@ -676,8 +682,10 @@ class AutoRunner:
                        detail="Matter: parowanie + subskrypcja")
             self._note(f"trigger: chip node={trig.node_id} "
                        f"{trig.cluster}/{trig.attribute} ep={trig.endpoint} "
-                       f"timeout={trig.timeout_s:g} s", idx, step.scenario,
-                       files=(run_log,))
+                       f"timeout={trig.timeout_s:g} s"
+                       + (" rejestracja ICD (LIT)"
+                          if trig.icd_registration else ""),
+                       idx, step.scenario, files=(run_log,))
             self._log(f"chip: $ {shlex.join(cmd)}", files=(run_log,))
             if self.dry_run:
                 return None

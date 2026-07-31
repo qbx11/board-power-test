@@ -141,3 +141,7 @@ source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_off"
 label       = "LPN OFF MOCK"
 description = "System OFF - mock pomiaru"
 source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_off_mock"
+
+[scenarios.end_device]
+description = "Aplikacja z ../matter-end-device/end_device (build przez west)."
+source      = "../matter-end-device/end_device"

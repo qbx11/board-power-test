@@ -921,6 +921,33 @@ class EngineTest(unittest.TestCase):
         notes = [ev.text for ev in self.events if ev.kind == "note"]
         self.assertTrue(any("chip node=5" in n for n in notes))
 
+    def test_chip_cmd_icd_registration_flags(self):
+        # Rejestracja ICD dokłada trzy flagi skryptu; weryfikacja
+        # OperatingMode idzie w komplecie, bo przy CONFIG_LOG=n to jedyny
+        # sposób wyłapania, że węzeł jednak jechał w SIT.
+        plan = _plan(scenario="zwykly", duration_s=0.2,
+                     trigger=planmod.Trigger(
+                         type="chip", node_id="5", dataset="0e08aa",
+                         discriminator="3840", icd_registration=True,
+                         icd_stay_active_ms=15000))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(None),
+            event_cb=self.events.append, dry_run=True)
+        cmd = runner._chip_cmd(plan.steps[0].trigger)
+        self.assertIn("--icd-registration", cmd)
+        self.assertIn("--verify-icd", cmd)
+        self.assertEqual(cmd[cmd.index("--icd-stay-active-duration") + 1],
+                         "15000")
+        # Bez rejestracji żadnej z tych flag nie ma (ścieżka SIT bez zmian).
+        plain = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                                discriminator="3840")
+        cmd = runner._chip_cmd(plain)
+        for flag in ("--icd-registration", "--verify-icd",
+                     "--icd-stay-active-duration"):
+            self.assertNotIn(flag, cmd)
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(
