@@ -16,6 +16,7 @@ from common import FakeEnv
 from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
 import power_test as core
+from autorun import engine as eng
 from autorun import plan as planmod
 from autorun.engine import AutoRunError, AutoRunner, _ChipSession
 
@@ -72,11 +73,18 @@ class EngineTest(unittest.TestCase):
         # testach niepowiązanych z nią zerujemy ją, żeby suite nie
         # spowolnił. Klasy sprawdzające samą podłogę ustawiają ją same.
         self._set_min_delay(0.0)
+        # Zapas po triggerze z dongla to też sekundy realnego czekania –
+        # skracamy go, żeby suite nie stał 10 s na każdym takim teście.
+        # Sam mechanizm sprawdza test_zapas_po_triggerze_dongla.
+        self._patch_engine("SERIAL_START_SETTLE_S", 0.3)
+
+    def _patch_engine(self, name, value):
+        old = getattr(eng, name)
+        setattr(eng, name, value)
+        self.addCleanup(setattr, eng, name, old)
 
     def _set_min_delay(self, seconds):
-        import autorun.engine as eng
-        old, eng.MIN_START_DELAY_S = eng.MIN_START_DELAY_S, seconds
-        self.addCleanup(setattr, eng, "MIN_START_DELAY_S", old)
+        self._patch_engine("MIN_START_DELAY_S", seconds)
 
     def tearDown(self):
         self.env.cleanup()
@@ -416,11 +424,13 @@ class EngineTest(unittest.TestCase):
 
     def test_serial_trigger_fires_and_streams(self):
         # Monitor dongla: linie lecą jako 'monitor', a pomiar startuje, gdy
-        # linia ZAWIERA fragment triggera (podłańcuch, nie regex).
+        # linia ZAWIERA fragment triggera (podłańcuch, nie regex). Linia
+        # triggera pada PO drenażu bufora (STALE_QUIET_S), bo tylko takie
+        # linie są świeże – wcześniejsze to zawartość bufora sprzed flasha.
         serial = FakeSerialReader([
             (0.02, "[00:00:01.000] <inf> node_friend: boot"),
-            (0.06, "[00:00:08.379] <inf> node_friend: "
-                   "Friendship z LPN nawiazany")])
+            (0.5, "[00:00:08.379] <inf> node_friend: "
+                  "Friendship z LPN nawiazany")])
         plan = _plan(scenario="zwykly", duration_s=0.15,
                      monitor_port="/dev/ttyACM0",
                      trigger=planmod.Trigger(type="serial",
@@ -438,6 +448,65 @@ class EngineTest(unittest.TestCase):
         # Fragment logu zapisany do dongle.log sesji.
         dlog = (results[0].session_dir / "dongle.log").read_text()
         self.assertIn("node_friend", dlog)
+
+    def test_stary_bufor_dongla_nie_uzbraja_triggera(self):
+        # Dongiel buforuje logi przy zamkniętym porcie (build trwa minuty)
+        # i wyrzuca je w chwili otwarcia. Taka linia ZAWIERA wzorzec, ale
+        # powstała PRZED flashem – nie może startować pomiaru, bo okno
+        # objęłoby reset i dołączanie węzła do sieci (stąd 1.4 mA zamiast
+        # mikroamperów). Skoro po drenażu nic świeżego nie przyszło, krok
+        # kończy się timeoutem triggera, a nie pomiarem z fałszywego startu.
+        serial = FakeSerialReader([
+            (0.0, " Temperatura: 25.5 C"),        # urwany ogon z bufora
+            (0.02, "[00:16:05.108] <inf> node_friend: Stat: rx_adv=73"),
+            (0.04, "[00:16:12.773] <inf> node_friend: Temperatura: 25.5 C")])
+        plan = _plan(scenario="zwykly", duration_s=0.1,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="Temperatura",
+                                             timeout_s=0.5))
+        plan.on_step_error = "skip"
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        results = runner.run()
+        self.assertEqual(results[0].status, "trigger_timeout")
+        mon = [ev.text for ev in self.events if ev.kind == "monitor"]
+        # Panel: jedna notka o pominięciu, bez treści starych linii.
+        self.assertTrue(any("pominięto 3 linii z buforu dongla sprzed flasha"
+                            in m for m in mon), mon)
+        self.assertFalse(any("Temperatura" in m for m in mon), mon)
+        # dongle.log: pełna treść, oznaczona prefiksem (audyt zostaje).
+        dlog = (results[0].session_dir / "dongle.log").read_text()
+        self.assertIn("[przed flashem]  Temperatura: 25.5 C", dlog)
+        self.assertIn("[przed flashem] [00:16:12.773] <inf> node_friend: "
+                      "Temperatura: 25.5 C", dlog)
+
+    def test_zapas_po_triggerze_dongla(self):
+        # Po złapaniu wzorca pomiar czeka SERIAL_START_SETTLE_S – log pada
+        # w chwili dołączania węzła do sieci, więc pierwszy cykl (radio na
+        # pełnych obrotach) nie ma wchodzić do średniej.
+        serial = FakeSerialReader([(0.5, "Friendship z LPN nawiazany")])
+        plan = _plan(scenario="zwykly", duration_s=0.1,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="Friendship",
+                                             timeout_s=5))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        t0 = time.monotonic()
+        results = runner.run()
+        elapsed = time.monotonic() - t0
+        self.assertEqual(results[0].status, "done")
+        self.assertGreaterEqual(elapsed, 0.5 + eng.SERIAL_START_SETTLE_S)
+        details = [ev.data.get("detail", "") for ev in self.events
+                   if ev.kind == "state" and ev.text == "trigger"]
+        self.assertTrue(any("start za" in d for d in details), details)
 
     def test_serial_trigger_timeout_skips(self):
         serial = FakeSerialReader([(0.01, "nic ciekawego")])

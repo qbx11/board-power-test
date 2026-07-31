@@ -81,6 +81,15 @@ Port dongla wpisany      -> monitor dongla czyta logi w trakcie pomiaru
 Fragment logu wpisany    -> pomiar startuje po tym logu
 ```
 
+Monitor dongla otwiera port po wgraniu obrazu, nie przed.
+Dongiel buforuje logi, dopóki port jest zamknięty.
+Narzędzie wyrzuca ten bufor, bo powstał przed wgraniem obrazu.
+Panel pokazuje wtedy `[pominięto N linii z buforu dongla sprzed flasha]`.
+Pełną treść pominiętych linii ma `dongle.log` sesji.
+
+Ostrzeżenie: log triggera pada w chwili dołączania węzła do sieci.
+Narzędzie odczekuje po nim 10 s, aby ten ruch nie wchodził do średniej.
+
 Zakładki nie dzielą się wartościami.
 Symbol Kconfig serii mesha nie ma sensu w Zigbee, więc każdy protokół
 pamięta własne wpisy, a pomiar bierze tylko te z wybranej zakładki.

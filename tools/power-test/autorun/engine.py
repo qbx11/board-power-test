@@ -114,11 +114,26 @@ def default_serial_factory(port):
     return SerialLineReader(port)
 
 
+# Dongiel buforuje logi, dopóki nikt nie trzyma portu otwartego – build
+# trwa minuty, a USB CDC pamięta – i wyrzuca cały bufor w momencie otwarcia
+# portu. Te linie powstały PRZED flashem (stara firmware, stary krok serii),
+# więc nie mogą uzbroić triggera: startowałyby pomiar w środku resetu i
+# dołączania do sieci. Po attach czytamy je więc i wyrzucamy, aż port ucichnie
+# na STALE_QUIET_S. STALE_MAX_S ogranicza drenaż, gdy dongiel gada bez przerwy
+# i cisza nie nadchodzi (wtedy resztę bufora traktujemy już jako świeżą).
+STALE_QUIET_S = 0.3
+STALE_MAX_S = 2.0
+
+
 class _SerialMonitor:
     """Wątek monitora dongla: czyta linie z portu, pokazuje je w UI
     (zdarzenie 'monitor'), zapisuje do dongle.log i – jeśli podano
     `trig_sub` – ustawia `hit`, gdy w linii pojawi się ten FRAGMENT
-    (podłańcuch). Żyje przez oczekiwanie na trigger ORAZ cały pomiar."""
+    (podłańcuch). Żyje przez oczekiwanie na trigger ORAZ cały pomiar.
+
+    Zanim ruszy wątek, `start()` wyrzuca to, co dongiel nabuforował przy
+    zamkniętym porcie (patrz STALE_QUIET_S) – inaczej pierwsza porcja po
+    otwarciu portu, cała sprzed flasha, fałszywie startowałaby pomiar."""
 
     def __init__(self, reader, engine, log_path, idx, scenario, trig_sub):
         self.reader = reader
@@ -128,13 +143,32 @@ class _SerialMonitor:
         self.scenario = scenario
         self.trig_sub = trig_sub
         self.hit = threading.Event()
+        self.dropped = 0                # linii wyrzuconych jako sprzed flasha
         self._stop = threading.Event()
         self._thread = None
 
     def start(self):
         self.reader.attach()            # może podnieść DongleError
+        self._drop_stale()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    def _drop_stale(self):
+        """Wyczytaj i wyrzuć bufor dongla sprzed flasha. Pełna treść idzie do
+        dongle.log z prefiksem '[przed flashem]' (audyt zostaje – widać, co
+        Friend wypisał w trakcie buildu), ale NIE do panelu i NIE do triggera;
+        panel dostaje jedną notkę, którą emituje _start_monitor po nagłówku.
+        Pierwsza linia takiej porcji bywa urwana (port otwarty w środku linii)
+        – i to też jest w porządku, bo idzie do kosza razem z resztą."""
+        deadline = time.monotonic() + STALE_MAX_S
+        with open(self.log_path, "a", encoding="utf-8") as log:
+            while time.monotonic() < deadline:
+                line = self.reader.readline(timeout_s=STALE_QUIET_S)
+                if line is None:
+                    break               # cisza na porcie = bufor wyczytany
+                self.dropped += 1
+                log.write(f"[przed flashem] {line}\n")
+            log.flush()
 
     def _loop(self):
         with open(self.log_path, "a", encoding="utf-8") as log:
@@ -179,6 +213,11 @@ CHIP_PAIR_ALLOWANCE_S = 240.0
 # pierwsze sekundy to ruch Thread/Matter po parowaniu, nie normalna praca
 # węzła. Odczekaj tyle, żeby ten pik nie wchodził do pomiaru.
 CHIP_START_SETTLE_S = 10.0
+# To samo po triggerze z dongla: log, na który czekamy, pada zwykle w chwili
+# dołączania węzła do sieci (u nas Friendship z LPN nawiązany + pierwsza
+# publikacja), a wtedy radio jeszcze pracuje na pełnych obrotach. Bez tego
+# zapasu pierwszy cykl organizacyjny wchodziłby do średniej.
+SERIAL_START_SETTLE_S = 10.0
 
 
 class _ChipSession:
@@ -552,8 +591,12 @@ class AutoRunner:
                         f"fragment {trig.pattern!r} nie pojawił się na logu "
                         f"dongla w {trig.timeout_s:g} s")
                 time.sleep(0.1)
-            self._note(f"trigger dongla złapany: {trig.pattern!r}", idx,
-                       step.scenario, files=(run_log,))
+            self._note(f"trigger dongla złapany: {trig.pattern!r} – odczekuję "
+                       f"{SERIAL_START_SETTLE_S:g} s przed startem pomiaru",
+                       idx, step.scenario, files=(run_log,))
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"start za {SERIAL_START_SETTLE_S:g} s")
+            self._sleep_cancellable(SERIAL_START_SETTLE_S)
             return None
 
         if trig.type == "chip":
@@ -689,6 +732,13 @@ class AutoRunner:
         self._emit("monitor", idx, step.scenario,
                    text=f"[monitor dongla: {step.monitor_port} @ "
                         f"{DEFAULT_BAUD}]")
+        # Po nagłówku, żeby kolejność w panelu była czytelna: najpierw skąd
+        # czytamy, potem czego nie liczymy. Treść pominiętych linii jest
+        # w dongle.log (prefiks '[przed flashem]').
+        if mon.dropped:
+            self._emit("monitor", idx, step.scenario,
+                       text=f"[pominięto {mon.dropped} linii z buforu dongla "
+                            "sprzed flasha]")
         return mon
 
     def _do_pause(self, sampler, writer, idx, step, wall_elapsed_s=0.0):
