@@ -17,6 +17,7 @@ import math
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -64,6 +65,15 @@ def effective_delay_s(trigger):
     return max(trigger.seconds, MIN_START_DELAY_S)
 
 
+def _sweep_payload(step):
+    """Osie serii kroku dla zdarzeń i meta.json: lista {'param','value'}
+    (kolejność jak w planie) albo None, gdy krok nie jest z serii. None,
+    a nie pusta lista – odbiorcy testują to jednym `if`."""
+    if not step.sweep:
+        return None
+    return [{"param": p, "value": v} for p, v in step.sweep]
+
+
 class AutoRunError(RuntimeError):
     pass
 
@@ -104,11 +114,26 @@ def default_serial_factory(port):
     return SerialLineReader(port)
 
 
+# Dongiel buforuje logi, dopóki nikt nie trzyma portu otwartego – build
+# trwa minuty, a USB CDC pamięta – i wyrzuca cały bufor w momencie otwarcia
+# portu. Te linie powstały PRZED flashem (stara firmware, stary krok serii),
+# więc nie mogą uzbroić triggera: startowałyby pomiar w środku resetu i
+# dołączania do sieci. Po attach czytamy je więc i wyrzucamy, aż port ucichnie
+# na STALE_QUIET_S. STALE_MAX_S ogranicza drenaż, gdy dongiel gada bez przerwy
+# i cisza nie nadchodzi (wtedy resztę bufora traktujemy już jako świeżą).
+STALE_QUIET_S = 0.3
+STALE_MAX_S = 2.0
+
+
 class _SerialMonitor:
     """Wątek monitora dongla: czyta linie z portu, pokazuje je w UI
     (zdarzenie 'monitor'), zapisuje do dongle.log i – jeśli podano
     `trig_sub` – ustawia `hit`, gdy w linii pojawi się ten FRAGMENT
-    (podłańcuch). Żyje przez oczekiwanie na trigger ORAZ cały pomiar."""
+    (podłańcuch). Żyje przez oczekiwanie na trigger ORAZ cały pomiar.
+
+    Zanim ruszy wątek, `start()` wyrzuca to, co dongiel nabuforował przy
+    zamkniętym porcie (patrz STALE_QUIET_S) – inaczej pierwsza porcja po
+    otwarciu portu, cała sprzed flasha, fałszywie startowałaby pomiar."""
 
     def __init__(self, reader, engine, log_path, idx, scenario, trig_sub):
         self.reader = reader
@@ -118,13 +143,32 @@ class _SerialMonitor:
         self.scenario = scenario
         self.trig_sub = trig_sub
         self.hit = threading.Event()
+        self.dropped = 0                # linii wyrzuconych jako sprzed flasha
         self._stop = threading.Event()
         self._thread = None
 
     def start(self):
         self.reader.attach()            # może podnieść DongleError
+        self._drop_stale()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    def _drop_stale(self):
+        """Wyczytaj i wyrzuć bufor dongla sprzed flasha. Pełna treść idzie do
+        dongle.log z prefiksem '[przed flashem]' (audyt zostaje – widać, co
+        Friend wypisał w trakcie buildu), ale NIE do panelu i NIE do triggera;
+        panel dostaje jedną notkę, którą emituje _start_monitor po nagłówku.
+        Pierwsza linia takiej porcji bywa urwana (port otwarty w środku linii)
+        – i to też jest w porządku, bo idzie do kosza razem z resztą."""
+        deadline = time.monotonic() + STALE_MAX_S
+        with open(self.log_path, "a", encoding="utf-8") as log:
+            while time.monotonic() < deadline:
+                line = self.reader.readline(timeout_s=STALE_QUIET_S)
+                if line is None:
+                    break               # cisza na porcie = bufor wyczytany
+                self.dropped += 1
+                log.write(f"[przed flashem] {line}\n")
+            log.flush()
 
     def _loop(self):
         with open(self.log_path, "a", encoding="utf-8") as log:
@@ -152,6 +196,108 @@ class _SerialMonitor:
             self.reader.detach()
         except Exception:
             pass
+
+
+# Skrypt parowania + subskrypcji (patrz też README). Żyje w scripts/ obok
+# instalatora. Sekwencja: rm /tmp/chip_* -> pairing ble-thread -> interactive
+# start -> subscribe; na pierwszej wartości wypisuje marker FIRST-VALUE i
+# TRZYMA subskrypcję otwartą aż do zamknięcia procesu.
+CHIP_SCRIPT = core.ROOT / "scripts" / "pair_and_subscribe.py"
+CHIP_FIRST_VALUE_MARK = "FIRST-VALUE"
+# Zapas nad `trigger.timeout_s` (który dotyczy czekania na 1. wartość) na
+# samo parowanie BLE+Thread, zanim silnik uzna sesję chip za zawieszoną.
+# Skrypt ma własne, ciaśniejsze limity (pairing/wartość) i wychodzi pierwszy –
+# to tylko bezpiecznik na twardo zawieszony proces.
+CHIP_PAIR_ALLOWANCE_S = 240.0
+# Po pierwszym raporcie (FIRST-VALUE) subskrypcja jeszcze się "układa" –
+# pierwsze sekundy to ruch Thread/Matter po parowaniu, nie normalna praca
+# węzła. Odczekaj tyle, żeby ten pik nie wchodził do pomiaru.
+CHIP_START_SETTLE_S = 10.0
+# To samo po triggerze z dongla: log, na który czekamy, pada zwykle w chwili
+# dołączania węzła do sieci (u nas Friendship z LPN nawiązany + pierwsza
+# publikacja), a wtedy radio jeszcze pracuje na pełnych obrotach. Bez tego
+# zapasu pierwszy cykl organizacyjny wchodziłby do średniej.
+SERIAL_START_SETTLE_S = 10.0
+
+
+class _ChipSession:
+    """Trigger 'chip': parowanie Matter + otwarta subskrypcja atrybutu.
+
+    Odpala scripts/pair_and_subscribe.py i wątkiem drenuje jego stdout przez
+    CAŁE życie procesu – to konieczne, bo inaczej bufor pipe by się zapchał i
+    subskrypcja (a więc raporty) by zamarły w trakcie pomiaru. Gdy w strumieniu
+    padnie marker FIRST-VALUE, ustawia `first_value` (silnik startuje pomiar).
+    Linie do momentu pierwszej wartości idą też do UI (postęp parowania); potem
+    już tylko do chip.log, żeby nie zalewać ekranu raportami subskrypcji.
+    Subskrypcja żyje aż do stop() (wołane po pomiarze w _run_step)."""
+
+    def __init__(self, cmd, engine, log_path, idx, scenario):
+        self.cmd = cmd
+        self.engine = engine
+        self.log_path = log_path
+        self.idx = idx
+        self.scenario = scenario
+        self.first_value = threading.Event()
+        self.value = ""
+        self.proc = None
+        self._thread = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            self.cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace",
+            bufsize=1, env=core.child_env())
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        with open(self.log_path, "a", encoding="utf-8") as log:
+            for line in self.proc.stdout:
+                line = line.rstrip()
+                log.write(line + "\n")
+                log.flush()
+                if not self.first_value.is_set():
+                    self.engine._emit("line", self.idx, self.scenario, line)
+                    if line.startswith(CHIP_FIRST_VALUE_MARK):
+                        parts = line.split(None, 1)
+                        self.value = parts[1] if len(parts) > 1 else ""
+                        self.first_value.set()
+
+    def wait_first_value(self, timeout_s, check_cancel):
+        """Blokuj do markera FIRST-VALUE. _TriggerTimeout po `timeout_s`;
+        AutoRunError, gdy skrypt padnie wcześniej (parowanie/subskrypcja
+        nie doszły do skutku)."""
+        deadline = time.monotonic() + timeout_s
+        while not self.first_value.is_set():
+            check_cancel()
+            if self.proc.poll() is not None:
+                raise AutoRunError(
+                    "chip: skrypt parowania/subskrypcji zakończył się przed "
+                    f"pierwszą wartością (kod {self.proc.returncode}) – "
+                    f"sprawdź {self.log_path.name}")
+            if time.monotonic() >= deadline:
+                raise _TriggerTimeout(
+                    f"chip: pierwsza wartość nie przyszła w {timeout_s:g} s")
+            time.sleep(0.1)
+
+    def stop(self):
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            self.proc.terminate()          # skrypt łapie SIGTERM i ubija chip-tool
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        # Wątek drenujący już wyszedł (EOF po zakończeniu procesu) – bezpiecznie
+        # domknij pipe, żeby nie zostawiać otwartego deskryptora.
+        if self.proc.stdout is not None:
+            try:
+                self.proc.stdout.close()
+            except Exception:
+                pass
 
 
 class AutoRunner:
@@ -189,6 +335,10 @@ class AutoRunner:
         # ustawiany na starcie _run_step, doklejany do zdarzeń w _emit.
         self._cur_label = ""
         self._cur_sweep = None
+        # Sesja triggera 'chip' (parowanie + subskrypcja) bieżącego kroku:
+        # ustawiana w _wait_trigger, zamykana w _run_step (finally), żeby
+        # subskrypcja żyła przez cały pomiar i została ubita po nim.
+        self._chip = None
 
     # ---------- pomocnicze ----------
 
@@ -224,9 +374,11 @@ class AutoRunner:
             raise _Cancelled()
 
     def _run_streamed(self, cmd, cwd, title, step=0, name="",
-                      log_file=None):
+                      log_file=None, capture=None):
         """Subprocess ze strumieniowaniem linii do zdarzeń i logu –
         odpowiednik tui._stream, ale po stronie silnika (bez UI).
+        `capture` = lista, do której dopisujemy wyjście (build – po tabelkę
+        pamięci); przy None nie trzymamy logu w pamięci.
         Przerwanie (cancel) ubija proces."""
         header = f"$ {shlex.join(cmd)}"
         self._log(f"{title}: {header}", files=(log_file,) if log_file
@@ -247,6 +399,8 @@ class AutoRunner:
                 line = line.rstrip()
                 if log_file is not None:
                     log_file.write(line + "\n")
+                if capture is not None:
+                    capture.append(line)
                 self._emit("line", step, name, line)
                 if self.cancel.is_set():
                     proc.terminate()
@@ -318,8 +472,12 @@ class AutoRunner:
                        f"({build_dir}/) – pomijam", idx, step.scenario)
             return build_dir
         self._emit("state", idx, step.scenario, "build")
+        # Wyjście builda zbieramy, żeby wyłuskać z niego tabelkę zajętości
+        # pamięci – liczby lądują obok obrazu i stamtąd trafiają do
+        # dziennika (także gdy następny krok ten build pominie).
+        out = []
         rc = self._run_streamed(cmd, workspace, f"build {step.scenario}",
-                                idx, step.scenario)
+                                idx, step.scenario, capture=out)
         if rc != 0:
             self._note(f"pomiar {idx} ({step.scenario}): build padł "
                        f"(kod {rc})", idx, step.scenario)
@@ -330,6 +488,7 @@ class AutoRunner:
             return BUILD_FAILED
         if not self.dry_run:
             core.record_build(build_dir, cmd)
+            core.record_memory(build_dir, out)
         self._done_dirs[build_dir] = idx
         return build_dir
 
@@ -341,6 +500,56 @@ class AutoRunner:
         if self._dut_on != on:
             self._sampler.dut_power(on)
             self._dut_on = on
+
+    def _set_voltage(self, voltage):
+        """Napięcie źródła PPK2 (twardy limit w samplerze; Ppk2Error ->
+        AutoRunError, bo o losie kroku decyduje polityka planu).
+
+        Wołane KILKA razy w kroku – przed włączeniem zasilania DUT i po
+        KAŻDYM jego włączeniu. Powód: komenda REGULATOR_SET wysłana przy
+        odciętym wyjściu nie zawsze dochodzi do regulatora (przy otwarciu
+        PPK2 idzie bezpieczne minimum, a właściwe napięcie kroku
+        milisekundy później), więc PIERWSZY pomiar w sesji jechał na tym
+        minimum – przy zasilaniu przez DC/DC prąd wychodził wtedy ~1,5×
+        za duży, mimo 'napiecie_V = 3.0' w raporcie. Ponowna komenda z tą
+        samą wartością przy WŁĄCZONYM wyjściu jest nieszkodliwa (dokładnie
+        to robi suwak w nRF Connect) i wyrównuje stan regulatora."""
+        if self.dry_run or self._sampler is None:
+            return
+        try:
+            self._sampler.set_voltage(voltage_to_mV(voltage))
+        except (ValueError, Ppk2Error) as e:
+            raise AutoRunError(f"napięcie źródła PPK2: {e}")
+
+    def _chip_cmd(self, trig):
+        """argv skryptu parowania+subskrypcji (scripts/pair_and_subscribe.py)
+        z parametrów triggera 'chip'. Puste pola pomijamy – skrypt ma własne
+        domyślne (chip-dir, chip-tool, match)."""
+        cmd = [sys.executable, str(CHIP_SCRIPT),
+               "--node-id", trig.node_id,
+               "--endpoint", trig.endpoint,
+               "--cluster", trig.cluster,
+               "--attribute", trig.attribute,
+               "--min-interval", trig.min_interval,
+               "--max-interval", trig.max_interval,
+               "--value-timeout", str(trig.timeout_s)]
+        if trig.pin:
+            cmd += ["--pin", trig.pin]
+        if trig.dataset:
+            cmd += ["--dataset", trig.dataset]
+        if trig.discriminator:
+            cmd += ["--discriminator", trig.discriminator]
+        if trig.chip_dir:
+            cmd += ["--chip-dir", trig.chip_dir]
+        if trig.chip_tool:
+            cmd += ["--chip-tool", trig.chip_tool]
+        if trig.match:
+            cmd += ["--match", trig.match]
+        if trig.skip_pairing:
+            cmd.append("--skip-pairing")
+        if trig.no_wipe:
+            cmd.append("--no-wipe")
+        return cmd
 
     def _wait_trigger(self, idx, step, session_dir, run_log, monitor=None):
         """Warunek startu pomiaru. Zwraca (czytnik_rtt | None) – przy
@@ -382,8 +591,59 @@ class AutoRunner:
                         f"fragment {trig.pattern!r} nie pojawił się na logu "
                         f"dongla w {trig.timeout_s:g} s")
                 time.sleep(0.1)
-            self._note(f"trigger dongla złapany: {trig.pattern!r}", idx,
-                       step.scenario, files=(run_log,))
+            self._note(f"trigger dongla złapany: {trig.pattern!r} – odczekuję "
+                       f"{SERIAL_START_SETTLE_S:g} s przed startem pomiaru",
+                       idx, step.scenario, files=(run_log,))
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"start za {SERIAL_START_SETTLE_S:g} s")
+            self._sleep_cancellable(SERIAL_START_SETTLE_S)
+            return None
+
+        if trig.type == "chip":
+            # Po flashu: sparuj węzeł Matter i otwórz subskrypcję atrybutu;
+            # pomiar startuje CHIP_START_SETTLE_S po PIERWSZYM raporcie
+            # (marker FIRST-VALUE ze scripts/pair_and_subscribe.py), żeby
+            # pominąć poparowaniowy pik. Subskrypcja żyje przez cały
+            # pomiar – proces zamyka _run_step (finally) przez self._chip.
+            cmd = self._chip_cmd(trig)
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail="Matter: parowanie + subskrypcja")
+            self._note(f"trigger: chip node={trig.node_id} "
+                       f"{trig.cluster}/{trig.attribute} ep={trig.endpoint} "
+                       f"timeout={trig.timeout_s:g} s", idx, step.scenario,
+                       files=(run_log,))
+            self._log(f"chip: $ {shlex.join(cmd)}", files=(run_log,))
+            if self.dry_run:
+                return None
+            # cmd_start/cmd_end obejmują parowanie+subskrypcję – UI grupuje
+            # wyjście skryptu w zwijaną sekcję (jak build/flash). Zaczynamy
+            # PRZED chip.start(), żeby linie z wątku drenującego trafiły do niej.
+            title = f"chip {step.scenario}: parowanie + subskrypcja"
+            self._emit("cmd_start", idx, step.scenario, text=title)
+            chip = _ChipSession(cmd, self, session_dir / "chip.log",
+                                idx, step.scenario)
+            chip.start()
+            try:
+                chip.wait_first_value(trig.timeout_s + CHIP_PAIR_ALLOWANCE_S,
+                                      self._check_cancel)
+            except BaseException:
+                self._emit("cmd_end", idx, step.scenario,
+                           data={"rc": 1, "title": title})
+                chip.stop()
+                raise
+            self._emit("cmd_end", idx, step.scenario,
+                       data={"rc": 0, "title": title})
+            self._chip = chip
+            self._note(f"chip: pierwsza wartość ({chip.value}) – odczekuję "
+                       f"{CHIP_START_SETTLE_S:g} s przed startem pomiaru",
+                       idx, step.scenario, files=(run_log,))
+            self._emit("state", idx, step.scenario, "trigger",
+                       detail=f"Matter: start za {CHIP_START_SETTLE_S:g} s")
+            self._sleep_cancellable(CHIP_START_SETTLE_S)
+            if step.rtt == "continuous":
+                reader = self.rtt_factory(self.profile)
+                reader.attach()
+                return reader
             return None
 
         # trigger rtt: czekaj na wzorzec na konsoli RTT
@@ -472,6 +732,13 @@ class AutoRunner:
         self._emit("monitor", idx, step.scenario,
                    text=f"[monitor dongla: {step.monitor_port} @ "
                         f"{DEFAULT_BAUD}]")
+        # Po nagłówku, żeby kolejność w panelu była czytelna: najpierw skąd
+        # czytamy, potem czego nie liczymy. Treść pominiętych linii jest
+        # w dongle.log (prefiks '[przed flashem]').
+        if mon.dropped:
+            self._emit("monitor", idx, step.scenario,
+                       text=f"[pominięto {mon.dropped} linii z buforu dongla "
+                            "sprzed flasha]")
         return mon
 
     def _do_pause(self, sampler, writer, idx, step, wall_elapsed_s=0.0):
@@ -769,9 +1036,7 @@ class AutoRunner:
         voltage = self._voltage_for(step)
         # Kontekst dla _emit: etykieta "N.M" (albo numer) i para sweepa.
         self._cur_label = step.label or str(idx)
-        self._cur_sweep = ({"param": step.sweep_param,
-                            "value": step.sweep_value}
-                           if step.sweep_param else None)
+        self._cur_sweep = _sweep_payload(step)
         self._emit("step_start", idx, step.scenario,
                    data={"duration_s": step.duration_s,
                          "voltage": voltage})
@@ -796,12 +1061,11 @@ class AutoRunner:
             # na płytkę. Błąd zamieniamy na AutoRunError (polityka kroku).
             self._emit("state", idx, step.scenario, "power",
                        detail=f"{voltage} V")
-            if not self.dry_run:
-                try:
-                    self._sampler.set_voltage(voltage_to_mV(voltage))
-                except (ValueError, Ppk2Error) as e:
-                    raise AutoRunError(f"napięcie źródła PPK2: {e}")
-                self._ensure_dut_power(True)
+            self._set_voltage(voltage)
+            self._ensure_dut_power(True)
+            # Powtórka przy WŁĄCZONYM już wyjściu – bez niej pierwszy pomiar
+            # w sesji jechał na napięciu z otwarcia PPK2 (patrz _set_voltage).
+            self._set_voltage(voltage)
 
             self._emit("state", idx, step.scenario, "flash")
             rc = self._run_streamed(
@@ -820,6 +1084,9 @@ class AutoRunner:
                 time.sleep(0.5)
                 self._sampler.dut_power(True)
                 self._dut_on = True
+                # Po odcięciu i podaniu zasilania regulator dostaje wartość
+                # jeszcze raz – pomiar ma jechać na napięciu z planu.
+                self._set_voltage(voltage)
 
             # Monitor dongla (jeśli podano port) startuje PRZED oknem
             # triggera i żyje przez cały pomiar – logi widać przed i podczas.
@@ -859,11 +1126,13 @@ class AutoRunner:
             except _Cancelled:
                 summary = writer.finalize("cancelled")
                 self._append_csv(step, scen, voltage, summary,
-                                 session_dir, "przerwano")
+                                 session_dir, "przerwano",
+                                 build_dir=build_dir)
                 return StepResult(idx, step.scenario, "cancelled",
                                   session_dir, summary)
             summary = writer.finalize("done")
-            self._append_csv(step, scen, voltage, summary, session_dir)
+            self._append_csv(step, scen, voltage, summary, session_dir,
+                             build_dir=build_dir)
             self._emit("step_done", idx, step.scenario, data=summary)
             self._note(f"krok {idx} ({step.scenario}): "
                        f"avg {summary.get('avg_uA')} µA, "
@@ -883,6 +1152,12 @@ class AutoRunner:
             return StepResult(idx, step.scenario, "error", session_dir,
                               error=str(e))
         finally:
+            # Subskrypcja chip żyła przez pomiar – zamknij ją (skrypt ubija
+            # chip-tool na SIGTERM). Robimy to PRZED monitorem/logiem, żeby
+            # zwolnić Thread/CASE, niezależnie od tego, jak krok się skończył.
+            if self._chip is not None:
+                self._chip.stop()
+                self._chip = None
             if monitor is not None:
                 monitor.stop()
             run_log.close()
@@ -907,9 +1182,7 @@ class AutoRunner:
                 "step_label": step.label or str(idx),
                 "scenario": step.scenario,
                 "label": scen.get("label", step.scenario),
-                "sweep": ({"param": step.sweep_param,
-                           "value": step.sweep_value}
-                          if step.sweep_param else None),
+                "sweep": _sweep_payload(step),
                 "flags": core.scenario_flags(scen)
                 + (" " + " ".join(step.build_extra_args)
                    if step.build_extra_args else ""),
@@ -923,7 +1196,12 @@ class AutoRunner:
                 # z planu – meta ma opisywać ten pomiar, nie zamiar.
                 "trigger": {"type": step.trigger.type,
                             "seconds": effective_delay_s(step.trigger),
-                            "pattern": step.trigger.pattern},
+                            "pattern": step.trigger.pattern,
+                            **({"node_id": step.trigger.node_id,
+                                "cluster": step.trigger.cluster,
+                                "attribute": step.trigger.attribute,
+                                "endpoint": step.trigger.endpoint}
+                               if step.trigger.type == "chip" else {})},
                 "rtt": step.rtt}
 
     def _fail_meta(self, session_dir, idx, step, scen, voltage, status,
@@ -939,18 +1217,20 @@ class AutoRunner:
                 **self._session_meta(idx, step, scen, voltage, None)})
 
     def _append_csv(self, step, scen, voltage, summary, session_dir,
-                    note=""):
+                    note="", build_dir=None):
         if not summary.get("samples"):
             return
         # Domyślna 'uwaga': plan + (dla serii) sweepowany parametr i jego
         # wartość, żeby kolumna niosła treść nawet w widokach bez kolumn
         # parametr/wartosc.
         note_default = f"autorun: plan {self.plan.name}"
-        if step.sweep_param:
-            note_default += f" · {step.sweep_param}={step.sweep_value}"
+        for param, value in step.sweep:
+            note_default += f" · {param}={value}"
         row = core.make_row(step.scenario, scen, self.profile,
                             self.sample, voltage, summary["avg_uA"],
-                            note or note_default)
+                            note or note_default,
+                            build_dir=build_dir if isinstance(build_dir, str)
+                            else None)
         # scenario_flags() nie zna build_extra_args (są per krok, nie w
         # manifeście) – dokładamy je, żeby kolumna 'flagi' oddawała
         # faktycznie zbudowany obraz (bez tego wartość sweepa ginie w CSV).
@@ -962,9 +1242,15 @@ class AutoRunner:
             "prad_max_uA": summary["max_uA"],
             "czas_s": summary["duration_s"],
             "sesja": str(Path(session_dir).relative_to(core.ROOT)),
-            "pomiar_id": step.label,
-            "parametr": step.sweep_param,
-            "wartosc": step.sweep_value})
+            "pomiar_id": step.label})
+        # Osie serii w kolumnach parametr/wartosc i parametr2/wartosc2.
+        # Krok spoza serii zostawia je puste, jednoosiowy – tylko drugą parę.
+        # Dziennik ma dwie pary kolumn (tyle wystawia interfejs); komplet
+        # flag – ile by ich nie było – jest w kolumnie 'flagi' i w 'uwagi'.
+        for (param, value), (col_p, col_v) in zip(
+                step.sweep, (("parametr", "wartosc"),
+                             ("parametr2", "wartosc2"))):
+            row[col_p], row[col_v] = param, value
         core.append_row(row, verbose=False)
 
     # ---------- przebieg ----------

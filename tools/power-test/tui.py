@@ -35,9 +35,19 @@ from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
-                             DirectoryTree, Input, Label, Log, Select, Static)
+                             DirectoryTree, Input, Label, Log, Select, Static,
+                             TabbedContent, TabPane, TextArea)
 
 import power_test as core
+
+# Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
+# pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
+# jest edytowalne; to tylko wygodna wartość startowa dla typowego setupu.
+CHIP_DATASET_DEFAULT = (
+    "0e08000000000001000000030000174a0300000e35060004001fffe0"
+    "0208813ba4b5a068fddf0708fddc8e685e36d6cc0510b840138392a6efbee6"
+    "1680bdca9ae7fd030f4f70656e5468726561642d666236650102fb6e04108c"
+    "97ec5b81873b78c371537a24886bef0c0402a0f7f8")
 
 # Logo GoodByte – nagłówek ekranu głównego. Czcionka blokowa (Small Mono
 # 12), monochromatyczna jak reszta interfejsu; pod spodem podpis
@@ -445,15 +455,23 @@ class ResultsScreen(ModalScreen):
     # nigdy jej nie ustawia). pomiar_id/parametr/wartosc mówią, który pomiar
     # z serii (sweep) miał jaką wartość flagi build.
     MANUAL_COLS = ["data", "egzemplarz", "scenariusz", "napiecie_V",
-                   "prad_uA", "oczekiwane", "uwagi"]
+                   "prad_uA", "oczekiwane", "flash_B", "flash_pct",
+                   "ram_B", "ram_pct", "uwagi"]
     # 'egzemplarz' jest w OBU trybach: bez niego nie wiadomo, której płytki
     # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
     AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
-                 "wartosc", "napiecie_V", "prad_uA", "czas_s"]
+                 "wartosc", "parametr2", "wartosc2", "napiecie_V", "prad_uA",
+                 "flash_B", "flash_pct", "ram_B", "ram_pct", "czas_s"]
+    # Kolumny pokazywane tylko wtedy, gdy JAKIŚ widoczny wiersz je wypełnia.
+    # Bez tego dziennik bez serii dwuparametrowej albo ze scenariuszami na
+    # gotowym hexie (brak builda = brak tabelki pamięci) niósłby stale puste
+    # kolumny, a te zjadają szerokość potrzebną nazwie scenariusza.
+    OPTIONAL_COLS = ("parametr2", "wartosc2",
+                     "flash_B", "flash_pct", "ram_B", "ram_pct")
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
     # pokazywane w tabeli – są w CSV i w podglądzie wykresu sesji.
-    _TWO_DP = ("prad_uA", "czas_s")
+    _TWO_DP = ("prad_uA", "czas_s", "flash_pct", "ram_pct")
 
     def __init__(self, mode=None):
         super().__init__()
@@ -481,17 +499,21 @@ class ResultsScreen(ModalScreen):
         which = "tryb autonomiczny" if auto else "tryb ręczny"
         self.query_one("#results-title", Static).update(
             f"[b]Zebrane pomiary — {which}[/b] · reports/pomiary.csv")
-        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
         table = self.query_one(DataTable)
+        cols = self.AUTO_COLS if auto else self.MANUAL_COLS
+        rows = []
+        if core.CSV_PATH.is_file():
+            # Wiersze wczytujemy PRZED nagłówkiem: dopiero komplet danych
+            # mówi, które kolumny opcjonalne mają w ogóle treść.
+            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+                rows = [r for r in csv.DictReader(f)
+                        if bool(r.get("sesja")) == auto]   # tylko ten tryb
+        cols = [c for c in cols
+                if c not in self.OPTIONAL_COLS
+                or any(r.get(c) for r in rows)]
         table.add_columns(*cols)
-        if not core.CSV_PATH.is_file():
-            return
-        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if bool(row.get("sesja")) != auto:
-                    continue          # wiersz z innego trybu – pomiń
-                table.add_row(*(self._fmt_cell(c, row.get(c, ""))
-                                for c in cols))
+        for row in rows:
+            table.add_row(*(self._fmt_cell(c, row.get(c, "")) for c in cols))
 
     def on_button_pressed(self, event):
         self.dismiss()
@@ -669,9 +691,10 @@ class RunScreen(Screen):
 
     SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    async def run_west(self, cmd, cwd, title):
+    async def run_west(self, cmd, cwd, title, build_dir=None):
         """Komenda w zwijanej sekcji z animacją w trakcie działania;
-        pełne wyjście po kliknięciu/błędzie."""
+        pełne wyjście po kliknięciu/błędzie. `build_dir` (tylko dla buildów)
+        włącza zapamiętanie zajętości pamięci obok obrazu."""
         out = Log(classes="cmd-log")
         section = Collapsible(out, title=f"{self.SPINNER[0]} {title}",
                               collapsed=True)
@@ -733,8 +756,12 @@ class RunScreen(Screen):
         section.title = f"✓ {title}"
 
         # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown
-        # (od razu do skopiowania). Przy flashu parser zwraca None.
-        report = core.parse_memory_report(lines)
+        # (od razu do skopiowania) i te same liczby zapamiętane obok obrazu,
+        # żeby trafiły do dziennika. Przy flashu parser zwraca None.
+        image = core.default_domain(build_dir) if build_dir else None
+        if build_dir:
+            core.record_memory(build_dir, lines)
+        report = core.parse_memory_report(lines, image=image)
         if report is not None:
             box = Static(report, classes="mem-report", markup=False)
             box.border_title = "pamięć (Markdown — skopiuj)"
@@ -774,28 +801,6 @@ class RunScreen(Screen):
             # NoActiveAppError (jak przy Log-u w run_west()).
             btn.display = False
             hint.update(self.HINT)
-
-    async def _ensure_jlink_free(self):
-        """Nie wchodź do flasha, dopóki sondę J-Link trzyma inny program
-        (patrz core.jlink_owners – cudza sesja zawyża pomiar i wywołuje
-        dialog EDU). Zwraca False, gdy użytkownik wybrał przerwanie."""
-        while True:
-            owners = await asyncio.to_thread(core.jlink_owners)
-            if not owners:
-                return True
-            choice = await self.app.push_screen_wait(ChoiceScreen(
-                "[b]Sondę J-Link trzyma inny program[/b]\n\n"
-                + core.jlink_conflict_message(owners),
-                [("Sprawdziłem – ponów", "retry"),
-                 ("Mierz mimo to", "ignore"),
-                 ("Przerwij", "abort")]))
-            if choice == "retry":
-                continue
-            if choice == "ignore":
-                self.note("J-Link zajęty przez inny program – pomiar może "
-                          "być zawyżony.")
-                return True
-            return False
 
     @work
     async def flow(self):
@@ -856,7 +861,8 @@ class RunScreen(Screen):
                 build_no += 1
                 status.update(f"FAZA 1/2 · build {build_no}/"
                               f"{len(will_build)} · {name}")
-                await self.run_west(cmd, workspace, f"build {name}")
+                await self.run_west(cmd, workspace, f"build {name}",
+                                    build_dir=build_dir)
                 core.record_build(build_dir, cmd)
                 built[name] = build_dir
             if will_build:
@@ -867,10 +873,15 @@ class RunScreen(Screen):
                 self.note("Nic do budowania (same gotowe pliki hex).")
 
             # --- FAZA 2: flash + pomiar ---
-            # Sonda jest potrzebna dopiero tutaj, więc konflikt o J-Linka
-            # sprawdzamy po buildach (budowanie nikomu nie przeszkadza).
-            if not await self._ensure_jlink_free():
-                raise _Aborted()
+            # Konfliktu o sondę J-Link tu NIE sprawdzamy. Tryb ręczny mierzy
+            # w nRF Connect Power Profiler, więc nRF Connect for Desktop MUSI
+            # być otwarty – a jego demony 'nrfutil device list --hotplug'
+            # trzymają libjlinkarm przez cały czas życia aplikacji. Dialog
+            # wyskakiwałby więc przed każdym flashem, zawsze do przeklikania
+            # przez „Mierz mimo to”. Ostrzeżenie o cudzej sesji J-Linka
+            # zostaje tam, gdzie ma sens: przed startem przebiegu
+            # autonomicznego (PowerTestApp._auto_check_jlink) i w logu
+            # kroku (autorun.engine).
             saved = []
             for i, name in enumerate(self.names, 1):
                 scen = scenarios[name]
@@ -939,7 +950,8 @@ class RunScreen(Screen):
                     current, notes = result
                     core.append_row(core.make_row(name, scen, self.profile,
                                                   self.sample, voltage,
-                                                  current, notes),
+                                                  current, notes,
+                                                  build_dir=built[name]),
                                     verbose=False)
                     saved.append(f"{name}: {current} µA")
                     self.note(f"Zapisano: {name} = {current} µA")
@@ -968,11 +980,83 @@ class RunScreen(Screen):
             self.note("(Esc = powrót do ustawień)")
 
 
+# --- Protokoły w ustawieniach zaawansowanych karty ---
+# Każda karta „Pomiar N” wybiera protokół zakładką. Serię (sweep) ma każdy
+# protokół; monitor dongla tylko te, w których dogaduje się z nim drugie
+# urządzenie. Thread mierzymy przez Matter: wybór tej zakładki SAM włącza
+# parowanie węzła i subskrypcję atrybutu (trigger 'chip'), więc dongla tam
+# nie ma – rolę drugiego urządzenia gra chip-tool. Każda zakładka ma WŁASNY
+# komplet pól – symbol Kconfig serii mesha nie ma sensu w Zigbee, więc
+# przełączenie protokołu nie może przenosić wpisanych wartości.
+#
+# Pola serii per protokół: (etykieta parametru, domyślny symbol Kconfig,
+# etykieta wartości) dla pierwszej i drugiej osi. BLE Mesh zna oba swoje
+# parametry LPN, więc są wpisane od razu – i w SEKUNDACH, bo tak się o nich
+# myśli. Sensor interval jest w sekundach także w Kconfigu, poll interval
+# w jednostkach 100 ms; przelicza autorun.plan.sweep_flag_value (×10),
+# a dziennik trzyma to, co wpisane.
+MESH_SWEEP = (("LPN sensor interval (symbol Kconfig)",
+               "CONFIG_LPN_SENSOR_INTERVAL_S",
+               "Wartości (s, po przecinku lub spacją)"),
+              ("Poll interval (symbol Kconfig)",
+               "CONFIG_BT_MESH_LPN_POLL_TIMEOUT",
+               "Wartości (s – flaga dostaje ×10)"))
+# Thread i Zigbee nie mają jeszcze ustalonych parametrów serii – pola
+# zostają puste, z ogólnymi etykietami.
+ANY_SWEEP = (("Parametr (symbol Kconfig)", "",
+              "Wartości (po przecinku lub spacją)"),
+             ("Drugi parametr (opcjonalny)", "",
+              "Wartości drugiego parametru"))
+#             symbol       etykieta    monitor  matter  pola serii
+PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False, MESH_SWEEP),
+             ("thread", "Thread", False, True, ANY_SWEEP),
+             ("zigbee", "Zigbee", True, False, ANY_SWEEP))
+# Nowa karta startuje BEZ protokołu: żadna zakładka nie jest aktywna, więc
+# pomiar jest zwykły – bez serii, bez monitora dongla, bez Mattera. Protokół
+# włącza kliknięcie zakładki, a kliknięcie AKTYWNEJ zakładki z niego wychodzi
+# (MeasurementCard.on_click); wpisane pola czekają wtedy w swojej zakładce.
+DEFAULT_PROTOCOL = ""
+# Port dongla wpisywany w karcie od razu (BLE Mesh i Zigbee).
+DEFAULT_DONGLE_PORT = "/dev/ttyACM1"
+
+
+# Pola protokołu nie mają checkboxów „włącz” – liczy się to, co wpisane.
+def _sweep_on(cfg):
+    """Czy karta ma serię: gdy WARTOŚCI którejś osi są wypełnione. Sama nazwa
+    parametru nie wystarcza, bo symbole Kconfig są w zakładce wpisane
+    domyślnie (PROTOCOLS) – inaczej każda karta byłaby serią bez wartości."""
+    return any(cfg.get(k) for k in ("sweep_values", "sweep_values2"))
+
+
+def _sweep_axes(cfg):
+    """Osie serii z konfiguracji karty -> [(parametr, wartości), …] dla
+    expand_sweep(). Oś liczy się, gdy ma WARTOŚCI: puste pole wartości
+    znaczy „tej osi nie ma” (sam wpisany symbol niczego nie mierzy), więc
+    można sweepować dowolną z dwóch osi albo obie. Wartości bez nazwy
+    parametru to przeoczenie – mówimy o tym wprost, zamiast po cichu
+    ignorować połowę konfiguracji."""
+    axes = []
+    for suffix in ("", "2"):
+        param = cfg.get(f"sweep_param{suffix}", "")
+        values = cfg.get(f"sweep_values{suffix}", "")
+        if not values:
+            continue
+        if not param:
+            which = "drugiej osi serii" if suffix else "serii"
+            raise ValueError(f"wartości {which} bez nazwy parametru")
+        axes.append((param, values))
+    if not axes:
+        raise ValueError("seria bez wartości")
+    return axes
+
+
 class MeasurementCard(Vertical):
     """Jedna karta 'Pomiar N' w kreatorze trybu autonomicznego: scenariusz
-    + czas, a start-po-czasie / RTT / napięcie / zapis w zwijanych
-    ustawieniach zaawansowanych (domyślnie schowane i wyłączone).
-    Czyta/ustawia własną konfigurację, nie dotyka innych kart."""
+    + czas, a reszta w zwijanych ustawieniach zaawansowanych (domyślnie
+    schowanych). Tam u góry zakładki protokołu – każda ma serię (sweep),
+    BLE Mesh i Zigbee dodatkowo monitor dongla, Thread pola Mattera – a pod
+    nimi wspólne dla protokołów start-po-czasie / RTT / napięcie / zapis /
+    próbkowanie. Czyta/ustawia własną konfigurację, nie dotyka innych kart."""
 
     def __init__(self, uid, scenarios, number, config=None, collapsed=False):
         super().__init__(classes="measurement-card", id=f"card_{uid}")
@@ -981,6 +1065,8 @@ class MeasurementCard(Vertical):
         self.number = number
         self._config = config or {}
         self.collapsed = collapsed
+        # Protokół aktywny PRZED bieżącym kliknięciem – patrz on_mouse_down.
+        self._proto_before_click = ""
 
     def compose(self):
         c = self._config
@@ -1007,62 +1093,49 @@ class MeasurementCard(Vertical):
                         classes="card-duration")
             with Collapsible(title="Ustawienia zaawansowane", collapsed=True,
                              classes="card-adv"):
-                # Seria (sweep): jedna karta -> wiele pomiarów "N.1, N.2, …",
-                # każdy budowany z inną flagą -DCONFIG_...=<wartość>. Pola
-                # pojawiają się po włączeniu.
-                yield Check("Seria: sweep parametru (jedna karta = wiele "
-                            "pomiarów)",
-                            value=c.get("sweep_on", False),
-                            classes="card-sweep-on")
-                with Vertical(classes="card-sweep-box"):
-                    yield Label("Parametr (symbol Kconfig):")
-                    yield Input(
-                        value=c.get("sweep_param",
-                                    "CONFIG_LPN_SENSOR_INTERVAL_S"),
-                        placeholder="CONFIG_LPN_SENSOR_INTERVAL_S",
-                        classes="card-sweep-param")
-                    yield Label("Wartości (po przecinku lub spacji):")
-                    yield Input(value=c.get("sweep_values", ""),
-                                placeholder="1, 2, 5, 10, 20, 30, 60, 120, "
-                                            "300, 600",
-                                classes="card-sweep-values")
-                # Start po czasie – opcjonalny; pole pojawia się po włączeniu.
-                # Bez niego i tak czekamy MIN_START_DELAY_S na rozruch
-                # płytki; wpisany czas nie dokłada się do tych sekund,
-                # tylko je zastępuje (liczy się większy).
-                yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
-                            value=c.get("delay_on", False),
-                            classes="card-delay-on")
-                yield Input(value=c.get("delay_s", "20s"),
-                            placeholder="np. 30s", classes="card-delay-s")
-                # Konsola RTT – opcjonalna; pola pojawiają się po włączeniu.
-                yield Check("Konsola RTT (start po logu / etykiety)",
-                            value=c.get("rtt_on", False),
-                            classes="card-rtt-on")
-                with Vertical(classes="card-rtt-box"):
-                    yield Select([("start po logu", "trigger"),
-                                  ("etykiety (continuous)", "continuous")],
-                                 value=c.get("rtt_mode", "trigger"),
-                                 allow_blank=False, classes="card-rtt")
-                    yield Input(value=c.get("pattern", ""),
-                                placeholder="wzorzec logu RTT",
-                                classes="card-pattern")
-                # Monitor dongla (serial) – logi z osobnego urządzenia (np.
-                # węzeł Friend). Widoczny przed i podczas pomiaru; opcjonalnie
-                # startuje pomiar, gdy w logu pojawi się fragment tekstu.
-                yield Check("Monitor dongla (serial)",
-                            value=c.get("serial_on", False),
-                            classes="card-serial-on")
-                with Vertical(classes="card-serial-box"):
-                    yield Input(value=c.get("serial_port", "/dev/ttyACM0"),
-                                placeholder="/dev/ttyACM0",
-                                classes="card-serial-port")
-                    yield Check("Start pomiaru po logu (zawiera tekst)",
-                                value=c.get("serial_trig", False),
-                                classes="card-serial-trig-on")
-                    yield Input(value=c.get("serial_pattern", ""),
-                                placeholder="np. Friendship z LPN nawiazany",
-                                classes="card-serial-pattern")
+                # Protokół u góry: pola serii, monitora dongla i Mattera
+                # siedzą w zakładkach, bo każde z nich ma sens tylko w
+                # swoim protokole. Reszta ustawień (start, RTT, napięcie,
+                # zapis, próbkowanie) zostaje POD zakładkami – to sprzęt
+                # i pomiar, wspólne dla protokołów.
+                active = c.get("protocol", DEFAULT_PROTOCOL)
+                with TabbedContent(initial=active, classes="card-proto"):
+                    for proto, label, monitor, matter, sweep in PROTOCOLS:
+                        with TabPane(label, id=proto):
+                            # Pola wypełniamy tylko w zakładce, z której
+                            # config pochodzi – reszta protokołów startuje
+                            # pusta, żeby karta nie podsuwała symbolu
+                            # Kconfig z cudzego stosu. Domyślne symbole
+                            # (BLE Mesh) idą z PROTOCOLS, więc są na miejscu
+                            # także w zakładce nieaktywnej.
+                            yield from self._protocol_fields(
+                                c if proto == active else {}, monitor, matter,
+                                sweep)
+                # Start po czasie i konsola RTT – SCHOWANE z widoku w trybach
+                # protokołów, ale wciąż w drzewie: plan czyta ich wartości
+                # (domyślnie wyłączone), a wcześniejsze karty i testy dalej
+                # działają. Odsłonięcie to zdjęcie .display = False
+                # w _sync_advanced().
+                with Vertical(classes="card-hidden-adv"):
+                    # Bez startu po czasie i tak czekamy MIN_START_DELAY_S na
+                    # rozruch płytki; wpisany czas nie dokłada się do tych
+                    # sekund, tylko je zastępuje (liczy się większy).
+                    yield Check("Start pomiaru po czasie od wgrania (np. 20s)",
+                                value=c.get("delay_on", False),
+                                classes="card-delay-on")
+                    yield Input(value=c.get("delay_s", "20s"),
+                                placeholder="np. 30s", classes="card-delay-s")
+                    yield Check("Konsola RTT (start po logu / etykiety)",
+                                value=c.get("rtt_on", False),
+                                classes="card-rtt-on")
+                    with Vertical(classes="card-rtt-box"):
+                        yield Select([("start po logu", "trigger"),
+                                      ("etykiety (continuous)", "continuous")],
+                                     value=c.get("rtt_mode", "trigger"),
+                                     allow_blank=False, classes="card-rtt")
+                        yield Input(value=c.get("pattern", ""),
+                                    placeholder="wzorzec logu RTT",
+                                    classes="card-pattern")
                 with Horizontal(classes="card-row card-vs-row"):
                     with Vertical(classes="card-col"):
                         yield Label("Napięcie (V, 1.8–3.6):")
@@ -1086,31 +1159,238 @@ class MeasurementCard(Vertical):
                 yield Button("Zastosuj do następnych",
                              classes="card-apply-next")
 
+    @staticmethod
+    def _protocol_fields(c, monitor, matter, sweep):
+        """Zawartość jednej zakładki protokołu. Każda ma serię (sweep) –
+        etykiety i domyślne symbole bierze z `sweep` (PROTOCOLS), bo BLE Mesh
+        zna nazwy swoich parametrów, a Thread i Zigbee jeszcze nie. Monitor
+        dongla tylko przy `monitor`, pola Mattera tylko przy `matter`. Klasy
+        pól powtarzają się między zakładkami – dlatego pytamy o nie zawsze
+        przez konkretny panel (MeasurementCard.field), nigdy przez samą
+        kartę."""
+        # Seria (sweep): jedna karta -> wiele pomiarów "N.1, N.2, …", każdy
+        # budowany z inną flagą -DCONFIG_...=<wartość>. Pola są od razu
+        # gotowe do wpisania – wpisane WARTOŚCI włączają serię (sam symbol
+        # nie, bo bywa wpisany domyślnie), puste zostawiają jeden pomiar.
+        (param1, default1, values1), (param2, default2, values2) = sweep
+        yield Label(f"{param1}:")
+        yield Input(value=c.get("sweep_param", default1),
+                    placeholder="np. CONFIG_MOJ_PARAMETR",
+                    classes="card-sweep-param")
+        yield Label(f"{values1}:")
+        yield Input(value=c.get("sweep_values", ""),
+                    placeholder="np. 10, 60, 300 — pusto = bez tej osi",
+                    classes="card-sweep-values")
+        # Druga oś jest OPCJONALNA: wypełnione wartości dają iloczyn
+        # kartezjański (3 × 2 = 6 pomiarów), puste – serię po jednej osi.
+        yield Label(f"{param2}:")
+        yield Input(value=c.get("sweep_param2", default2),
+                    placeholder="np. CONFIG_MOJ_PARAMETR",
+                    classes="card-sweep-param2")
+        yield Label(f"{values2}:")
+        yield Input(value=c.get("sweep_values2", ""),
+                    placeholder="np. 60, 120, 200 — pusto = bez tej osi",
+                    classes="card-sweep-values2")
+        if matter:
+            yield from MeasurementCard._matter_fields(c)
+        if not monitor:
+            return
+        # Monitor dongla – logi z osobnego urządzenia (np. węzeł Friend).
+        # Widoczny przed i podczas pomiaru; wpisany port włącza monitor,
+        # a wpisany fragment logu – start pomiaru po tym logu. Oddzielony
+        # od serii samym odstępem (bez nagłówka), więc kontener istnieje
+        # tylko po to, żeby ten odstęp dało się ustawić w CSS.
+        with Vertical(classes="card-monitor-box"):
+            # Port wpisany na sztywno (nie placeholder) – dongiel siedzi u nas
+            # zawsze na tym samym /dev/ttyACM1, więc monitor ma być włączony
+            # od razu. Gdy dongla nie ma, silnik pisze „monitor niedostępny”
+            # i mierzy dalej; pomiar przerywa tylko wtedy, gdy to z tego logu
+            # miał ruszyć start.
+            yield Label("Port dongla:")
+            yield Input(value=c.get("serial_port", DEFAULT_DONGLE_PORT),
+                        placeholder=DEFAULT_DONGLE_PORT,
+                        classes="card-serial-port")
+            yield Label("Start pomiaru po logu (zawiera tekst):")
+            yield Input(value=c.get("serial_pattern", ""),
+                        placeholder="np. Friendship z LPN nawiazany",
+                        classes="card-serial-pattern")
+
+    @staticmethod
+    def _matter_fields(c):
+        """Pola Mattera (zakładka Thread). Sam wybór tej zakładki włącza
+        po flashu parowanie węzła i subskrypcję atrybutu, a pomiar rusza na
+        PIERWSZYM raporcie – dlatego pola mają wpisane wartości, nie
+        placeholdery: karta ma działać od razu po przełączeniu protokołu.
+        Oddzielone od serii samym odstępem (jak monitor dongla), więc
+        kontener istnieje tylko po to, żeby ustawić ten odstęp w CSS."""
+        with Vertical(classes="card-chip-box"):
+            with Horizontal(classes="card-row"):
+                with Vertical(classes="card-col"):
+                    yield Label("Node ID:")
+                    yield Input(value=c.get("chip_node_id", "5"),
+                                placeholder="5", classes="card-chip-node")
+                with Vertical(classes="card-col"):
+                    yield Label("Discriminator:")
+                    yield Input(value=c.get("chip_discriminator", "3840"),
+                                placeholder="3840", classes="card-chip-disc")
+                with Vertical(classes="card-col"):
+                    yield Label("Setup PIN:")
+                    yield Input(value=c.get("chip_pin", "20202021"),
+                                placeholder="20202021",
+                                classes="card-chip-pin")
+            # Dataset (długi hex, ~222 znaki) w TextArea z zawijaniem – Input
+            # tej długości renderuje się pusty, bo zakładka Thread powstaje
+            # niewidoczna (aktywne jest BLE Mesh) i pole nie zna swojej
+            # szerokości.
+            yield Label("Dataset Thread (hex):")
+            yield TextArea(c.get("chip_dataset", CHIP_DATASET_DEFAULT),
+                           soft_wrap=True, compact=True,
+                           show_line_numbers=False,
+                           classes="card-chip-dataset")
+            # Cluster na pełną szerokość – „temperaturemeasurement” nie mieści
+            # się w wąskiej kolumnie (z tego samego powodu byłby pusty).
+            yield Label("Cluster:")
+            yield Input(value=c.get("chip_cluster", "temperaturemeasurement"),
+                        classes="card-chip-cluster")
+            with Horizontal(classes="card-row"):
+                with Vertical(classes="card-col"):
+                    yield Label("Atrybut:")
+                    yield Input(value=c.get("chip_attribute",
+                                            "measured-value"),
+                                classes="card-chip-attr")
+                with Vertical(classes="card-col"):
+                    yield Label("Endpoint:")
+                    yield Input(value=c.get("chip_endpoint", "1"),
+                                placeholder="1", classes="card-chip-endpoint")
+            with Horizontal(classes="card-row"):
+                with Vertical(classes="card-col"):
+                    yield Label("Min interval [s]:")
+                    yield Input(value=c.get("chip_min", "1"),
+                                placeholder="1", classes="card-chip-min")
+                with Vertical(classes="card-col"):
+                    yield Label("Max interval [s]:")
+                    yield Input(value=c.get("chip_max", "60"),
+                                placeholder="60", classes="card-chip-max")
+                with Vertical(classes="card-col"):
+                    yield Label("Timeout 1. wartości:")
+                    yield Input(value=c.get("chip_timeout", "120s"),
+                                placeholder="120s",
+                                classes="card-chip-timeout")
+            yield Check("Węzeł już sparowany (pomiń parowanie, "
+                        "tylko subskrypcja)",
+                        value=c.get("chip_skip", False),
+                        classes="card-chip-skip")
+
     def on_mount(self):
         # Post-mount: dopiero teraz ukrywamy zaawansowane pola i (ewentualnie)
         # zwijamy kartę – overlaye Selectów już istnieją, więc bezpiecznie.
         self._sync_advanced()
         self.query_one(".card-body").display = not self.collapsed
+        # Karta bez protokołu: Tabs w swoim on_mount SAM podświetla pierwszą
+        # zakładkę, więc pustego stanu nie da się podać w compose – cofamy to
+        # po zamontowaniu całego drzewa (call_after_refresh, nie on_mount, bo
+        # kolejność montowania rodzica i dzieci nie jest gwarantowana).
+        if not self._config.get("protocol", DEFAULT_PROTOCOL):
+            self.call_after_refresh(self.set_protocol, "")
         self._refresh_title()
 
     def on_checkbox_changed(self, event):
-        # Checkboxy karty (start-po-czasie / RTT / monitor dongla) sterują
-        # widocznością swoich pól – nie puszczamy zdarzenia wyżej (App liczy
-        # tylko scen-check).
+        # Checkboxy karty (start-po-czasie / RTT) sterują widocznością swoich
+        # pól – nie puszczamy zdarzenia wyżej (App liczy tylko scen-check).
         self._sync_advanced()
         event.stop()
 
+    def on_tabbed_content_tab_activated(self, event):
+        # Każda zakładka ma własne pola serii, więc zmiana protokołu zmienia
+        # też serię – dopisek o niej w tytule musi za tym nadążyć.
+        self._refresh_title()
+        event.stop()
+
+    def on_tabbed_content_cleared(self, event):
+        # Wyjście z protokołu (żadna zakładka nie jest aktywna) też zmienia
+        # serię – karta staje się zwykłym pomiarem.
+        self._refresh_title()
+        event.stop()
+
+    def on_mouse_down(self, event):
+        """Migawka aktywnego protokołu PRZED kliknięciem. Klik w zakładkę
+        aktywuje ją, zanim Click dojdzie do karty (Tabs konsumuje Tab.Clicked
+        pierwszy), więc bez tej migawki nie da się odróżnić „wybrałem inną
+        zakładkę” od „kliknąłem tę, która już była aktywna”."""
+        self._proto_before_click = self.protocol()
+
+    def on_click(self, event):
+        """Klik w AKTYWNĄ zakładkę protokołu = wyjście z trybu: żadna zakładka
+        nie jest aktywna i karta jest zwykłym pomiarem (bez serii, monitora
+        i Mattera). Wpisane pola zostają w swojej zakładce i wracają po
+        ponownym kliknięciu. Klik w inną zakładkę zmienia protokół jak
+        dotąd – tym zajmuje się sam TabbedContent."""
+        proto = self._clicked_protocol(event.screen_offset)
+        if proto is None or proto != self._proto_before_click:
+            return
+        self.set_protocol("")
+        event.stop()
+
+    def _clicked_protocol(self, screen_offset):
+        """Protokół, w którego ZAKŁADKĘ (nie panel) trafił klik, albo None.
+        Pytamy o region zakładki, nie o widget zdarzenia, bo tak samo robi
+        Textual przy klikaniu podkreślenia zakładek."""
+        tabs = self.query_one(".card-proto", TabbedContent)
+        for proto, *_ in PROTOCOLS:
+            tab = tabs.get_tab(proto)
+            if screen_offset in tab.region:
+                return proto
+        return None
+
+    def set_protocol(self, protocol):
+        """Ustaw protokół karty; '' = żaden (wyjście z trybu)."""
+        self.query_one(".card-proto", TabbedContent).active = protocol
+        self._refresh_title()
+
     def _sync_advanced(self):
-        self.query_one(".card-sweep-box").display = \
-            self.query_one(".card-sweep-on", Checkbox).value
         self.query_one(".card-delay-s").display = \
             self.query_one(".card-delay-on", Checkbox).value
         self.query_one(".card-rtt-box").display = \
             self.query_one(".card-rtt-on", Checkbox).value
-        self.query_one(".card-serial-box").display = \
-            self.query_one(".card-serial-on", Checkbox).value
-        self.query_one(".card-serial-pattern").display = \
-            self.query_one(".card-serial-trig-on", Checkbox).value
+        # Chowamy dopiero tutaj (post-mount), a nie przez CSS: Select
+        # zamontowany od razu jako display:none nie tworzy overlaya.
+        self.query_one(".card-hidden-adv").display = False
+
+    def protocol(self):
+        """Symbol wybranego protokołu ('ble_mesh' / 'thread' / 'zigbee')
+        albo '' – żaden, czyli karta jest zwykłym pomiarem."""
+        return str(self.query_one(".card-proto", TabbedContent).active)
+
+    def field(self, selector, protocol=None):
+        """Pole protokołu (domyślnie wybranego) albo None, gdy ten protokół
+        go nie ma – Thread mierzymy bez dongla, więc nie ma tam pól monitora,
+        a BLE Mesh i Zigbee nie mają pól Mattera. None także wtedy, gdy żaden
+        protokół nie jest aktywny: nie ma wtedy zakładki, o którą pytać.
+        Każda zakładka trzyma własny komplet pól o tych samych klasach,
+        dlatego pytamy przez konkretny panel, a nie przez kartę. Bez
+        wymuszania typu widgetu – w zakładkach są nie tylko Inputy, ale i
+        TextArea (dataset) oraz Checkbox („węzeł już sparowany”)."""
+        proto = self.protocol() if protocol is None else protocol
+        if not proto:
+            return None
+        pane = self.query_one(".card-proto", TabbedContent).get_pane(proto)
+        found = pane.query(selector)
+        return found.first() if found else None
+
+    def _field_value(self, selector):
+        widget = self.field(selector)
+        return widget.value.strip() if widget is not None else ""
+
+    def _field_text(self, selector):
+        """Treść TextArei protokołu bez białych znaków. Dataset to jeden ciąg
+        hex, a TextArea przyjmuje Enter – więc sklejamy, cokolwiek wpisano."""
+        widget = self.field(selector)
+        return "".join(widget.text.split()) if widget is not None else ""
+
+    def _field_flag(self, selector):
+        """Checkbox protokołu; brak pola w tym protokole = nie zaznaczony."""
+        widget = self.field(selector)
+        return bool(widget.value) if widget is not None else False
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
@@ -1143,19 +1423,33 @@ class MeasurementCard(Vertical):
         title.update(f"▶ {label}{suffix}{self._sweep_title()}")
 
     def _sweep_title(self):
-        """Dopisek do tytułu zwiniętej karty, gdy włączona seria (sweep):
-        ' · sweep CONFIG_… ×M'. Pusty, gdy sweep wyłączony."""
+        """Dopisek do tytułu zwiniętej karty, gdy karta ma serię (sweep):
+        ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
+        liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
+        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola wartości wybranego
+        protokołu są puste albo gdy żaden protokół nie jest aktywny. Osie
+        liczymy tak samo jak plan (_sweep_axes), żeby tytuł nie obiecywał
+        pomiarów, których nie będzie."""
+        from autorun.plan import parse_sweep_values
         try:
-            if not self.query_one(".card-sweep-on", Checkbox).value:
+            cfg = self.get_config()
+            if not _sweep_on(cfg):
                 return ""
-            param = self.query_one(".card-sweep-param", Input).value.strip()
-            raw = self.query_one(".card-sweep-values", Input).value
-            n = len(raw.replace(",", " ").split())
+            axes = [(p, len(parse_sweep_values(v)))
+                    for p, v in _sweep_axes(cfg)]
+        except ValueError:
+            # Wartości bez nazwy parametru – plan to odrzuci przed startem,
+            # a tytuł mówi wprost, czego brakuje.
+            return " · sweep (brak parametru)"
         except Exception:
             return ""
-        if not n:
-            return " · sweep (brak wartości)"
-        return f" · sweep {param or '?'} ×{n}"
+        text = " · ".join(f"{p} ×{n}" for p, n in axes)
+        if len(axes) > 1:
+            total = 1
+            for _, n in axes:
+                total *= n
+            text += f" = {total}"
+        return f" · sweep {text}"
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -1180,24 +1474,35 @@ class MeasurementCard(Vertical):
     def get_config(self):
         return {
             "scenario": self._scenario(),
-            "sweep_on": self.query_one(".card-sweep-on", Checkbox).value,
-            "sweep_param":
-                self.query_one(".card-sweep-param", Input).value.strip(),
-            "sweep_values":
-                self.query_one(".card-sweep-values", Input).value.strip(),
+            "protocol": self.protocol(),
+            # Pola protokołów: bierzemy TYLKO z wybranej zakładki. To, co
+            # wpisane w pozostałych, czeka tam na swój protokół i nie ma
+            # wpływu na ten pomiar.
+            "sweep_param": self._field_value(".card-sweep-param"),
+            "sweep_values": self._field_value(".card-sweep-values"),
+            "sweep_param2": self._field_value(".card-sweep-param2"),
+            "sweep_values2": self._field_value(".card-sweep-values2"),
             "duration": self.query_one(".card-duration", Input).value.strip(),
             "delay_on": self.query_one(".card-delay-on", Checkbox).value,
             "delay_s": self.query_one(".card-delay-s", Input).value.strip(),
             "rtt_on": self.query_one(".card-rtt-on", Checkbox).value,
             "rtt_mode": self.query_one(".card-rtt", Select).value,
             "pattern": self.query_one(".card-pattern", Input).value.strip(),
-            "serial_on": self.query_one(".card-serial-on", Checkbox).value,
-            "serial_port":
-                self.query_one(".card-serial-port", Input).value.strip(),
-            "serial_trig":
-                self.query_one(".card-serial-trig-on", Checkbox).value,
-            "serial_pattern":
-                self.query_one(".card-serial-pattern", Input).value.strip(),
+            "serial_port": self._field_value(".card-serial-port"),
+            "serial_pattern": self._field_value(".card-serial-pattern"),
+            # Matter: bez osobnego „włącz” – decyduje protokół. Poza
+            # zakładką Thread pól nie ma, więc wychodzą puste.
+            "chip_node_id": self._field_value(".card-chip-node"),
+            "chip_discriminator": self._field_value(".card-chip-disc"),
+            "chip_pin": self._field_value(".card-chip-pin"),
+            "chip_dataset": self._field_text(".card-chip-dataset"),
+            "chip_cluster": self._field_value(".card-chip-cluster"),
+            "chip_attribute": self._field_value(".card-chip-attr"),
+            "chip_endpoint": self._field_value(".card-chip-endpoint"),
+            "chip_min": self._field_value(".card-chip-min"),
+            "chip_max": self._field_value(".card-chip-max"),
+            "chip_timeout": self._field_value(".card-chip-timeout"),
+            "chip_skip": self._field_flag(".card-chip-skip"),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
@@ -1205,25 +1510,45 @@ class MeasurementCard(Vertical):
 
     def apply_shared(self, cfg):
         """Ustaw wszystko OPRÓCZ scenariusza (dla 'Zastosuj do wszystkich')."""
-        self.query_one(".card-sweep-on", Checkbox).value = cfg["sweep_on"]
-        self.query_one(".card-sweep-param", Input).value = cfg["sweep_param"]
-        self.query_one(".card-sweep-values", Input).value = cfg["sweep_values"]
+        self.query_one(".card-proto", TabbedContent).active = cfg["protocol"]
+        # Pola przepisujemy do zakładki protokołu Z KONFIGURACJI – zakładki
+        # pozostałych protokołów zostają nietknięte, bo ich wartości nie mają
+        # sensu poza własnym stosem. Karta bez protokołu nie ma czego
+        # przepisywać (field() zwraca None): przenosi się samo wyjście z trybu.
+        for key, selector in (("sweep_param", ".card-sweep-param"),
+                              ("sweep_values", ".card-sweep-values"),
+                              ("sweep_param2", ".card-sweep-param2"),
+                              ("sweep_values2", ".card-sweep-values2"),
+                              ("serial_port", ".card-serial-port"),
+                              ("serial_pattern", ".card-serial-pattern"),
+                              ("chip_node_id", ".card-chip-node"),
+                              ("chip_discriminator", ".card-chip-disc"),
+                              ("chip_pin", ".card-chip-pin"),
+                              ("chip_cluster", ".card-chip-cluster"),
+                              ("chip_attribute", ".card-chip-attr"),
+                              ("chip_endpoint", ".card-chip-endpoint"),
+                              ("chip_min", ".card-chip-min"),
+                              ("chip_max", ".card-chip-max"),
+                              ("chip_timeout", ".card-chip-timeout"),
+                              ("chip_skip", ".card-chip-skip")):
+            widget = self.field(selector, cfg["protocol"])
+            if widget is not None:
+                widget.value = cfg[key]
+        # Dataset osobno – TextArea trzyma treść w .text, nie w .value.
+        dataset = self.field(".card-chip-dataset", cfg["protocol"])
+        if dataset is not None:
+            dataset.text = cfg["chip_dataset"]
         self.query_one(".card-duration", Input).value = cfg["duration"]
         self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
         self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
         self.query_one(".card-rtt-on", Checkbox).value = cfg["rtt_on"]
         self.query_one(".card-rtt", Select).value = cfg["rtt_mode"]
         self.query_one(".card-pattern", Input).value = cfg["pattern"]
-        self.query_one(".card-serial-on", Checkbox).value = cfg["serial_on"]
-        self.query_one(".card-serial-port", Input).value = cfg["serial_port"]
-        self.query_one(".card-serial-trig-on", Checkbox).value = \
-            cfg["serial_trig"]
-        self.query_one(".card-serial-pattern", Input).value = \
-            cfg["serial_pattern"]
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
         self._sync_advanced()
+        self._refresh_title()
 
 
 class Ppk2ConnectScreen(ModalScreen):
@@ -1393,7 +1718,10 @@ class AutoRunScreen(Screen):
         self._active_log = None
         self._active_lines = None
         # Po buildzie: podsumowanie zajętości pamięci jako tabelka Markdown –
-        # ta sama co w trybie ręcznym. Przy flashu parser zwraca None.
+        # ta sama co w trybie ręcznym. Przy flashu parser zwraca None. Tu nie
+        # znamy katalogu builda (zdarzenia niosą tylko linie), więc przy
+        # sysbuildzie z kilkoma obrazami pokazujemy wszystkie tabelki; do
+        # dziennika trafia właściwa – wybiera ją silnik (core.record_memory).
         report = core.parse_memory_report(lines)
         if report is not None:
             box = Static(report, classes="mem-report", markup=False)
@@ -1507,13 +1835,14 @@ class AutoRunScreen(Screen):
 
     @staticmethod
     def _sweep_str(sweep):
-        """Para parametr=wartość serii do pokazania (bez prefiksu CONFIG_);
-        pusto, gdy krok nie jest z serii."""
-        if not sweep:
-            return ""
-        param = (sweep.get("param") or "").removeprefix("CONFIG_")
-        value = sweep.get("value") or ""
-        return f"{param}={value}" if param else ""
+        """Pary parametr=wartość serii do pokazania (bez prefiksu CONFIG_,
+        osie po przecinku: 'A=10, B=100'); pusto, gdy krok nie jest z serii."""
+        pairs = []
+        for axis in sweep or ():
+            param = (axis.get("param") or "").removeprefix("CONFIG_")
+            if param:
+                pairs.append(f"{param}={axis.get('value') or ''}")
+        return ", ".join(pairs)
 
     # --- most zdarzenia silnika -> UI (wołane z wątku) ---
 
@@ -1768,19 +2097,31 @@ class PowerTestApp(App):
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-sweep-on, .card-delay-on, .card-rtt-on, .card-serial-on,
-    .card-serial-trig-on {
+    .card-delay-on, .card-rtt-on, .card-chip-skip {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
     .card-sweep-param, .card-sweep-values { width: 100%; }
+    .card-sweep-param2, .card-sweep-values2 { width: 100%; }
     .card-serial-port, .card-serial-pattern { width: 100%; }
-    .card-rtt-box, .card-serial-box, .card-sweep-box { height: auto; }
+    .card-rtt-box, .card-hidden-adv { height: auto; }
+    /* Zakładki protokołu (BLE Mesh / Thread / Zigbee) u góry ustawień
+       zaawansowanych, wyśrodkowane nad panelem. Panel bez własnego tła –
+       karta ma już swoje. */
+    .card-proto { height: auto; background: transparent; }
+    .card-proto #tabs-list { align-horizontal: center; }
+    .card-proto TabPane { height: auto; padding: 0 1; background: transparent; }
+    .card-proto ContentSwitcher { height: auto; }
+    /* Monitor dongla i pola Mattera oddzielone od serii pustym odstępem –
+       tyle wystarczy, żeby było widać, że to osobny segment zakładki. */
+    .card-monitor-box, .card-chip-box { height: auto; margin-top: 2; }
+    .card-chip-cluster { width: 100%; }
+    .card-chip-dataset { width: 100%; height: 6; border: round #555555; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
-    .card-apply-row { height: auto; }
-    .card-apply, .card-apply-next { min-width: 0; margin: 1 2 1 0; }
+    .card-apply-row { height: auto; align-horizontal: center; }
+    .card-apply, .card-apply-next { min-width: 0; margin: 1 1; }
     #add_measurement { min-width: 0; width: 72; max-width: 100%; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
@@ -1876,7 +2217,10 @@ class PowerTestApp(App):
     Collapsible { background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text; }
     CollapsibleTitle:hover { background: transparent; text-style: bold; }
-    .cmd-log { height: 14; border: round #555555; background: transparent;
+    /* Rozwinięta sekcja build/flash: 30 wierszy, bo przy buildzie chodzi o
+       to, żeby naraz widzieć kawałek wyjścia westa, a nie przewijać je po
+       kilka linijek. Ta sama reguła obsługuje oba tryby. */
+    .cmd-log { height: 30; border: round #555555; background: transparent;
                margin: 0 1 1 2; overflow-x: auto; }
     /* Tabelka pamięci po buildzie – wąska ramka, tekst monospace MD do
        skopiowania. */
@@ -1971,7 +2315,9 @@ class PowerTestApp(App):
         self.scenarios = self.manifest.get("scenarios", {})
         if not self.boards or not self.scenarios:
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
-        self.mode = "standard"          # standard | auto
+        # Start w trybie autonomicznym: to jest tryb, w którym narzędzie
+        # samo mierzy (PPK2). Ręczny zostaje pod kliknięciem w przełącznik.
+        self.mode = "auto"              # standard | auto
         self._card_uid = 0              # licznik kart 'Pomiar N'
         self._card_template = None      # config dziedziczony przez nowe karty
 
@@ -2387,11 +2733,12 @@ class PowerTestApp(App):
 
     def _build_auto_plan(self, prof_name):
         """Plan trybu autonomicznego z kart 'Pomiar N'. Kolejność kroków =
-        kolejność kart. Trigger (priorytet): log dongla > RTT 'start po logu'
-        > 'start po czasie' > od razu; przy RTT continuous wzorzec staje się
-        auto-etykietą. Przy starcie po czasie (i 'od razu') silnik trzyma
-        własną podłogę na rozruch płytki – bierze WIĘKSZY z dwóch czasów,
-        nie sumę, więc tutaj nic nie doliczamy."""
+        kolejność kart. Trigger (priorytet): Matter (protokół Thread) >
+        log dongla > RTT 'start po logu' > 'start po czasie' > od razu;
+        przy RTT continuous wzorzec staje się auto-etykietą. Przy starcie
+        po czasie (i 'od razu') silnik trzyma własną podłogę na rozruch
+        płytki – bierze WIĘKSZY z dwóch czasów, nie sumę, więc tutaj nic
+        nie doliczamy."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
                                   Trigger, expand_sweep, parse_duration)
 
@@ -2409,12 +2756,58 @@ class PowerTestApp(App):
             except ValueError as e:
                 raise ValueError(f"Pomiar {card.number}: {e}")
             rtt = c["rtt_mode"] if c["rtt_on"] else "off"
-            monitor_port = c["serial_port"] if c["serial_on"] else ""
+            matter = c["protocol"] == "thread"
+            # Matter sam wyznacza start (1. odczyt z subskrypcji), więc tryb
+            # RTT 'trigger' (start po logu) traci sens – zostaje 'continuous'
+            # (etykiety) albo 'off'.
+            if matter and rtt == "trigger":
+                rtt = "off"
+            # Pola serii i monitora czytamy z zakładki wybranego protokołu
+            # (get_config), więc protokół bez monitora – Thread – po prostu
+            # nie ma czego tu podać.
+            monitor_port = c["serial_port"]
             labels = []
             if rtt == "continuous" and c["pattern"]:
                 labels = [LabelRule(pattern=c["pattern"],
                                     label=c["pattern"])]
-            if c["serial_on"] and c["serial_trig"] and c["serial_pattern"]:
+            if matter:
+                # Zakładka Thread = pomiar przez Mattera: po flashu parujemy
+                # węzeł i otwieramy subskrypcję atrybutu, a pomiar rusza na
+                # pierwszym raporcie. Bez osobnego „włącz” – wybór protokołu
+                # JEST włącznikiem, więc brakujące pole to błąd, a nie cicha
+                # zmiana startu na 'od razu'.
+                if not c["chip_node_id"]:
+                    raise ValueError(
+                        f"Pomiar {card.number}: Matter – podaj Node ID.")
+                if not c["chip_skip"]:
+                    if not c["chip_dataset"]:
+                        raise ValueError(
+                            f"Pomiar {card.number}: Matter – podaj dataset "
+                            "Thread (hex) albo zaznacz 'węzeł już sparowany'.")
+                    if not c["chip_discriminator"]:
+                        raise ValueError(
+                            f"Pomiar {card.number}: Matter – podaj "
+                            "discriminator albo 'węzeł już sparowany'.")
+                try:
+                    chip_to = (parse_duration(c["chip_timeout"])
+                               if c["chip_timeout"] else 120.0)
+                except ValueError:
+                    raise ValueError(
+                        f"Pomiar {card.number}: Matter – timeout "
+                        f"'{c['chip_timeout']}' nie jest czasem (np. 120s).")
+                trigger = Trigger(
+                    type="chip", timeout_s=chip_to,
+                    node_id=c["chip_node_id"],
+                    dataset=c["chip_dataset"],
+                    pin=c["chip_pin"] or "20202021",
+                    discriminator=c["chip_discriminator"],
+                    cluster=c["chip_cluster"] or "temperaturemeasurement",
+                    attribute=c["chip_attribute"] or "measured-value",
+                    endpoint=c["chip_endpoint"] or "1",
+                    min_interval=c["chip_min"] or "1",
+                    max_interval=c["chip_max"] or "60",
+                    skip_pairing=c["chip_skip"])
+            elif monitor_port and c["serial_pattern"]:
                 trigger = Trigger(type="serial", pattern=c["serial_pattern"],
                                   timeout_s=180.0)
             elif rtt == "trigger":
@@ -2436,13 +2829,13 @@ class PowerTestApp(App):
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
                 labels=labels, pristine=pristine)
-            if c.get("sweep_on"):
+            if _sweep_on(c):
                 # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
+                # Druga oś opcjonalna – wypełniona daje iloczyn kartezjański.
                 try:
                     steps.extend(expand_sweep(
-                        card.number, c["sweep_param"], c["sweep_values"],
-                        base))
+                        card.number, _sweep_axes(c), base))
                 except ValueError as e:
                     raise ValueError(f"Pomiar {card.number}: {e}")
             else:

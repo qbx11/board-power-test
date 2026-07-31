@@ -57,6 +57,28 @@ power_cycle = true
   pattern = "Friend Update"
   label   = "Friend Update"
 
+# --- Krok 3: aplikacja Matter – start pomiaru po 1. odczycie z subskrypcji ---
+# Scenariusz "end_device" wskazuje na aplikację z sąsiedniego repo, więc jego
+# wpis (z polem `source`) trzymamy w scenarios.local.toml – poza gitem.
+[[plan.steps]]
+scenario = "end_device"
+duration = "20m"
+voltage  = "3.0"
+rtt      = "off"                             # do prądu snu; RTT dodaje narzut
+# trigger 'chip': po flashu narzędzie samo robi (scripts/pair_and_subscribe.py):
+#   rm /tmp/chip_* -> chip-tool pairing ble-thread -> interactive + subscribe.
+# Pomiar PPK2 startuje 10 s po PIERWSZYM raporcie MeasuredValue (nie na
+# sztywnym czasie) – te 10 s to zapas na uspokojenie się sieci po parowaniu.
+# `timeout` = ile czekać na tę pierwszą wartość (po sparowaniu).
+trigger = { type = "chip", node_id = "5", discriminator = "3840", pin = "20202021", timeout = "120s", dataset = "0e08000000000001000000030000174a0300000e35060004001fffe00208813ba4b5a068fddf0708fddc8e685e36d6cc0510b840138392a6efbee61680bdca9ae7fd030f4f70656e5468726561642d666236650102fb6e04108c97ec5b81873b78c371537a24886bef0c0402a0f7f8" }
+# Opcjonalne (mają sensowne domyślne):
+#   cluster = "temperaturemeasurement"   attribute = "measured-value"
+#   endpoint = "1"   min_interval = "1"   max_interval = "60"
+#   match = "(?i)MeasuredValue[^0-9-]*(-?\\d+)"   # regex 1. wartości
+#   chip_dir = "/home/goodbyte/KZ/connectedhomeip"   chip_tool = "..."
+#   skip_pairing = true   # węzeł już w fabryce – tylko subskrypcja
+#   no_wipe = true        # nie kasuj /tmp/chip_* przed parowaniem
+
 # ============================================================
 #  Tryby RTT (pole `rtt`) – kompromis szum ↔ etykiety
 # ============================================================
@@ -86,3 +108,30 @@ power_cycle = true
 #                          ~1,4 GB/h). Maksymalna dokładność.
 #   mode = "both"        – oba naraz.
 #   window_ms            – okno bazowego tieru (1 ms = piki widoczne).
+
+# ============================================================
+#  Trigger 'chip' (Matter: parowanie + subskrypcja)
+# ============================================================
+# Zamiast czekać sztywny `delay`, po flashu narzędzie:
+#   1. kasuje stan fabryki chip-toola (rm -f /tmp/chip_*),
+#   2. paruje węzeł:  chip-tool pairing ble-thread <node> hex:<dataset> <pin> <disc>,
+#   3. otwiera subskrypcję atrybutu w trybie interaktywnym:
+#        <cluster> subscribe <attribute> <min_interval> <max_interval> <node> <endpoint>
+#   4. pomiar PPK2 startuje na PIERWSZYM raporcie (marker FIRST-VALUE).
+# Subskrypcja zostaje OTWARTA przez cały pomiar i jest zamykana po jego końcu.
+#
+# Pola triggera:
+#   node_id        (wymagane)  Node ID węzła, np. "5"
+#   dataset        (do parow.) operational dataset Thread w hex (bez 'hex:')
+#   discriminator  (do parow.) discriminator, np. "3840"
+#   pin                        setup PIN code (domyślnie "20202021")
+#   timeout                    ile czekać na 1. wartość PO sparowaniu (np. "120s")
+#   cluster/attribute/endpoint domyślnie temperaturemeasurement/measured-value/1
+#   min_interval/max_interval  interwały subskrypcji [s] (domyślnie 1/60)
+#   match                      regex 1. wartości (domyślny łapie "MeasuredValue: N")
+#   chip_dir/chip_tool         nadpisanie ścieżek (domyślne z pair_and_subscribe.py)
+#   skip_pairing = true        węzeł już sparowany – pomiń krok parowania
+#   no_wipe = true             nie kasuj /tmp/chip_* przed parowaniem
+#
+# Wymaga zbudowanego chip-toola w connectedhomeip oraz BLE (parowanie).
+# Ręczny odpowiednik/podgląd:  scripts/pair_and_subscribe.py --help

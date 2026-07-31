@@ -147,6 +147,41 @@ class ValidateTest(unittest.TestCase):
             planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
                                   MANIFEST), [])
 
+    def test_chip_trigger_requires_fields(self):
+        # bez node_id/dataset/discriminator -> trzy błędy
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip"))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("node_id" in e for e in errs))
+        self.assertTrue(any("dataset" in e for e in errs))
+        self.assertTrue(any("discriminator" in e for e in errs))
+        # komplet do parowania przechodzi
+        ok = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840"))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
+                                  MANIFEST), [])
+        # skip_pairing zdejmuje wymóg dataset/discriminator (zostaje node_id)
+        skip = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[skip]),
+                                  MANIFEST), [])
+        # zły regex match -> błąd
+        badre = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True, match="[unclosed"))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[badre]),
+                                     MANIFEST)
+        self.assertTrue(any("match" in e for e in errs))
+
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(
             scenario="reset_only", duration_s=30,
@@ -246,32 +281,100 @@ class SweepTest(unittest.TestCase):
         base = dict(scenario="app", duration_s=600,
                     build_extra_args=["-DCONFIG_LOG=n"])
         steps = planmod.expand_sweep(
-            2, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+            2, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10")], base)
         self.assertEqual([s.label for s in steps], ["2.1", "2.2", "2.3"])
         self.assertTrue(all(s.scenario == "app" for s in steps))
         self.assertTrue(all(s.duration_s == 600 for s in steps))
-        self.assertTrue(all(
-            s.sweep_param == "CONFIG_LPN_SENSOR_INTERVAL_S" for s in steps))
-        self.assertEqual([s.sweep_value for s in steps], ["1", "5", "10"])
+        self.assertEqual([s.sweep for s in steps],
+                         [[("CONFIG_LPN_SENSOR_INTERVAL_S", v)]
+                          for v in ("1", "5", "10")])
         # Flaga serii doklejona ZA istniejącymi build_extra_args bazy.
         self.assertEqual(steps[1].build_extra_args,
                          ["-DCONFIG_LOG=n",
                           "-DCONFIG_LPN_SENSOR_INTERVAL_S=5"])
 
+    def test_expand_sweep_dwie_osie_daje_iloczyn(self):
+        # Dwie osie -> iloczyn kartezjański, PIERWSZA oś zmienia się
+        # najwolniej: 10/100, 10/200, 20/100, … (kolejność z issue #31).
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_P1", "10, 20, 30"), ("CONFIG_P2", "100, 200")],
+            dict(scenario="app", duration_s=60))
+        self.assertEqual([s.sweep for s in steps], [
+            [("CONFIG_P1", "10"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "10"), ("CONFIG_P2", "200")],
+            [("CONFIG_P1", "20"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "20"), ("CONFIG_P2", "200")],
+            [("CONFIG_P1", "30"), ("CONFIG_P2", "100")],
+            [("CONFIG_P1", "30"), ("CONFIG_P2", "200")]])
+        # Numeracja płaska przez wszystkie kombinacje, nie siatka N.M.K.
+        self.assertEqual([s.label for s in steps],
+                         ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"])
+        # Każdy krok dostaje po jednej fladze na oś.
+        self.assertEqual(steps[3].build_extra_args,
+                         ["-DCONFIG_P1=20", "-DCONFIG_P2=200"])
+
     def test_expand_sweep_validates(self):
+        base = dict(scenario="app", duration_s=1)
         with self.assertRaises(ValueError):
-            planmod.expand_sweep(1, "zły param", "1", dict(scenario="app",
-                                                           duration_s=1))
+            planmod.expand_sweep(1, [("zły param", "1")], base)
         with self.assertRaises(ValueError):
-            planmod.expand_sweep(1, "CONFIG_X", "", dict(scenario="app",
-                                                         duration_s=1))
+            planmod.expand_sweep(1, [("CONFIG_X", "")], base)
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(1, [], base)          # seria bez parametru
+        # Ten sam symbol na obu osiach: dwie sprzeczne flagi w jednej
+        # komendzie builda, więc połowa kroków mierzyłaby to samo.
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(
+                1, [("CONFIG_X", "1, 2"), ("-DCONFIG_X", "3")], base)
+
+    def test_sweep_flag_value_przelicza_jednostke_symbolu(self):
+        # Symbole z SWEEP_UNITS podajemy w jednostce karty, a flaga dostaje
+        # jednostkę Kconfiga: poll interval 200 s -> =2000 (100 ms).
+        # Przelicznik należy do SYMBOLU, więc pozostałe idą bez zmian.
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "200"),
+            "2000")
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_LPN_SENSOR_INTERVAL_S", "200"),
+            "200")
+        self.assertEqual(
+            planmod.sweep_flag_value("CONFIG_BT_MESH_LPN_RETRY_TIMEOUT", "8"),
+            "8")
+        # Krańce zakresu Kconfiga (10..244735 jednostek) przechodzą.
+        for secs, flag in (("1", "10"), ("24473.5", "244735")):
+            self.assertEqual(
+                planmod.sweep_flag_value(
+                    "CONFIG_BT_MESH_LPN_POLL_TIMEOUT", secs), flag)
+        # Poza zakresem, nie-liczba i wartość nie dająca całości jednostek.
+        for bad in ("0.9", "24474", "0", "-5", "abc", "0.55"):
+            with self.assertRaises(ValueError, msg=bad):
+                planmod.sweep_flag_value(
+                    "CONFIG_BT_MESH_LPN_POLL_TIMEOUT", bad)
+
+    def test_expand_sweep_przelicza_flage_a_dziennik_trzyma_wpisane(self):
+        # step.sweep (kolumny parametr/wartosc) trzyma wartość WPISANĄ,
+        # a build_extra_args przeliczoną – inaczej na osi X wykresu byłyby
+        # jednostki 100 ms zamiast sekund.
+        base = dict(scenario="app", duration_s=60)
+        steps = planmod.expand_sweep(
+            2, [("BT_MESH_LPN_POLL_TIMEOUT", "120, 200")], base)
+        self.assertEqual([s.sweep for s in steps],
+                         [[("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "120")],
+                          [("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "200")]])
+        self.assertEqual([s.build_extra_args for s in steps],
+                         [["-DCONFIG_BT_MESH_LPN_POLL_TIMEOUT=1200"],
+                          ["-DCONFIG_BT_MESH_LPN_POLL_TIMEOUT=2000"]])
+        # Wartość poza zakresem Kconfiga zatrzymuje plan przed startem.
+        with self.assertRaises(ValueError):
+            planmod.expand_sweep(
+                2, [("CONFIG_BT_MESH_LPN_POLL_TIMEOUT", "60, 30000")], base)
 
     def test_expanded_steps_validate_against_manifest(self):
         # Kroki z ekspansji są zwykłymi PlanStep – przechodzą walidację
         # planu tak jak ręczne kroki z build_extra_args.
         base = dict(scenario="app", duration_s=60)
-        steps = planmod.expand_sweep(1, "CONFIG_LPN_SENSOR_INTERVAL_S",
-                                     "1, 2", base)
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 2")], base)
         plan = planmod.Plan(name="t", board="btz", steps=steps)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
@@ -279,7 +382,7 @@ class SweepTest(unittest.TestCase):
         # Sweep (build_extra_args) na scenariuszu 'hex' -> błąd walidacji,
         # z etykietą kroku "N.M".
         base = dict(scenario="gotowy", duration_s=60)
-        steps = planmod.expand_sweep(3, "CONFIG_X", "1, 2", base)
+        steps = planmod.expand_sweep(3, [("CONFIG_X", "1, 2")], base)
         errs = planmod.validate_plan(
             planmod.Plan(name="t", board="btz", steps=steps), MANIFEST)
         self.assertTrue(any("hex" in e for e in errs))

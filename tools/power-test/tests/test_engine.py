@@ -16,8 +16,9 @@ from common import FakeEnv
 from fakes import FakeRttReader, FakeSampler, FakeSerialReader
 
 import power_test as core
+from autorun import engine as eng
 from autorun import plan as planmod
-from autorun.engine import AutoRunner
+from autorun.engine import AutoRunError, AutoRunner, _ChipSession
 
 
 class _LossySampler(FakeSampler):
@@ -72,11 +73,18 @@ class EngineTest(unittest.TestCase):
         # testach niepowiązanych z nią zerujemy ją, żeby suite nie
         # spowolnił. Klasy sprawdzające samą podłogę ustawiają ją same.
         self._set_min_delay(0.0)
+        # Zapas po triggerze z dongla to też sekundy realnego czekania –
+        # skracamy go, żeby suite nie stał 10 s na każdym takim teście.
+        # Sam mechanizm sprawdza test_zapas_po_triggerze_dongla.
+        self._patch_engine("SERIAL_START_SETTLE_S", 0.3)
+
+    def _patch_engine(self, name, value):
+        old = getattr(eng, name)
+        setattr(eng, name, value)
+        self.addCleanup(setattr, eng, name, old)
 
     def _set_min_delay(self, seconds):
-        import autorun.engine as eng
-        old, eng.MIN_START_DELAY_S = eng.MIN_START_DELAY_S, seconds
-        self.addCleanup(setattr, eng, "MIN_START_DELAY_S", old)
+        self._patch_engine("MIN_START_DELAY_S", seconds)
 
     def tearDown(self):
         self.env.cleanup()
@@ -111,6 +119,30 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.sampler.voltage_mV, 3000)
         self.assertIn("close", self.sampler.log)
         self.assertFalse(self.sampler.dut)          # odcięte po planie
+
+    def test_voltage_reapplied_after_power_on(self):
+        # REGULATOR_SET wysłany przy odciętym wyjściu PPK2 nie zawsze dochodzi
+        # do regulatora – dlatego napięcie idzie ponownie po włączeniu
+        # zasilania ORAZ po power-cycle. Bez tego pierwszy pomiar w sesji
+        # jechał na napięciu z otwarcia PPK2 (zawyżony prąd).
+        #
+        # Napięcie w KAŻDEJ z tych komend pochodzi z kroku planu (pole
+        # "Napięcie" w ustawieniach zaawansowanych), nie ze stałej – dlatego
+        # test podaje wartość inną niż domyślne 3.0 z manifestu.
+        self._run(_plan(voltage="2.5", power_cycle=True,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        self.assertEqual(self.sampler.voltage_mV, 2500)
+        self.assertNotIn("voltage=3000", log)      # nie z manifestu/stałej
+        # Po KAŻDYM włączeniu zasilania (w tym po power-cycle) leci napięcie.
+        for i, entry in enumerate(log):
+            if entry == "dut=ON":
+                self.assertIn("voltage=2500", log[i + 1:i + 3],
+                              f"brak napięcia po dut=ON (poz. {i}): {log}")
+        # Ostatnie 'dut=ON' kroku wypada przed startem pomiaru.
+        self.assertLess(log.index("start"), len(log))
+        self.assertGreater(log.index("start"),
+                           max(i for i, e in enumerate(log) if e == "dut=ON"))
 
     def test_csv_row_written(self):
         self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
@@ -392,11 +424,13 @@ class EngineTest(unittest.TestCase):
 
     def test_serial_trigger_fires_and_streams(self):
         # Monitor dongla: linie lecą jako 'monitor', a pomiar startuje, gdy
-        # linia ZAWIERA fragment triggera (podłańcuch, nie regex).
+        # linia ZAWIERA fragment triggera (podłańcuch, nie regex). Linia
+        # triggera pada PO drenażu bufora (STALE_QUIET_S), bo tylko takie
+        # linie są świeże – wcześniejsze to zawartość bufora sprzed flasha.
         serial = FakeSerialReader([
             (0.02, "[00:00:01.000] <inf> node_friend: boot"),
-            (0.06, "[00:00:08.379] <inf> node_friend: "
-                   "Friendship z LPN nawiazany")])
+            (0.5, "[00:00:08.379] <inf> node_friend: "
+                  "Friendship z LPN nawiazany")])
         plan = _plan(scenario="zwykly", duration_s=0.15,
                      monitor_port="/dev/ttyACM0",
                      trigger=planmod.Trigger(type="serial",
@@ -414,6 +448,65 @@ class EngineTest(unittest.TestCase):
         # Fragment logu zapisany do dongle.log sesji.
         dlog = (results[0].session_dir / "dongle.log").read_text()
         self.assertIn("node_friend", dlog)
+
+    def test_stary_bufor_dongla_nie_uzbraja_triggera(self):
+        # Dongiel buforuje logi przy zamkniętym porcie (build trwa minuty)
+        # i wyrzuca je w chwili otwarcia. Taka linia ZAWIERA wzorzec, ale
+        # powstała PRZED flashem – nie może startować pomiaru, bo okno
+        # objęłoby reset i dołączanie węzła do sieci (stąd 1.4 mA zamiast
+        # mikroamperów). Skoro po drenażu nic świeżego nie przyszło, krok
+        # kończy się timeoutem triggera, a nie pomiarem z fałszywego startu.
+        serial = FakeSerialReader([
+            (0.0, " Temperatura: 25.5 C"),        # urwany ogon z bufora
+            (0.02, "[00:16:05.108] <inf> node_friend: Stat: rx_adv=73"),
+            (0.04, "[00:16:12.773] <inf> node_friend: Temperatura: 25.5 C")])
+        plan = _plan(scenario="zwykly", duration_s=0.1,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="Temperatura",
+                                             timeout_s=0.5))
+        plan.on_step_error = "skip"
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        results = runner.run()
+        self.assertEqual(results[0].status, "trigger_timeout")
+        mon = [ev.text for ev in self.events if ev.kind == "monitor"]
+        # Panel: jedna notka o pominięciu, bez treści starych linii.
+        self.assertTrue(any("pominięto 3 linii z buforu dongla sprzed flasha"
+                            in m for m in mon), mon)
+        self.assertFalse(any("Temperatura" in m for m in mon), mon)
+        # dongle.log: pełna treść, oznaczona prefiksem (audyt zostaje).
+        dlog = (results[0].session_dir / "dongle.log").read_text()
+        self.assertIn("[przed flashem]  Temperatura: 25.5 C", dlog)
+        self.assertIn("[przed flashem] [00:16:12.773] <inf> node_friend: "
+                      "Temperatura: 25.5 C", dlog)
+
+    def test_zapas_po_triggerze_dongla(self):
+        # Po złapaniu wzorca pomiar czeka SERIAL_START_SETTLE_S – log pada
+        # w chwili dołączania węzła do sieci, więc pierwszy cykl (radio na
+        # pełnych obrotach) nie ma wchodzić do średniej.
+        serial = FakeSerialReader([(0.5, "Friendship z LPN nawiazany")])
+        plan = _plan(scenario="zwykly", duration_s=0.1,
+                     monitor_port="/dev/ttyACM0",
+                     trigger=planmod.Trigger(type="serial",
+                                             pattern="Friendship",
+                                             timeout_s=5))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            serial_factory=lambda port: serial,
+            event_cb=self.events.append, cancel=threading.Event())
+        t0 = time.monotonic()
+        results = runner.run()
+        elapsed = time.monotonic() - t0
+        self.assertEqual(results[0].status, "done")
+        self.assertGreaterEqual(elapsed, 0.5 + eng.SERIAL_START_SETTLE_S)
+        details = [ev.data.get("detail", "") for ev in self.events
+                   if ev.kind == "state" and ev.text == "trigger"]
+        self.assertTrue(any("start za" in d for d in details), details)
 
     def test_serial_trigger_timeout_skips(self):
         serial = FakeSerialReader([(0.01, "nic ciekawego")])
@@ -511,13 +604,44 @@ class EngineTest(unittest.TestCase):
                         f"RTT czekał na podłogę zamiast na wzorzec "
                         f"({waited:.2f} s)")
 
+    def test_zajetosc_pamieci_trafia_do_dziennika(self):
+        # Tabelka linkera z końca builda -> kolumny flash_B/ram_B (+ %).
+        plan = planmod.Plan(name="p", board="btz", steps=[
+            planmod.PlanStep(scenario="zwykly", duration_s=0.15,
+                             trigger=planmod.Trigger(type="delay",
+                                                     seconds=0))])
+        self._run(plan)
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            row = list(csv.DictReader(f))[0]
+        self.assertEqual(row["flash_B"], "118436")
+        self.assertEqual(row["flash_pct"], "7.53")
+        self.assertEqual(row["ram_B"], "25696")
+        self.assertEqual(row["ram_pct"], "13.35")
+
+    def test_pominiety_build_tez_ma_pamiec_w_dzienniku(self):
+        # REGRESJA: obraz budujemy raz, a mierzymy nim kilka razy (drugi
+        # krok dostaje "ten sam obraz – bez ponownego builda"). Liczby
+        # czytamy wtedy z katalogu builda, więc wiersz NIE jest uboższy
+        # tylko dlatego, że linker nic już nie wypisał.
+        step = dict(scenario="zwykly", duration_s=0.15,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        plan = planmod.Plan(name="p", board="btz",
+                            steps=[planmod.PlanStep(**step),
+                                   planmod.PlanStep(**step)])
+        self._run(plan)
+        builds = [c for c in self.env.commands() if c.startswith("west build")]
+        self.assertEqual(len(builds), 1, "drugi krok nie powinien budować")
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([r["flash_B"] for r in rows], ["118436", "118436"])
+
     def test_sweep_distinct_builds_and_csv(self):
         # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość
         # budowana do OSOBNEGO katalogu, a wartość parametru trafia do CSV.
         base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
                     trigger=planmod.Trigger(type="delay", seconds=0))
         steps = planmod.expand_sweep(
-            1, "CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10", base)
+            1, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 5, 10")], base)
         results = self._run(planmod.Plan(name="serie", board="btz",
                                          steps=steps))
         self.assertEqual([r.status for r in results], ["done"] * 3)
@@ -539,6 +663,36 @@ class EngineTest(unittest.TestCase):
                             for r in rows))
         self.assertEqual([r["wartosc"] for r in rows], ["1", "5", "10"])
         self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=1", rows[0]["flagi"])
+        # Jedna oś nie zapisuje niczego w kolumnach drugiej osi.
+        self.assertTrue(all(not r["parametr2"] and not r["wartosc2"]
+                            for r in rows))
+
+    def test_sweep_dwuosiowy_w_csv(self):
+        # Seria po dwóch parametrach: 3 × 2 = 6 pomiarów, każdy z własnym
+        # katalogiem builda, a obie osie w osobnych kolumnach dziennika.
+        base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        steps = planmod.expand_sweep(
+            1, [("CONFIG_P1", "10, 20, 30"), ("CONFIG_P2", "100, 200")], base)
+        results = self._run(planmod.Plan(name="serie", board="btz",
+                                         steps=steps))
+        self.assertEqual([r.status for r in results], ["done"] * 6)
+
+        build_dirs = [c.split()[c.split().index("-d") + 1]
+                      for c in self.env.commands() if c.startswith("west build")]
+        self.assertEqual(len(set(build_dirs)), 6,
+                         "każda kombinacja powinna mieć własny katalog builda")
+
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([(r["wartosc"], r["wartosc2"]) for r in rows],
+                         [("10", "100"), ("10", "200"), ("20", "100"),
+                          ("20", "200"), ("30", "100"), ("30", "200")])
+        self.assertTrue(all(r["parametr"] == "CONFIG_P1"
+                            and r["parametr2"] == "CONFIG_P2" for r in rows))
+        # Obraz faktycznie zbudowany z obiema flagami naraz.
+        self.assertIn("-DCONFIG_P1=20", rows[3]["flagi"])
+        self.assertIn("-DCONFIG_P2=200", rows[3]["flagi"])
 
     def test_sweep_meta_and_events(self):
         import json
@@ -546,21 +700,21 @@ class EngineTest(unittest.TestCase):
                     trigger=planmod.Trigger(type="delay", seconds=0))
         # Parametr bez prefiksu CONFIG_ też jest akceptowany (normalizacja).
         steps = planmod.expand_sweep(
-            1, "LPN_SENSOR_INTERVAL_S", ["2", "8"], base)
+            1, [("LPN_SENSOR_INTERVAL_S", ["2", "8"])], base)
         results = self._run(planmod.Plan(name="serie", board="btz",
                                          steps=steps))
         meta = json.loads((results[0].session_dir / "meta.json").read_text())
         self.assertEqual(meta["step_label"], "1.1")
         self.assertEqual(meta["sweep"],
-                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
-                          "value": "2"})
+                         [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                           "value": "2"}])
         self.assertIn("-DCONFIG_LPN_SENSOR_INTERVAL_S=2", meta["flags"])
         measure = [ev for ev in self.events
                    if ev.kind == "state" and ev.text == "measure"]
         self.assertEqual(measure[0].data.get("label"), "1.1")
         self.assertEqual(measure[0].data.get("sweep"),
-                         {"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
-                          "value": "2"})
+                         [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
+                           "value": "2"}])
 
     def test_flash_wymusza_reset_i_erase(self):
         # REGRESJA: bez --reset J-Link zostawia układ w stanie po
@@ -698,6 +852,24 @@ class EngineTest(unittest.TestCase):
                    if ev.kind == "state" and ev.text == "measure"]
         self.assertEqual(len(measure), 1)
 
+    def test_chip_trigger_dry_run(self):
+        # Dry-run z triggerem 'chip': session_dir=None, żaden podproces
+        # chip-toola się nie odpala, krok kończy się 'done'.
+        plan = _plan(scenario="zwykly", duration_s=0.2,
+                     trigger=planmod.Trigger(
+                         type="chip", node_id="5", dataset="0e08aa",
+                         discriminator="3840"))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(None),
+            event_cb=self.events.append, dry_run=True)
+        results = runner.run()
+        self.assertEqual(results[0].status, "done")
+        # w meta triggera został typ chip + parametry subskrypcji
+        notes = [ev.text for ev in self.events if ev.kind == "note"]
+        self.assertTrue(any("chip node=5" in n for n in notes))
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(
@@ -707,6 +879,68 @@ class EngineTest(unittest.TestCase):
         cmds = self.env.commands()
         # Był flash (nrfutil device program), nie było builda hexowego.
         self.assertTrue(any("device program" in c for c in cmds))
+
+
+class _FakeEngine:
+    """Minimalny silnik dla _ChipSession: zbiera linie ze zdarzeń 'line'."""
+
+    def __init__(self):
+        self.lines = []
+
+    def _emit(self, kind, step=0, name="", text="", data=None, **extra):
+        if kind == "line":
+            self.lines.append(text)
+
+
+class ChipSessionTest(unittest.TestCase):
+    """Drenaż stdout skryptu chip: wykrycie markera FIRST-VALUE, wartość,
+    emisja linii do UI i domknięcie procesu."""
+
+    import sys as _sys
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    def _session(self, code):
+        eng = _FakeEngine()
+        log = self._Path(self._tempfile.mkdtemp()) / "chip.log"
+        cmd = [self._sys.executable, "-c", code]
+        return eng, _ChipSession(cmd, eng, log, 1, "end_device")
+
+    def test_first_value_detected(self):
+        eng, chip = self._session(
+            "import time; print('pairing...', flush=True); "
+            "print('FIRST-VALUE 2250', flush=True); time.sleep(30)")
+        chip.start()
+        try:
+            self.assertTrue(chip.first_value.wait(timeout=10))
+            self.assertEqual(chip.value, "2250")
+            # postęp parowania trafił do UI (zdarzenia 'line')
+            self.assertIn("pairing...", eng.lines)
+        finally:
+            chip.stop()
+        # stop() ubił proces skryptu
+        self.assertIsNotNone(chip.proc.poll())
+
+    def test_wait_first_value_timeout(self):
+        # skrypt milczy -> _TriggerTimeout (via wait_first_value deadline)
+        eng, chip = self._session("import time; time.sleep(30)")
+        chip.start()
+        try:
+            with self.assertRaises(Exception) as ctx:
+                chip.wait_first_value(0.5, lambda: None)
+            self.assertIn("pierwsza wartość", str(ctx.exception))
+        finally:
+            chip.stop()
+
+    def test_wait_first_value_process_dies(self):
+        # skrypt pada przed 1. wartością -> AutoRunError, nie timeout
+        eng, chip = self._session("import sys; sys.exit(2)")
+        chip.start()
+        try:
+            with self.assertRaises(AutoRunError):
+                chip.wait_first_value(10, lambda: None)
+        finally:
+            chip.stop()
 
 
 if __name__ == "__main__":

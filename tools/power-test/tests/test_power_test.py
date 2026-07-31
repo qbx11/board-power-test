@@ -103,6 +103,107 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(core.parse_memory_report(
             "flashing...\nApplication programmed\nDone\n"))
 
+    def test_memory_usage_liczby_do_dziennika(self):
+        out = ("Memory region         Used Size  Region Size  %age Used\n"
+               "           FLASH:      118436 B      1536 KB      7.53%\n"
+               "             RAM:       25696 B       188 KB     13.35%\n"
+               "        IDT_LIST:          0 GB        32 KB      0.00%\n")
+        # IDT_LIST celowo pomijamy – to nie jest pamięć, o którą ktoś pyta.
+        self.assertEqual(core.memory_usage(out),
+                         {"flash_B": 118436, "flash_pct": 7.53,
+                          "ram_B": 25696, "ram_pct": 13.35})
+        self.assertIsNone(core.memory_usage("nic tu nie ma\n"))
+
+    def test_memory_usage_jednostki_1024(self):
+        # Zephyr potrafi podać użycie w KB/MB – w dzienniku trzymamy bajty,
+        # żeby dało się porównywać obrazy między sobą.
+        out = ("Memory region         Used Size  Region Size  %age Used\n"
+               "           FLASH:        1536 KB      2 MB     75.00%\n"
+               "             RAM:           1 MB      2 MB     50.00%\n")
+        self.assertEqual(core.memory_usage(out),
+                         {"flash_B": 1536 * 1024, "flash_pct": 75.0,
+                          "ram_B": 1024 * 1024, "ram_pct": 50.0})
+
+    def _sysbuild_output(self):
+        # Tak wygląda build sysbuilda: każdy obraz zapowiedziany linią ninja
+        # 'Performing build step for ...', każdy z własną tabelką.
+        return ("[10/50] Performing build step for 'mcuboot'\n"
+                "Memory region         Used Size  Region Size  %age Used\n"
+                "           FLASH:       24576 B        48 KB     50.00%\n"
+                "             RAM:        4096 B        16 KB     25.00%\n"
+                "[50/50] Performing build step for 'board-power-test'\n"
+                "Memory region         Used Size  Region Size  %age Used\n"
+                "           FLASH:      118436 B      1536 KB      7.53%\n"
+                "             RAM:       25696 B       188 KB     13.35%\n")
+
+    def test_memory_usage_bierze_obraz_aplikacji_nie_bootloadera(self):
+        # REGRESJA: przy MCUboot bootloader buduje się PIERWSZY, więc
+        # branie pierwszej napotkanej tabelki dawało zajętość bootloadera
+        # podpisaną jako zajętość aplikacji.
+        out = self._sysbuild_output()
+        self.assertEqual(core.memory_usage(out, image="board-power-test"),
+                         {"flash_B": 118436, "flash_pct": 7.53,
+                          "ram_B": 25696, "ram_pct": 13.35})
+        self.assertEqual(core.memory_usage(out, image="mcuboot")["flash_B"],
+                         24576)
+
+    def test_memory_usage_kilka_obrazow_bez_wskazania(self):
+        # Nie wiadomo który obraz -> nic nie zapisujemy. Lepiej puste
+        # kolumny niż liczba przypisana nie temu obrazowi.
+        self.assertIsNone(core.memory_usage(self._sysbuild_output()))
+        # Za to na EKRANIE pokazujemy wszystkie tabelki, podpisane.
+        md = core.parse_memory_report(self._sysbuild_output())
+        self.assertIn("**mcuboot**", md)
+        self.assertIn("**board-power-test**", md)
+        self.assertIn("| FLASH | 118436 B | 1536 KB | 7.53% |", md)
+
+    def test_record_i_load_memory(self):
+        # Zapamiętane przy buildzie liczby czyta się potem z katalogu –
+        # to jest ścieżka dla POMINIĘTEGO builda (linker nic nie drukuje,
+        # gdy nie ma czego budować).
+        build = core.ROOT / "build_test_mem"
+        (build / "zephyr").mkdir(parents=True, exist_ok=True)
+        out = ("Memory region         Used Size  Region Size  %age Used\n"
+               "           FLASH:      118436 B      1536 KB      7.53%\n"
+               "             RAM:       25696 B       188 KB     13.35%\n")
+        self.assertEqual(core.record_memory("build_test_mem", out)["flash_B"],
+                         118436)
+        self.assertEqual(core.load_memory_usage("build_test_mem"),
+                         {"flash_B": 118436, "flash_pct": 7.53,
+                          "ram_B": 25696, "ram_pct": 13.35})
+
+    def test_load_memory_bez_pliku_i_bez_katalogu(self):
+        self.assertIsNone(core.load_memory_usage("build_nie_ma_takiego"))
+        self.assertIsNone(core.load_memory_usage(None))
+
+    def test_record_memory_wybiera_domene_z_domains_yaml(self):
+        # Przy sysbuildzie nazwę obrazu aplikacji bierzemy z domains.yaml,
+        # więc zapis nie wymaga podpowiedzi od wołającego.
+        build = core.ROOT / "build_test_sysbuild"
+        build.mkdir(parents=True, exist_ok=True)
+        (build / "domains.yaml").write_text(
+            "default: board-power-test\nbuild_dir: /x\n", encoding="utf-8")
+        usage = core.record_memory("build_test_sysbuild",
+                                   self._sysbuild_output())
+        self.assertEqual(usage["flash_B"], 118436)     # aplikacja, nie MCUboot
+
+    def test_make_row_dokleja_pamiec_z_katalogu_builda(self):
+        build = core.ROOT / "build_test_row"
+        build.mkdir(parents=True, exist_ok=True)
+        core.record_memory("build_test_row",
+                           "Memory region         Used Size  Region Size  "
+                           "%age Used\n"
+                           "           FLASH:      118436 B      1536 KB"
+                           "      7.53%\n")
+        scen = self.scenarios["zwykly"]
+        row = core.make_row("zwykly", scen, self.profile, "BTZ #1", "3.0",
+                            1.5, "", build_dir="build_test_row")
+        self.assertEqual(row["flash_B"], 118436)
+        # Bez katalogu builda (gotowy hex) kolumny zostają puste.
+        row2 = core.make_row("zwykly", scen, self.profile, "BTZ #1", "3.0",
+                             1.5, "")
+        self.assertNotIn("flash_B", row2)
+
     def test_copy_to_clipboard_bez_narzedzia(self):
         # Gdy w PATH nie ma pbcopy/xclip/... -> None (wołający robi fallback).
         from unittest import mock
@@ -581,38 +682,26 @@ class JlinkConflictTests(unittest.TestCase):
 
 
 class JlinkGuardCliTests(unittest.TestCase):
-    """Blokada CLI: przy zajętej sondzie `run` nie wchodzi do flasha,
-    dopóki użytkownik nie zwolni J-Linka."""
+    """Pomiar ręczny (`run`) NIE pyta o zajętą sondę: robi się go w nRF
+    Connect Power Profiler, więc nRF Connect for Desktop musi być otwarty,
+    a jego demony hotplug trzymają libjlinkarm bez przerwy."""
 
     def setUp(self):
         self.env = FakeEnv()
         self.addCleanup(self.env.cleanup)
 
-    def test_run_czeka_az_jlink_bedzie_wolny(self):
+    def test_run_nie_pyta_o_zajeta_sonde(self):
         self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        answers = iter(["", "", "tak", "2.5 mA", ""])   # 1. Enter = ponów
-
-        def released(prompt=""):
-            # Po pierwszym "sprawdź ponownie" udajemy zamknięcie nRF Connect.
-            self.env.jlink_owners = []
-            return next(answers)
+        # Kolejno: „programator podłączony?”, SWD odłączony, prąd, uwagi.
+        answers = iter(["", "tak", "2.5 mA", ""])
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), \
-                patch("builtins.input", released):
+                patch("builtins.input", lambda prompt="": next(answers)):
             core.cmd_run(run_args(["zwykly"], dry_run=False, sample="T #1"))
-        self.assertIn("Sondę J-Link trzyma inny program", out.getvalue())
-        self.assertIn("pid 4242", out.getvalue())
-        # Flash i tak się wykonał – po zwolnieniu sondy.
+        self.assertNotIn("Sondę J-Link", out.getvalue())
         self.assertTrue(any(c.startswith("west flash")
                             for c in self.env.commands()))
-
-    def test_dry_run_nie_pyta_o_jlink(self):
-        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            core.cmd_run(run_args(["zwykly"]))
-        self.assertNotIn("Sondę J-Link", out.getvalue())
 
 
 if __name__ == "__main__":

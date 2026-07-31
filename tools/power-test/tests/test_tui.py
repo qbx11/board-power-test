@@ -23,8 +23,17 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
         self.env = FakeEnv()
         self.addCleanup(self.env.cleanup)
 
+    async def manual_mode(self, pilot):
+        """Przełącz na pomiar ręczny. Aplikacja startuje w trybie
+        autonomicznym, więc widgety trybu ręcznego (#scenarios, #check_*,
+        #reset) są wtedy ukryte i nie da się w nie kliknąć."""
+        await self.click_ready(pilot, "#mode-label-standard")
+        await self.wait_until(pilot, lambda a: a.mode == "standard",
+                              msg="przełączenie na tryb ręczny")
+
     async def start_run(self, pilot, names, sample="TEST #1"):
         """Zaznacz scenariusze, wpisz egzemplarz i kliknij Start."""
+        await self.manual_mode(pilot)
         app = pilot.app
         for name in names:
             app.query_one(f"#check_{name}", Checkbox).value = True
@@ -98,10 +107,12 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
             return "#flash"
         return "#yes"
 
-    async def click_through_run(self, pilot):
+    async def click_through_run(self, pilot, current=None):
         """Przeklikaj dialogi FAZY 2 (flash -> SWD -> pomiar 'Pomiń' ->
         podsumowanie) aż RunScreen wróci do ekranu głównego. Zwraca notki
-        z przebiegu (zbierane w locie – po zdjęciu RunScreen już ich nie ma)."""
+        z przebiegu (zbierane w locie – po zdjęciu RunScreen już ich nie ma).
+        `current` = wpisz taki prąd [µA] w oknie pomiaru i ZAPISZ zamiast
+        pomijać (wtedy przebieg dopisuje wiersz do dziennika)."""
         app = pilot.app
         notes = set()
         # Tabelki pamięci też znikają z RunScreen po jego zdjęciu – zbieramy
@@ -127,7 +138,12 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
                 return notes  # RunScreen zdjęty – jesteśmy na ekranie głównym
             # Dopiero ułożony dialog mówi, KTÓRY to wariant ChoiceScreen.
             await self.wait_for(pilot, "Button")
-            button = self.forward_button(app.screen)
+            if current is not None and isinstance(screen, tui.MeasureScreen):
+                screen.query_one("#current", Input).value = str(current)
+                await pilot.pause()
+                button = "#save"
+            else:
+                button = self.forward_button(app.screen)
             # Klik z ponowieniem: click_ready czeka na ułożony przycisk,
             # ale gdyby dialog i tak nie zareagował, próbujemy jeszcze raz.
             for _ in range(5):
@@ -191,6 +207,7 @@ class TuiSetupTests(TuiHarness):
         # zaznaczać.
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             checkbox = app.query_one("#check_zwykly", Checkbox)
             desc = app.query_one("#desc_zwykly", Static)
             self.assertFalse(checkbox.value)
@@ -234,6 +251,7 @@ class TuiSetupTests(TuiHarness):
     async def test_zaznacz_wszystkie_odzwierciedla_stan(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             from textual.widgets import Button
             button = app.query_one("#select_all", Button)
             self.assertFalse(button.has_class("pressed"))
@@ -296,6 +314,9 @@ class TuiAddTests(TuiHarness):
     async def test_dodaj_firmware_hex_przez_dialog(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            # Nowy wpis zaznacza się sam tylko w trybie ręcznym – tam
+            # checkbox znaczy „zmierz to”.
+            await self.manual_mode(pilot)
             await pilot.click("#add_fw")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -445,6 +466,7 @@ class TuiRemoveTests(TuiHarness):
     async def test_usuniecie_scenariusza_krzyzykiem(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             await pilot.click("#del_zrodlowy")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -462,6 +484,7 @@ class TuiRemoveTests(TuiHarness):
     async def test_anulowanie_nie_usuwa(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            await self.manual_mode(pilot)
             await pilot.click("#del_zrodlowy")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
@@ -489,6 +512,9 @@ class TuiScenariosDialogTests(TuiHarness):
     async def test_przycisk_tylko_w_trybie_autonomicznym(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
+            # Start jest w trybie autonomicznym, więc przycisk widać od razu.
+            self.assertTrue(app.query_one("#scenarios_btn").display)
+            await self.manual_mode(pilot)
             self.assertFalse(app.query_one("#scenarios_btn").display)
             await pilot.click("#mode-label-auto")
             await pilot.pause()
@@ -580,6 +606,23 @@ class TuiScenariosDialogTests(TuiHarness):
 
 
 class TuiRunTests(TuiHarness):
+
+    async def test_pomiar_reczny_zapisuje_zajetosc_pamieci(self):
+        # Tryb ręczny też buduje firmware, więc jego wiersze w dzienniku
+        # dostają zajętość pamięci z tabelki linkera – tak samo jak
+        # autonomiczne. Scenariusz na gotowym hexie builda nie ma, więc
+        # zostaje bez tych kolumn.
+        import csv
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await self.start_run(pilot, ["zwykly", "hexowy"])
+            await self.click_through_run(pilot, current=1.5)
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = {r["scenariusz"]: r for r in csv.DictReader(f)}
+        self.assertEqual(rows["zwykly"]["flash_B"], "118436")
+        self.assertEqual(rows["zwykly"]["ram_B"], "25696")
+        self.assertEqual(rows["zwykly"]["flash_pct"], "7.53")
+        self.assertEqual(rows["hexowy"]["flash_B"], "")
 
     async def test_przebieg_mieszany_source_hex_i_regresja(self):
         app = tui.PowerTestApp()
@@ -817,67 +860,21 @@ class TuiRunTests(TuiHarness):
 
 
 class TuiJlinkGuardTests(TuiHarness):
-    """Blokada przed FAZĄ 2, gdy sondę J-Link trzyma inny program (np.
-    demony nRF Connect for Desktop). Cudza sesja zawyża pomiar, więc
-    lepiej stanąć na dialogu niż zapisać śmieciowy wynik."""
+    """Tryb ręczny NIE sprawdza, czy sondę J-Link trzyma inny program.
+    Pomiar ręczny robi się w nRF Connect Power Profiler, więc nRF Connect
+    for Desktop musi być otwarty, a jego demony hotplug trzymają
+    libjlinkarm bez przerwy – dialog wyskakiwałby przed każdym flashem."""
 
-    def _dialog_text(self, app):
-        return str(app.screen.query_one(".dialog-text").render())
-
-    async def _wait_guard(self, pilot):
-        # Sam typ ekranu nie wystarcza: push_screen podmienia app.screen
-        # od razu, a treść dialogu pojawia się dopiero po compose.
-        await self.wait_until(
-            pilot,
-            lambda a: (isinstance(a.screen, tui.ChoiceScreen)
-                       and self._laid_out(a.screen, ".dialog-text")),
-            msg="dialog o zajętym J-Linku")
-        text = self._dialog_text(pilot.app)
-        self.assertIn("Sondę J-Link trzyma inny program", text)
-        self.assertIn("pid 4242", text)
-
-    async def test_przerwij_nie_dopuszcza_do_flasha(self):
+    async def test_tryb_reczny_nie_pyta_o_zajeta_sonde(self):
         self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
             await self.start_run(pilot, ["zwykly"])
-            await self._wait_guard(pilot)
-            await self.click_and_close(pilot, "#abort")
-            await self.wait_until(
-                pilot,
-                lambda a: not isinstance(a.screen, (tui.RunScreen,
-                                                    tui.ChoiceScreen)),
-                msg="powrót do ustawień po przerwaniu")
-        cmds = self.env.commands()
-        # Build zdążył się wykonać (jest PRZED sprawdzeniem sondy),
-        # ale flasha już nie ma – i o to chodzi.
-        self.assertTrue(any(c.startswith("west build") for c in cmds))
-        self.assertFalse(any(c.startswith("west flash") for c in cmds))
-
-    async def test_ponow_wpuszcza_po_zwolnieniu_sondy(self):
-        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        app = tui.PowerTestApp()
-        async with app.run_test(size=(120, 50)) as pilot:
-            await self.start_run(pilot, ["zwykly"])
-            await self._wait_guard(pilot)
-            self.env.jlink_owners = []       # udajemy zamknięcie nRF Connect
-            await self.click_and_close(pilot, "#retry")
-            await self.click_through_run(pilot)
-        self.assertTrue(any(c.startswith("west flash")
-                            for c in self.env.commands()))
-
-    async def test_mierz_mimo_to_zostawia_notke(self):
-        self.env.jlink_owners = [(4242, "nrfutil-device list --hotplug")]
-        app = tui.PowerTestApp()
-        async with app.run_test(size=(120, 50)) as pilot:
-            await self.start_run(pilot, ["zwykly"])
-            await self._wait_guard(pilot)
-            await self.click_and_close(pilot, "#ignore")
             notes = await self.click_through_run(pilot)
-        self.assertTrue(any("J-Link zajęty przez inny program" in n
-                            for n in notes), notes)
+        # Przebieg doszedł do końca bez ani jednego dialogu o sondzie.
         self.assertTrue(any(c.startswith("west flash")
                             for c in self.env.commands()))
+        self.assertFalse(any("J-Link" in n for n in notes), notes)
 
 
 if __name__ == "__main__":
