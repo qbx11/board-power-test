@@ -14,8 +14,11 @@
 # pętlach; przerwany pomiar jest domykany (częściowa sesja zostaje).
 
 import math
+import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -72,6 +75,66 @@ def _sweep_payload(step):
     if not step.sweep:
         return None
     return [{"param": p, "value": v} for p, v in step.sweep]
+
+
+# --- Blokada usypiania na czas przebiegu autonomicznego ---
+# Przebieg trwa godzinami i nikt przy nim nie siedzi, więc logind uśpiłby
+# maszynę po bezczynności (typowo 15 min na baterii) w środku okna pomiaru.
+# Suspend zabija strumień próbek z PPK2: silnik to wykryje (STALL_TIMEOUT_S)
+# i pomiar powtórzy albo odrzuci, ale punkt i tak przepada – a przy nocnym
+# planie razem z nim cała noc. Blokujemy więc na CAŁY przebieg (buildy,
+# flashe, wszystkie okna): bezczynność, jawny suspend i zamknięcie klapy,
+# żeby dało się zamknąć laptopa i zostawić pomiar. Tryb ręczny blokady nie
+# bierze – tam operator klika, więc system i tak nie jest bezczynny.
+INHIBIT_WHAT = "idle:sleep:handle-lid-switch"
+INHIBIT_CMD = "systemd-inhibit"
+
+
+class _SleepInhibitor:
+    """Blokada usypiania trzymana przez proces-potomka `systemd-inhibit`:
+    dopóki on żyje, logind nie uśpi maszyny. Zwolnienie = ubicie procesu,
+    więc blokada nie przetrwa awarii narzędzia – i tak ma być, bo inaczej
+    zostawiałaby maszynę bez usypiania po cichu.
+
+    Potomek dostaje własną sesję i ubijamy CAŁĄ grupę procesów: sam
+    `systemd-inhibit` tylko czeka na komendę, którą uruchomił (`sleep`),
+    a to ona trzyma deskryptor blokady."""
+
+    def __init__(self, why):
+        self.why = why
+        self._proc = None
+
+    def start(self):
+        """Weź blokadę. Zwraca (co_zablokowane, powód_braku) – nigdy nie
+        podnosi wyjątku, bo pomiar jest ważniejszy niż blokada."""
+        if shutil.which(INHIBIT_CMD) is None:
+            return None, f"brak {INHIBIT_CMD} (nie-systemd?)"
+        try:
+            self._proc = subprocess.Popen(
+                [INHIBIT_CMD, f"--what={INHIBIT_WHAT}",
+                 "--who=board-power-test", f"--why={self.why}",
+                 "--mode=block", "sleep", "infinity"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            self._proc = None
+            return None, str(e)
+        return INHIBIT_WHAT, None
+
+    def stop(self):
+        """Zwolnij blokadę. Idempotentne – wołane na każdej ścieżce wyjścia
+        z run()."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 class AutoRunError(RuntimeError):
@@ -326,6 +389,9 @@ class AutoRunner:
         self._plan_log = None
         self._sampler = None
         self._dut_on = False
+        # Blokada usypiania: brana w run() na cały przebieg, zwalniana
+        # w finally (patrz _SleepInhibitor).
+        self._inhibitor = None
         # Dedup katalogów builda MIĘDZY krokami (build just-in-time):
         # ten sam scenariusz+flagi budowany raz, kolejne wystąpienia
         # korzystają z gotowego obrazu.
@@ -1283,6 +1349,20 @@ class AutoRunner:
                       f"({self.profile['board']}), egzemplarz "
                       f"{self.sample}")
 
+            # Blokada usypiania na cały przebieg (patrz INHIBIT_WHAT).
+            # Brak blokady nie zatrzymuje pomiaru – tylko ostrzegamy, żeby
+            # dało się później zrozumieć urwany strumień próbek.
+            if not self.dry_run:
+                self._inhibitor = _SleepInhibitor(
+                    f"pomiar prądu: plan {self.plan.name}")
+                what, why_not = self._inhibitor.start()
+                if what:
+                    self._note(f"blokada usypiania na czas przebiegu ({what})")
+                else:
+                    self._note("UWAGA: nie udało się zablokować usypiania "
+                               f"({why_not}) – system może uśpić maszynę "
+                               "w środku pomiaru")
+
             # Cudza sesja J-Linka zawyża pomiar (patrz core.jlink_owners).
             # Przebiegu NIE blokujemy – może startować z crona/SSH bez
             # nikogo przy klawiaturze – ale wpisujemy to do plan.log i
@@ -1341,9 +1421,18 @@ class AutoRunner:
             return results
         finally:
             self._close_sampler()          # awaryjnie, gdy poleciał wyjątek
+            self._release_inhibitor()
             if self._plan_log is not None:
                 self._plan_log.close()
                 self._plan_log = None
+
+    def _release_inhibitor(self):
+        """Zwolnij blokadę usypiania. Idempotentne – po przebiegu maszyna
+        znów usypia normalnie, także gdy przebieg padł albo go przerwano."""
+        if self._inhibitor is None:
+            return
+        inhibitor, self._inhibitor = self._inhibitor, None
+        inhibitor.stop()
 
     def _close_sampler(self):
         """Odetnij zasilanie płytki i zwolnij PPK2. Idempotentne – wołane

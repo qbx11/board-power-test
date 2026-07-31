@@ -6,6 +6,7 @@
 # błędów przy timeout triggera i czyste domknięcie po przerwaniu.
 
 import csv
+import os
 import threading
 import time
 import unittest
@@ -77,6 +78,10 @@ class EngineTest(unittest.TestCase):
         # skracamy go, żeby suite nie stał 10 s na każdym takim teście.
         # Sam mechanizm sprawdza test_zapas_po_triggerze_dongla.
         self._patch_engine("SERIAL_START_SETTLE_S", 0.3)
+        # Blokada usypiania odpalałaby prawdziwy systemd-inhibit w każdym
+        # teście – domyślnie wskazujemy komendę, której nie ma (silnik idzie
+        # wtedy ścieżką "bez blokady"). Testy blokady podstawiają atrapę.
+        self._patch_engine("INHIBIT_CMD", "systemd-inhibit-atrapa-brak")
 
     def _patch_engine(self, name, value):
         old = getattr(eng, name)
@@ -421,6 +426,52 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(meta["sample_rate"], 100)      # 2000 / 20
         # ~0.5 s * 100 S/s ≈ 50 próbek (a nie ~1000 przy 2000 S/s).
         self.assertLessEqual(abs(results[0].summary["samples"] - 50), 6)
+
+    def _fake_inhibit(self, argv_log):
+        """Atrapa `systemd-inhibit`: zapisuje swój PID i argumenty, potem
+        czeka. Prawdziwa blokada logind żyje tak długo, jak proces, więc po
+        przebiegu test może sprawdzić, że silnik go ubił."""
+        path = self.env.repo / "fake-inhibit"
+        path.write_text("#!/bin/bash\n"
+                        f'echo "$$ $*" > "{argv_log}"\n'
+                        "exec sleep 30\n")
+        path.chmod(0o755)
+        self._patch_engine("INHIBIT_CMD", str(path))
+
+    def test_blokada_usypiania_na_czas_przebiegu(self):
+        # Przebieg autonomiczny bierze blokadę logind (bezczynność, jawny
+        # suspend, klapa) na cały czas trwania i zwalnia ją na wyjściu.
+        # Bez tego laptop usypia w środku okna pomiaru.
+        log = self.env.repo / "inhibit.args"
+        self._fake_inhibit(log)
+        results = self._run(_plan(scenario="zwykly", duration_s=0.1,
+                                  trigger=planmod.Trigger(type="delay",
+                                                          seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        deadline = time.monotonic() + 2.0
+        while not log.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        pid, args = log.read_text().split(" ", 1)
+        self.assertIn("--what=idle:sleep:handle-lid-switch", args)
+        self.assertIn("--mode=block", args)
+        self.assertIn("--who=board-power-test", args)
+        plan_log = (self.runner.run_dir / "plan.log").read_text()
+        self.assertIn("blokada usypiania na czas przebiegu", plan_log)
+        # Zwolniona: proces trzymający blokadę już nie żyje (ubijamy całą
+        # grupę, bo blokadę trzyma komenda uruchomiona przez inhibit).
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid), 0)
+
+    def test_brak_blokady_usypiania_nie_zatrzymuje_przebiegu(self):
+        # Na systemie bez systemd-inhibit pomiar ma iść dalej – tylko
+        # z ostrzeżeniem w plan.log, żeby dało się później zrozumieć
+        # urwany strumień próbek.
+        results = self._run(_plan(scenario="zwykly", duration_s=0.1,
+                                  trigger=planmod.Trigger(type="delay",
+                                                          seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        plan_log = (self.runner.run_dir / "plan.log").read_text()
+        self.assertIn("nie udało się zablokować usypiania", plan_log)
 
     def test_serial_trigger_fires_and_streams(self):
         # Monitor dongla: linie lecą jako 'monitor', a pomiar startuje, gdy

@@ -36,6 +36,12 @@ Narzędzie zasila płytkę z PPK2, mierzy przez zadany czas i zapisuje wynik.
 Ułóż sekwencję pomiarów na kartach „Pomiar 1, 2, …”.
 Każda karta ma własny czas, napięcie, warunek startu i podgląd logów.
 
+Narzędzie blokuje usypianie komputera na czas całego przebiegu.
+Blokada obejmuje bezczynność, jawny suspend i zamknięcie klapy.
+Zamknij więc laptopa i zostaw pomiar; przebieg zwalnia blokadę na końcu.
+Uśpienie w środku okna zabija strumień próbek z PPK2 i psuje pomiar.
+Tryb ręczny blokady nie bierze, bo operator i tak siedzi przy klawiaturze.
+
 Aplikacja startuje w trybie autonomicznym.
 Kliknij napis **„Pomiar ręczny”** u góry ekranu, aby zmienić tryb.
 
