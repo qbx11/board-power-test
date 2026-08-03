@@ -122,6 +122,51 @@ class MockWaveformTest(unittest.TestCase):
         self.assertTrue(len(chunk))
         self.assertEqual(float(chunk.max()), 0.0)
 
+    def test_stale_okno_pomiaru_zamiast_stalego_mnoznika(self):
+        # Skrót czasu jest liczony PER KROK, tak żeby każdy pomiar trwał
+        # tyle samo realnie: 20 minut z planu -> ×120, 8 godzin -> ×2880.
+        cfg = mockmod.MockConfig(window_s=10.0)
+        self.assertEqual(cfg.scale_for(1200.0), 120.0)
+        self.assertEqual(cfg.scale_for(8 * 3600.0), 2880.0)
+        # Pomiar krótszy niż okno symulacji leci w czasie realnym – nie ma
+        # po co czekać DŁUŻEJ, niż każe plan.
+        self.assertEqual(cfg.scale_for(10.0), 1.0)
+        self.assertEqual(cfg.scale_for(3.0), 1.0)
+        self.assertEqual(cfg.scale_for(0.0), 1.0)
+        # Produkcyjne okno to 10 s (podpis checkboxa czyta tę stałą).
+        self.assertEqual(mockmod.MOCK_WINDOW_S, 10.0)
+        self.assertEqual(mockmod.MockConfig().window_s, 10.0)
+
+    def test_czestotliwosc_trzyma_sufit_probek(self):
+        # Stałe okno + sufit próbek = STAŁE tempo generowania. Bez sufitu
+        # 8-godzinny pomiar musiałby wypluć 57 mln próbek w 10 s.
+        cfg = mockmod.MockConfig(window_s=10.0)
+        for duration in (30.0, 1200.0, 8 * 3600.0):
+            rate = cfg.rate_for(duration)
+            self.assertLessEqual(rate, mockmod.MOCK_RATE)
+            self.assertGreaterEqual(rate, 1)
+            self.assertLessEqual(rate * duration,
+                                 mockmod.MOCK_MAX_SAMPLES * 1.01,
+                                 f"{duration} s -> {rate} S/s")
+            # Tempo generowania (próbki na sekundę REALNĄ) jest ograniczone.
+            self.assertLessEqual(rate * cfg.scale_for(duration),
+                                 mockmod.MOCK_MAX_SAMPLES / cfg.window_s * 1.01)
+        # Krótkie okna dostają pełną częstotliwość atrapy.
+        self.assertEqual(cfg.rate_for(30.0), mockmod.MOCK_RATE)
+        # Długie – obniżoną, żeby zmieścić się w sufcie próbek.
+        self.assertLess(cfg.rate_for(8 * 3600.0), mockmod.MOCK_RATE)
+
+    def test_sampler_dostraja_sie_do_dlugosci_kroku(self):
+        cfg = mockmod.MockConfig(window_s=10.0, seed=1)
+        s = mockmod.MockSampler(cfg)
+        s.prepare_step(planmod.PlanStep(scenario="x", duration_s=1200.0),
+                       {"expected": "~1 uA"})
+        self.assertEqual(s.speedup, 120.0)
+        self.assertEqual(s.sample_rate, cfg.rate_for(1200.0))
+        s.prepare_step(planmod.PlanStep(scenario="x", duration_s=5.0),
+                       {"expected": "~1 uA"})
+        self.assertEqual(s.speedup, 1.0)
+
     def test_napiecie_poza_zakresem_odmowa(self):
         # Ten sam strażnik co na sprzęcie: ścieżka ochrony płytki ma się
         # dać przejść bez PPK2.
@@ -149,7 +194,7 @@ class MockRunTest(unittest.TestCase):
         setattr(eng, name, value)
         self.addCleanup(setattr, eng, name, old)
 
-    def _run(self, plan, speedup=100.0, seed=5):
+    def _run(self, plan, window_s=0.3, seed=5):
         # Żadnych atrap testowych: silnik ma sam podstawić wszystkie
         # atrapy symulacji (sampler, dongiel, RTT, chip). Podanie tu
         # rtt_factory zasłoniłoby atrapę mocka – jawne fabryki mają
@@ -158,7 +203,7 @@ class MockRunTest(unittest.TestCase):
             plan, self.manifest, "BTZ #1",
             event_cb=self.events.append,
             cancel=threading.Event(),
-            mock=mockmod.MockConfig(speedup=speedup, seed=seed))
+            mock=mockmod.MockConfig(window_s=window_s, seed=seed))
         self.runner = runner
         return runner.run()
 
@@ -173,15 +218,16 @@ class MockRunTest(unittest.TestCase):
     def _notes(self):
         return [ev.text for ev in self.events if ev.kind == "note"]
 
-    def test_okno_z_planu_zamyka_sie_w_skroconym_czasie(self):
-        # Okno 30 s przy ×100 ma się domknąć w ułamku sekundy realnej,
-        # a zapisana sesja ma opisywać PEŁNE 30 s (czas liczy się z próbek).
+    def test_pomiar_trwa_stale_okno_a_dane_opisuja_plan(self):
+        # Sedno symulacji: pomiar zajmuje TYLE, ile okno symulacji (tu 0.3 s
+        # zamiast produkcyjnych 10 s), a zapisana sesja opisuje PEŁNE 30 s
+        # z planu – czas liczy się z próbek, nie z zegara.
         t0 = time.monotonic()
-        results = self._run(self._plan(duration_s=30.0), speedup=100.0)
+        results = self._run(self._plan(duration_s=30.0), window_s=0.3)
         realnie = time.monotonic() - t0
         r = results[0]
         self.assertEqual(r.status, "done")
-        self.assertLess(realnie, 10.0, f"przebieg zajął {realnie:.1f} s")
+        self.assertLess(realnie, 5.0, f"przebieg zajął {realnie:.1f} s")
         meta = json.loads((r.session_dir / "meta.json").read_text())
         self.assertAlmostEqual(meta["duration_s"], 30.0, delta=1.0)
         self.assertAlmostEqual(r.summary["duration_s"], 30.0, delta=1.0)
@@ -236,13 +282,13 @@ class MockRunTest(unittest.TestCase):
             [planmod.PlanStep(scenario="zwykly", duration_s=20.0, label="1",
                               trigger=planmod.Trigger(type="delay",
                                                       seconds=0))], 3)
-        sampler = mockmod.MockSampler(mockmod.MockConfig(speedup=100.0))
+        sampler = mockmod.MockSampler(mockmod.MockConfig(window_s=0.2))
         runner = AutoRunner(
             planmod.Plan(name="mock", board="btz", steps=steps),
             self.manifest, "BTZ #1",
             sampler_factory=lambda p: sampler,
             event_cb=self.events.append,
-            mock=mockmod.MockConfig(speedup=100.0))
+            mock=mockmod.MockConfig(window_s=0.2))
         results = runner.run()
         self.assertEqual([r.status for r in results], ["done"] * 3)
         self.assertEqual([r.label for r in results], ["1/1", "1/2", "1/3"])
@@ -256,7 +302,7 @@ class MockRunTest(unittest.TestCase):
             dict(scenario="zwykly", duration_s=240.0,
                  trigger=planmod.Trigger(type="delay", seconds=0)))
         results = self._run(planmod.Plan(name="mock", board="btz",
-                                         steps=steps), speedup=200.0)
+                                         steps=steps), window_s=0.3)
         avgs = [r.summary["avg_uA"] for r in results]
         self.assertEqual([r.status for r in results], ["done"] * 3)
         self.assertGreater(avgs[0], avgs[1], avgs)
@@ -350,7 +396,7 @@ class MockRunTest(unittest.TestCase):
         # reports/sessions (regresja: mock nie może wyciekać do sprzętu).
         runner = AutoRunner(self._plan(), self.manifest, "BTZ #1",
                             sampler_factory=lambda p: mockmod.MockSampler(
-                                mockmod.MockConfig(speedup=100.0, seed=1)),
+                                mockmod.MockConfig(window_s=0.2, seed=1)),
                             rtt_factory=lambda prof: FakeRttReader(),
                             event_cb=self.events.append)
         self.assertEqual(runner._time_scale, 1.0)

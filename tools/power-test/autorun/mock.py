@@ -13,18 +13,29 @@
 # duration_s * rate próbek (engine._measure). Czas w meta.json, granice
 # tierów i ładunek w µC liczą się z LICZBY PRÓBEK
 # (SessionWriter.elapsed_s = samples_written / sample_rate), a nie z
-# zegara. Wystarczy więc, że atrapa wypluwa próbki `speedup` razy
-# szybciej niż sprzęt: zapisane dane opisują pełne 20 minut, a realnie
-# zajmuje to 12 sekund. Silnik skaluje jeszcze zegar odliczania i
+# zegara. Wystarczy więc, że atrapa wypluwa próbki szybciej niż sprzęt:
+# zapisane dane opisują pełne 20 minut z planu, a realnie zajmuje to
+# MOCK_WINDOW_S sekund. Silnik skaluje jeszcze zegar odliczania i
 # oczekiwania (engine._time_scale), żeby UI pokazywało czasy z planu.
 #
+# KAŻDY pomiar w symulacji trwa MOCK_WINDOW_S sekund realnych – nie
+# ułamek czasu z planu. Przy stałym mnożniku okno 30 s domykało się po
+# 0,3 s, czyli szybciej, niż da się cokolwiek zobaczyć na ekranie; przy
+# stałym oknie tempo pracy nie zależy od tego, co wpisano w kartę.
+# Skrót jest więc liczony PER KROK: czas_z_planu / MOCK_WINDOW_S.
+# Pomiar krótszy niż MOCK_WINDOW_S leci w czasie realnym (rozciąganie go
+# byłoby czekaniem dłuższym niż sam plan).
+#
 # --- Dlaczego atrapa ma niską częstotliwość ---
-# Przy 100 kS/s i skrócie ×100 trzeba by generować 10 mln próbek na
-# sekundę (40 MB/s do kaskady tierów) – nierealne. Atrapa raportuje
-# więc MOCK_RATE (2 kS/s), co przy ×100 daje 200 tys. próbek/s realnie.
-# Karta z próbkowaniem <= MOCK_RATE działa dokładnie (decymacja liczy
-# się normalnie); wyższe wartości są przycięte do MOCK_RATE, więc
-# meta.json takiej sesji mówi 2000, a nie 100000.
+# Przy 100 kS/s trzeba by generować miliony próbek na sekundę (dziesiątki
+# MB/s do kaskady tierów) – nierealne. Atrapa trzyma więc dwa sufity:
+# MOCK_RATE na częstotliwość i MOCK_MAX_SAMPLES na liczbę próbek jednego
+# pomiaru. Razem ze stałym oknem dają STAŁE tempo generowania
+# (MOCK_MAX_SAMPLES / MOCK_WINDOW_S), niezależne od długości pomiaru.
+# Cena: długie okna dostają niższą częstotliwość (8 h -> ~70 S/s), więc
+# meta.json takiej sesji mówi 70, a nie 100000. Karta z próbkowaniem
+# poniżej częstotliwości atrapy działa dokładnie (decymacja liczy się
+# normalnie), wyższe wartości są przycinane.
 
 import re
 import threading
@@ -34,8 +45,9 @@ import numpy as np
 
 from .ppk2 import check_voltage_mV
 
-MOCK_RATE = 2000            # „sprzętowa” częstotliwość atrapy [próbki/s]
-MOCK_SPEEDUP = 100.0        # ile razy szybciej niż realny czas
+MOCK_WINDOW_S = 10.0        # ile REALNIE trwa jeden pomiar w symulacji
+MOCK_RATE = 2000            # sufit „sprzętowej” częstotliwości [próbki/s]
+MOCK_MAX_SAMPLES = 2_000_000    # sufit próbek jednego pomiaru (dane + CPU)
 # Sufit jednego odczytu: po zacięciu (GC, zajęte UI) nie oddajemy nagle
 # milionów próbek. Zaległość zostaje w liczniku i nadgania się przy
 # kolejnych odczytach – okno i tak domknie licznik próbek.
@@ -60,21 +72,48 @@ RETRY_PROB = 0.15
 class MockConfig:
     """Parametry symulacji. `seed=None` (domyślnie) znaczy, że każdy
     pomiar dostaje własny losowy przebieg – dzięki temu powtórki jednej
-    karty różnią się jak na sprzęcie. Test podaje seed i ma powtarzalność."""
+    karty różnią się jak na sprzęcie. Test podaje seed i ma powtarzalność.
 
-    def __init__(self, speedup=MOCK_SPEEDUP, hw_rate=MOCK_RATE, seed=None):
-        self.speedup = max(1.0, float(speedup))
-        self.hw_rate = max(1, int(hw_rate))
+    Domyślne wartości czytamy ze stałych modułu przy KAŻDYM tworzeniu
+    (nie w podpisie), żeby dało się je podmienić w testach – inaczej cała
+    suite czekałaby po 10 s na każdy zasymulowany pomiar."""
+
+    def __init__(self, window_s=None, hw_rate=None, max_samples=None,
+                 seed=None):
+        self.window_s = max(0.01, float(MOCK_WINDOW_S if window_s is None
+                                        else window_s))
+        self.hw_rate = max(1, int(MOCK_RATE if hw_rate is None else hw_rate))
+        self.max_samples = max(1, int(MOCK_MAX_SAMPLES if max_samples is None
+                                      else max_samples))
         self.seed = seed
 
     def __repr__(self):
-        return (f"MockConfig(speedup={self.speedup:g}, "
+        return (f"MockConfig(window_s={self.window_s:g}, "
                 f"hw_rate={self.hw_rate}, seed={self.seed})")
+
+    def scale_for(self, duration_s):
+        """Ile sekund PRZEBIEGU mieści się w sekundzie realnej przy oknie
+        `duration_s` z planu. Pomiar krótszy niż okno symulacji leci
+        w czasie realnym (skala 1.0) – nie ma po co czekać dłużej, niż
+        każe plan."""
+        duration_s = float(duration_s or 0.0)
+        if duration_s <= self.window_s:
+            return 1.0
+        return duration_s / self.window_s
+
+    def rate_for(self, duration_s):
+        """Częstotliwość atrapy dla okna `duration_s`: tyle, żeby zmieścić
+        się w sufitach (MOCK_RATE i MOCK_MAX_SAMPLES). Razem ze stałym
+        oknem daje stałe tempo generowania próbek."""
+        duration_s = float(duration_s or 0.0)
+        if duration_s <= 0:
+            return self.hw_rate
+        return max(1, min(self.hw_rate, int(self.max_samples / duration_s)))
 
     @property
     def summary(self):
         """Jednolinijkowy opis do plan.log i paska w UI."""
-        return f"×{self.speedup:g}, {self.hw_rate} S/s"
+        return f"pomiar {self.window_s:g} s zamiast czasu z planu"
 
 
 # Symbole Kconfiga, które w modelu przebiegu znaczą „odstęp wybudzeń”.
@@ -135,8 +174,10 @@ class MockSampler:
 
     def __init__(self, cfg=None):
         self.cfg = cfg or MockConfig()
+        # Częstotliwość i skrót czasu zależą od DŁUGOŚCI mierzonego okna,
+        # więc ustawia je prepare_step. Do tego czasu: sufit i czas realny.
         self.sample_rate = self.cfg.hw_rate
-        self.speedup = self.cfg.speedup
+        self.speedup = 1.0
         self.port = "MOCK"
         self.voltage_mV = None
         self.dut = False
@@ -203,11 +244,18 @@ class MockSampler:
     # ---------- model przebiegu ----------
 
     def prepare_step(self, step, scen):
+        duration_s = getattr(step, "duration_s", 0.0)
+        # Okno pomiaru ma trwać MOCK_WINDOW_S realnie, niezależnie od czasu
+        # z planu: stąd skrót liczony per krok i częstotliwość dopasowana do
+        # sufitu próbek. Silnik czyta sample_rate PO tym wywołaniu.
+        self.sample_rate = self.cfg.rate_for(duration_s)
+        self.speedup = self.cfg.scale_for(duration_s)
         self.baseline = baseline_from_expected(scen.get("expected"))
         self.period_s = period_from_sweep(getattr(step, "sweep", None))
         self._reseed()
         self.log.append(f"step baseline={self.baseline:g} "
-                        f"period={self.period_s:g} seed={self._seed}")
+                        f"period={self.period_s:g} rate={self.sample_rate} "
+                        f"scale={self.speedup:g} seed={self._seed}")
 
     def _reseed(self):
         """Nowe losowanie retransmisji. Z jawnym seedem w konfiguracji

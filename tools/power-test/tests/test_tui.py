@@ -73,8 +73,18 @@ class TuiHarness(unittest.IsolatedAsyncioTestCase):
         klasie testów: albo NoMatches (dziecka jeszcze nie ma), albo –
         gorzej – widget istnieje, lecz ma rozmiar 0, więc pilot trafia
         w punkt (0,0), klik przepada bez śladu i test wisi do timeoutu.
-        Dlatego czekamy na niezerowy rozmiar celu, nie na sam typ ekranu."""
+        Dlatego czekamy na niezerowy rozmiar celu, nie na sam typ ekranu.
+
+        Cel PRZEWIJAMY do widoku: panel ustawień rośnie z każdą nową opcją,
+        a klik poza widoczny obszar to OutOfBounds (pilot nie przewija sam).
+        Bez tego dodanie jednej linijki w interfejsie wywracało testy, które
+        z tą linijką nie mają nic wspólnego."""
         await self.wait_for(pilot, selector, timeout)
+        for node in pilot.app.screen.query(selector):
+            if node.size.width and node.size.height:
+                node.scroll_visible(animate=False)
+                break
+        await pilot.pause()
         await pilot.click(selector)
 
     async def click_and_close(self, pilot, selector, timeout=15.0):
@@ -317,7 +327,7 @@ class TuiAddTests(TuiHarness):
             # Nowy wpis zaznacza się sam tylko w trybie ręcznym – tam
             # checkbox znaczy „zmierz to”.
             await self.manual_mode(pilot)
-            await pilot.click("#add_fw")
+            await self.click_ready(pilot, "#add_fw")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
                                                        tui.AddScreen),
@@ -341,7 +351,7 @@ class TuiAddTests(TuiHarness):
     async def test_dodaj_firmware_zla_sciezka_nie_zamyka_dialogu(self):
         app = tui.PowerTestApp()
         async with app.run_test(size=(120, 50)) as pilot:
-            await pilot.click("#add_fw")
+            await self.click_ready(pilot, "#add_fw")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
                                                        tui.AddScreen),
@@ -361,7 +371,7 @@ class TuiBrowseTests(TuiHarness):
 
     async def open_browser(self, pilot):
         app = pilot.app
-        await pilot.click("#add_fw")
+        await self.click_ready(pilot, "#add_fw")
         await self.wait_until(pilot,
                               lambda a: isinstance(a.screen, tui.AddScreen),
                               msg="dialog Dodaj kod")
@@ -503,7 +513,7 @@ class TuiScenariosDialogTests(TuiHarness):
     async def open_dialog(self, pilot):
         await pilot.click("#mode-label-auto")
         await pilot.pause()
-        await pilot.click("#scenarios_btn")
+        await self.click_ready(pilot, "#scenarios_btn")
         await self.wait_until(pilot,
                               lambda a: isinstance(a.screen,
                                                    tui.ScenariosScreen),
@@ -564,7 +574,7 @@ class TuiScenariosDialogTests(TuiHarness):
             card = app.query_one(tui.MeasurementCard)
             card.query_one(".card-scenario", Select).value = "zrodlowy"
             await pilot.pause()
-            await pilot.click("#scenarios_btn")
+            await self.click_ready(pilot, "#scenarios_btn")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
                                                        tui.ScenariosScreen),
@@ -823,7 +833,7 @@ class TuiRunTests(TuiHarness):
                 msg="powrót do menu po Esc")
             await pilot.pause(0.3)
             # aplikacja dalej działa: da się otworzyć np. dialog dodawania
-            await pilot.click("#add_fw")
+            await self.click_ready(pilot, "#add_fw")
             await self.wait_until(pilot,
                                   lambda a: isinstance(a.screen,
                                                        tui.AddScreen),

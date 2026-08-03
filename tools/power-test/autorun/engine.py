@@ -431,10 +431,14 @@ class AutoRunner:
     @property
     def _time_scale(self):
         """Ile sekund PRZEBIEGU mieści się w sekundzie realnej. 1.0 na
-        sprzęcie; w symulacji `speedup`, bo atrapa oddaje próbki tyle razy
-        szybciej. Skala dotyczy zegara (odliczanie, oczekiwania) – dane
-        sesji liczą się z próbek, więc są wierne bez żadnej korekty."""
-        return self.mock.speedup if self.mock is not None else 1.0
+        sprzęcie; w symulacji tyle, żeby okno pomiaru zamknęło się po
+        stałym czasie (MockConfig.window_s), bo atrapa oddaje próbki tyle
+        razy szybciej. Skala zależy więc od DŁUGOŚCI bieżącego kroku –
+        dane sesji liczą się z próbek, więc są wierne bez żadnej korekty."""
+        if self.mock is None:
+            return 1.0
+        step = self._cur_step
+        return self.mock.scale_for(getattr(step, "duration_s", 0.0))
 
     def _sleep_scaled(self, seconds):
         """Oczekiwanie na sprzęt (rozruch płytki, uspokojenie po odcięciu

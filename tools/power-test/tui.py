@@ -44,6 +44,9 @@ import power_test as core
 # Limit krotności karty ('x1 … x5') trzyma plan – tam też rozwijają się
 # powtórki na osobne kroki, więc UI nie ma własnej, drugiej prawdy.
 from autorun.plan import REPEAT_MAX
+# Długość zasymulowanego pomiaru pokazujemy w podpisie checkboxa; wartość
+# (i cała mechanika atrap) należy do autorun/mock.py.
+from autorun.mock import MOCK_WINDOW_S
 
 # Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
 # pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
@@ -1721,10 +1724,15 @@ class AutoRunScreen(Screen):
 
     SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, plan, sample):
+    def __init__(self, plan, sample, mock=None):
         super().__init__()
         self.plan = plan               # gotowy autorun.plan.Plan (z okna)
         self.sample = sample
+        # MockConfig albo None. Symulacja musi być widoczna przez CAŁY
+        # przebieg (pasek u góry, dopisek w tabelce wyników): checkbox jest
+        # jedno kliknięcie od prawdziwego pomiaru, więc zrzut ekranu ze
+        # zmyślonymi liczbami nie może wyglądać jak pomiar.
+        self.mock = mock
         self.cancel = threading.Event()
         self.pause = threading.Event()  # Stop/Wznów pomiaru (pauza)
         self.run_dir = None
@@ -1742,6 +1750,11 @@ class AutoRunScreen(Screen):
         self._spin_i = 0
 
     def compose(self):
+        if self.mock is not None:
+            yield Static(f"█ SYMULACJA ({self.mock.summary}) — bez PPK2 i "
+                         "bez płytki. Liczby są zmyślone, sesje idą do "
+                         "reports/sessions-mock, dziennik pomiarów zostaje "
+                         "nietknięty. █", id="mock-banner")
         yield Static("", id="status")
         # Tabelka zakończonych pomiarów (na górze) – wypełnia się po każdym
         # kroku, a jego okna build/flash znikają.
@@ -1768,7 +1781,10 @@ class AutoRunScreen(Screen):
 
     def on_mount(self):
         table = self.query_one("#results", DataTable)
-        table.add_columns("#", "Scenariusz", "Parametr", "Średni", "Max",
+        # W symulacji pierwsza kolumna mówi wprost, czym są te liczby –
+        # tabelka wyników bywa tym, co ląduje na zrzucie ekranu.
+        first = "# (mock)" if self.mock is not None else "#"
+        table.add_columns(first, "Scenariusz", "Parametr", "Średni", "Max",
                           "Czas")
         table.display = False          # pokaże się z pierwszym wynikiem
         self.query_one("#measure-panel").display = False
@@ -2134,7 +2150,7 @@ class AutoRunScreen(Screen):
             manifest = core.load_manifest()
             runner = AutoRunner(self.plan, manifest, self.sample,
                                 event_cb=emit, cancel=self.cancel,
-                                pause=self.pause)
+                                pause=self.pause, mock=self.mock)
             runner.run()
         except AutoRunError as e:
             self.app.call_from_thread(self._fail, str(e))
@@ -2265,8 +2281,16 @@ class PowerTestApp(App):
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
        Select zamontowany od razu jako display:none nie tworzy overlaya. */
-    #pristine, #reset, #swd_reminder { border: none; background: transparent; padding: 0;
+    #pristine, #reset, #swd_reminder, #mock {
+                border: none; background: transparent; padding: 0;
                 height: 1; margin-top: 1; }
+    /* SYMULACJA na żółto (#cc9900) – ten sam kolor, którym narzędzie
+       ostrzega o zgubionych próbkach. Paleta jest monochromatyczna i ma
+       dokładnie dwa wyjątki: ostrzeżenie i błąd (#cc6666); zmyślone
+       liczby należą do pierwszej kategorii. */
+    #mock { color: #cc9900; }
+    #mock-banner { width: 100%; height: auto; color: #cc9900;
+                   text-style: bold; margin-bottom: 1; }
     .scen-desc { display: none; color: #888888; margin: 0 0 0 4; }
     .scen-desc.shown { display: block; }
     /* X w checkboksie: niewidoczny gdy odznaczony (kolor tła), widoczny
@@ -2504,6 +2528,14 @@ class PowerTestApp(App):
             yield Input(placeholder="np. BTZ #2", id="sample")
             yield Check("Wymuś pełny rebuild (gotowe buildy są "
                         "normalnie pomijane)", value=False, id="pristine")
+            # SYMULACJA: praca nad aplikacją bez PPK2, programatora i płytki
+            # (autorun/mock.py). Stan NIE jest nigdzie zapisywany – po
+            # restarcie narzędzia zawsze wraca prawdziwy pomiar. Build leci
+            # normalnie, więc flagi i Kconfig są dalej sprawdzane.
+            yield Check(f"SYMULACJA — bez PPK2 i bez płytki "
+                        f"(pomiar {MOCK_WINDOW_S:g} s, wyniki poza "
+                        f"dziennikiem)",
+                        value=False, id="mock", classes="auto-only")
             yield Check("Zresetuj płytkę po wgraniu (J-Link)",
                         value=True, id="reset", classes="standard-only")
             yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
@@ -2841,7 +2873,26 @@ class PowerTestApp(App):
                         severity="error", timeout=8)
             return
 
+        # SYMULACJA: nie ma czego wykrywać ani z kim się bić o sondę –
+        # ekran PPK2 i kontrola zajętości J-Linka są pomijane.
+        if self._mock_config() is not None:
+            self.push_screen(AutoRunScreen(plan, sample,
+                                           mock=self._mock_config()))
+            return
         self._auto_check_jlink(plan, sample)
+
+    def _mock_config(self):
+        """MockConfig, gdy zaznaczono SYMULACJĘ; inaczej None. Czytamy
+        checkbox W MOMENCIE startu – stan nigdzie się nie zapisuje, więc
+        po restarcie narzędzia przebieg jest zawsze prawdziwy."""
+        try:
+            on = self.query_one("#mock", Checkbox).value
+        except Exception:
+            return None
+        if not on:
+            return None
+        from autorun.mock import MockConfig
+        return MockConfig()
 
     def _push_auto_run(self, plan, sample):
         def go(ok):

@@ -338,6 +338,74 @@ build_lpn_krok3   -> CONFIG_LPN_SENSOR_INTERVAL_S=50
 
 Obrazy nie nadpisują się.
 
+## Praca bez sprzętu (symulacja)
+
+Checkbox **„SYMULACJA — bez PPK2 i bez płytki (pomiar 10 s)”** leży pod polem egzemplarza,
+obok „Wymuś pełny rebuild”, i działa tylko w trybie autonomicznym.
+Zaznaczony pozwala przejść cały przebieg bez PPK2, programatora i płytki.
+Służy do rozwijania samej aplikacji: interfejsu, planu, raportu, wykresów.
+
+Symulacja podstawia atrapy w miejsce sprzętu:
+
+| Element | W symulacji |
+|---|---|
+| PPK2 (zasilanie i pomiar) | atrapa: podłoga uśpienia + piki wybudzeń |
+| `west flash` | pominięty (komenda widoczna w panelu) |
+| Log dongla / konsola RTT | atrapa wstrzykuje wzorzec triggera z kroku |
+| Parowanie i subskrypcja Mattera | atrapa zgłasza pierwszy raport |
+| `west build` | **prawdziwy** — flagi i Kconfig są dalej sprawdzane |
+
+Każdy pomiar trwa **10 sekund realnych**, niezależnie od czasu z karty.
+Zapisana sesja opisuje jednak pełne okno z planu: czas, tiery i ładunek
+w µC liczą się z liczby próbek, a nie z zegara.
+Odliczanie w interfejsie pokazuje sekundy z planu, tylko przewija je szybciej.
+
+```text
+plan     realnie   okno w sesji     S/s    próbek
+   5 s     5,5 s          5,0 s    2000    10 000
+  30 s    10,2 s         30,0 s    2000    60 000
+20 min    10,0 s       1200,0 s    1666 1 999 200
+   8 h    10,0 s      28800,0 s      69 1 987 200
+```
+
+Pomiar krótszy niż 10 s leci w czasie realnym.
+Rozciąganie go oznaczałoby czekanie dłuższe, niż każe plan.
+
+Częstotliwość atrapy nie jest równa tej z karty.
+Sufity (2000 S/s i 2 mln próbek na pomiar) trzymają stałe tempo generowania,
+więc długie okna dostają niższą częstotliwość — 8 godzin to ~70 S/s.
+`meta.json` takiej sesji mówi wtedy `sample_rate: 69`, nie `100000`.
+Bez tego 8-godzinny pomiar musiałby wypluć 57 mln próbek w 10 sekund.
+
+Przebieg reaguje na ustawienia karty.
+Podłoga prądu bierze się z pola `expected` scenariusza.
+Odstęp wybudzeń bierze się z parametru serii, jeśli dotyczy on pollu
+albo interwału publikacji — więc sweep daje malejącą krzywą średnich:
+
+```text
+poll  30 s  ->  ~31 µA
+poll  60 s  ->  ~16 µA
+poll 120 s  ->   ~8 µA
+```
+
+Co któryś Poll „ginie” i leci retransmisja, losowana osobno dla każdego
+pomiaru. Powtórki `x2`–`x5` tej samej karty dają więc różne wyniki, tak jak
+na sprzęcie — bez tego nie dałoby się pracować nad pokazywaniem rozrzutu.
+
+Wyniki symulacji są odgrodzone od prawdziwych:
+
+- sesje lądują w `reports/sessions-mock/`, nie w `reports/sessions/`;
+- dziennik `reports/pomiary.csv` **nie dostaje ani jednego wiersza**;
+- przez cały przebieg u góry stoi żółty pasek „SYMULACJA”, a pierwsza
+  kolumna tabelki wyników nazywa się `# (mock)`;
+- `plan.log` przebiegu zaczyna się notatką o symulacji.
+
+Stan checkboxa nie jest nigdzie zapisywany.
+Po restarcie narzędzia przebieg jest zawsze prawdziwy.
+
+Symulacja wymaga działającego `west build`.
+Na maszynie bez SDK NCS każdy krok skończy się jako `build_failed`.
+
 ## Wyniki
 
 Każdy pomiar trafia do wspólnego dziennika `reports/pomiary.csv`.

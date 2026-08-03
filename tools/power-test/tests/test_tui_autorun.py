@@ -6,6 +6,7 @@
 # (PPK2/RTT) i wykrycie portu podmieniamy na atrapy, więc całość działa
 # headless.
 
+import csv
 import unittest
 
 from common import FakeEnv, core  # noqa: F401
@@ -13,13 +14,18 @@ from fakes import FakeRttReader, FakeSampler
 
 import tui
 from autorun import engine as eng
+from autorun import plan as planmod
 from autorun import ppk2 as ppk2mod
 from textual.widgets import (Checkbox, Collapsible, DataTable, Input, Select,
                              Static)
 from textual.widgets._tabbed_content import ContentTab
 
 
-class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
+class _TuiAutorunBase(unittest.IsolatedAsyncioTestCase):
+    """Uprząż wspólna dla klas testowych kreatora: tymczasowe repo,
+    atrapy sprzętu i drobne pomocnicze. Sama nie ma testów – dziedziczenie
+    po klasie Z testami uruchamiałoby je po raz drugi w każdej podklasie."""
+
     def setUp(self):
         self.env = FakeEnv()
         self.addCleanup(self.env.cleanup)
@@ -66,6 +72,8 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
         await pilot.click(tab)
         await pilot.pause()
 
+
+class AutorunTuiTest(_TuiAutorunBase):
     async def test_start_w_trybie_autonomicznym(self):
         # Aplikacja startuje w trybie autonomicznym – to on mierzy sam
         # (PPK2), więc kreator kart ma być widoczny bez klikania.
@@ -1332,6 +1340,123 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             third = list(app.query(tui.MeasurementCard))[-1]
             self.assertEqual(third.get_config()["repeat"], 4)
+
+
+class MockTuiTest(_TuiAutorunBase):
+    """SYMULACJA z kreatora: checkbox uzbraja tryb bez sprzętu, a przebieg
+    musi być widocznie oznaczony i odgrodzony od prawdziwych danych."""
+
+    def setUp(self):
+        super().setUp()
+        # Produkcyjne okno symulacji to 10 s na pomiar – w testach skracamy
+        # je do 0.3 s. MockConfig czyta tę stałą przy tworzeniu, więc
+        # podmiana działa też dla konfiguracji budowanej wewnątrz TUI.
+        from autorun import mock as mockmod
+        old = mockmod.MOCK_WINDOW_S
+        mockmod.MOCK_WINDOW_S = 0.3
+        self.addCleanup(setattr, mockmod, "MOCK_WINDOW_S", old)
+
+    async def test_domyslnie_wylaczona_i_tylko_w_trybie_autonomicznym(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            box = app.query_one("#mock", Checkbox)
+            self.assertFalse(box.value)          # świeży start = prawdziwy
+            self.assertIsNone(app._mock_config())
+            self.assertTrue(box.display)         # tryb autonomiczny
+            await pilot.click("#mode-label-standard")
+            await pilot.pause()
+            # Tryb ręczny mierzy w nRF Connect – nie ma tam czego symulować.
+            self.assertFalse(box.display)
+
+    async def test_zaznaczenie_daje_konfiguracje_symulacji(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            app.query_one("#mock", Checkbox).value = True
+            await pilot.pause()
+            cfg = app._mock_config()
+            self.assertIsNotNone(cfg)
+            # Okno pomiaru z konfiguracji modułu (w tej klasie skrócone).
+            self.assertEqual(cfg.window_s, 0.3)
+            # Godzinny pomiar z planu zmieści się w tym oknie.
+            self.assertGreater(cfg.scale_for(3600.0), 1.0)
+
+    async def test_symulacja_pomija_ekran_ppk2_i_kontrole_jlinka(self):
+        # Bez sprzętu nie ma czego wykrywać ani z kim bić się o sondę.
+        # Cudzy właściciel J-Linka NIE może zatrzymać symulacji dialogiem.
+        app = tui.PowerTestApp()
+        orig = core.jlink_owners
+        core.jlink_owners = lambda *a, **k: [(4242, "nrfutil --hotplug")]
+        self.addCleanup(setattr, core, "jlink_owners", orig)
+        async with app.run_test(size=(120, 60)) as pilot:
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "20"
+            app.query_one("#sample", Input).value = "BTZ #1"
+            app.query_one("#mock", Checkbox).value = True
+            await pilot.pause()
+            app.query_one("#start", tui.Button).scroll_visible(animate=False)
+            await pilot.pause()
+            await pilot.click("#start")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, tui.AutoRunScreen)
+            self.assertIsNotNone(app.screen.mock)
+            app.screen.cancel.set()
+            await pilot.pause()
+
+    async def test_pasek_symulacji_jest_widoczny(self):
+        from autorun.mock import MockConfig
+        plan = planmod.Plan(name="t", board="btz", steps=[
+            planmod.PlanStep(scenario="zwykly", duration_s=20.0)])
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            screen = tui.AutoRunScreen(plan, "BTZ #1", mock=MockConfig())
+            app.push_screen(screen)
+            await pilot.pause()
+            banner = str(screen.query_one("#mock-banner").render())
+            self.assertIn("SYMULACJA", banner)
+            self.assertIn("sessions-mock", banner)
+            # Tabelka wyników też mówi, czym są te liczby.
+            cols = [str(c.label) for c
+                    in screen.query_one("#results", DataTable).columns.values()]
+            self.assertIn("# (mock)", cols)
+            screen.cancel.set()
+            await pilot.pause()
+            # Bez symulacji paska nie ma w ogóle.
+            plain = tui.AutoRunScreen(plan, "BTZ #1")
+            app.push_screen(plain)
+            await pilot.pause()
+            self.assertEqual(len(plain.query("#mock-banner")), 0)
+            plain.cancel.set()
+            await pilot.pause()
+
+    async def test_caly_przebieg_z_kreatora_bez_sprzetu(self):
+        # Kluczowy test tej funkcji: od kliknięcia w kreatorze do końca
+        # planu, BEZ atrap testowych (żadnego FakeSampler) – silnik ma sam
+        # wszystko udawać. I bez wiersza w dzienniku pomiarów.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "60"
+            app.query_one("#sample", Input).value = "BTZ #1"
+            app.query_one("#mock", Checkbox).value = True
+            await pilot.pause()
+            app.query_one("#start", tui.Button).scroll_visible(animate=False)
+            await pilot.pause()
+            await pilot.click("#start")
+            await pilot.pause()
+            screen = app.screen
+            self.assertIsInstance(screen, tui.AutoRunScreen)
+            await self.wait_until(pilot, lambda a: screen._done, timeout=40.0)
+            table = screen.query_one("#results", DataTable)
+            self.assertEqual(table.row_count, 1)
+        # Sesja w osobnym katalogu, dziennik nietknięty.
+        self.assertIn("sessions-mock", str(screen.run_dir))
+        rows = []
+        if core.CSV_PATH.is_file():
+            with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual(rows, [])
 
 
 class LostSamplesWarningTest(unittest.TestCase):
