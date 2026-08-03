@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from common import FakeEnv, core
+from fakes import write_image_artifacts
 
 
 def run_args(scenarios, dry_run=True, sample=None, no_erase=False,
@@ -175,6 +176,107 @@ class CoreTests(unittest.TestCase):
     def test_load_memory_bez_pliku_i_bez_katalogu(self):
         self.assertIsNone(core.load_memory_usage("build_nie_ma_takiego"))
         self.assertIsNone(core.load_memory_usage(None))
+
+    # --- zapas: liczby policzone z GOTOWEGO obrazu (ELF + .config) ---
+    #
+    # Linker drukuje tabelkę tylko wtedy, gdy linkuje. Bez tej ścieżki
+    # pomiar na obrazie zbudowanym dawno, na innej maszynie albo wskazanym
+    # jako gotowy `hex` trafiał do dziennika bez zajętości pamięci.
+
+    def test_memory_z_obrazu_liczy_to_samo_co_linker(self):
+        d = write_image_artifacts(core.ROOT / "build_z_elfa" / "zephyr",
+                                  flash_used=207904, ram_used=47000)
+        self.assertEqual(core.memory_from_image(d),
+                         {"flash_B": 207904, "flash_pct": 13.32,
+                          "ram_B": 47000, "ram_pct": 17.93})
+
+    def test_memory_z_obrazu_uwzglednia_wycinek_ramu(self):
+        # Podtrzymana sekcja RAM zmniejsza REGION (CONFIG_SRAM_SIZE=224),
+        # więc procent musi być liczony z 224 KB, nie z 256 KB.
+        d = write_image_artifacts(core.ROOT / "build_retencja" / "zephyr",
+                                  flash_used=216016, ram_used=47224,
+                                  ram_kb=224)
+        self.assertEqual(core.memory_from_image(d),
+                         {"flash_B": 216016, "flash_pct": 13.84,
+                          "ram_B": 47224, "ram_pct": 20.59})
+
+    def test_memory_z_obrazu_bez_artefaktow_albo_z_bzdury(self):
+        # Lepiej nic, niż wpisać do dziennika zmyśloną liczbę.
+        brak = core.ROOT / "build_puste" / "zephyr"
+        brak.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(core.memory_from_image(brak))       # bez .config
+        tylko_cfg = write_image_artifacts(
+            core.ROOT / "build_bez_elfa" / "zephyr",
+            flash_used=1, ram_used=1, elf=False)
+        self.assertIsNone(core.memory_from_image(tylko_cfg))  # bez ELF-a
+        obcy = write_image_artifacts(core.ROOT / "build_obcy" / "zephyr",
+                                     flash_used=1, ram_used=1, elf=False)
+        (obcy / "zephyr.elf").write_bytes(b"to nie jest ELF")
+        self.assertIsNone(core.memory_from_image(obcy))
+
+    def test_pominiety_build_bez_pliku_liczy_z_obrazu_i_zapamietuje(self):
+        # DOKŁADNIE ta luka: katalog builda jest aktualny, ale nie ma
+        # .bpt_memory.json (zbudowany starszą wersją narzędzia albo build
+        # nie miał nic do zrobienia). Liczby mają się wziąć z obrazu,
+        # a wynik zapamiętać, żeby policzyć go raz.
+        write_image_artifacts(core.ROOT / "build_stary" / "zephyr",
+                              flash_used=28980, ram_used=5768)
+        (core.ROOT / "build_stary" / "zephyr" / "zephyr.hex").write_text(
+            ":00000001FF\n", encoding="utf-8")
+        cache = core.ROOT / "build_stary" / core.MEMORY_CACHE_NAME
+        self.assertFalse(cache.is_file())
+        usage = core.load_memory_usage("build_stary")
+        self.assertEqual(usage, {"flash_B": 28980, "flash_pct": 1.86,
+                                 "ram_B": 5768, "ram_pct": 2.2})
+        self.assertTrue(cache.is_file(), "wynik nie został zapamiętany")
+        self.assertEqual(core._cached_memory("build_stary"), usage)
+
+    def test_zapamietany_plik_ma_pierwszenstwo_nad_obrazem(self):
+        # Plik z builda jest źródłem prawdy: pochodzi wprost z linkera.
+        write_image_artifacts(core.ROOT / "build_oba" / "zephyr",
+                              flash_used=999, ram_used=888)
+        (core.ROOT / "build_oba" / "zephyr" / "zephyr.hex").write_text(
+            ":00000001FF\n", encoding="utf-8")
+        (core.ROOT / "build_oba" / core.MEMORY_CACHE_NAME).write_text(
+            '{"flash_B": 111, "ram_B": 222}', encoding="utf-8")
+        self.assertEqual(core.load_memory_usage("build_oba"),
+                         {"flash_B": 111, "ram_B": 222})
+
+    def test_memory_dla_scenariusza_hex_w_drzewie_builda(self):
+        # Gotowa binarka z innego komputera: obok hexa leżą zwykle ELF
+        # i .config tego samego builda – wtedy mamy komplet liczb.
+        d = write_image_artifacts(core.ROOT / "obcy_build" / "zephyr",
+                                  flash_used=207904, ram_used=47000)
+        (d / "zephyr.hex").write_text(":00000001FF\n", encoding="utf-8")
+        scen = {"hex": "obcy_build/zephyr/zephyr.hex"}
+        self.assertEqual(core.memory_for_scenario(scen),
+                         {"flash_B": 207904, "flash_pct": 13.32,
+                          "ram_B": 47000, "ram_pct": 17.93})
+
+    def test_memory_dla_golego_hexa_to_sam_rozmiar_obrazu(self):
+        # Sam plik hex nie niesie ani RAM-u, ani rozmiaru regionu – zostaje
+        # rozmiar obrazu. Lepiej to niż pusta kolumna.
+        lone = core.ROOT / "gotowe" / "lone.hex"
+        lone.parent.mkdir(parents=True, exist_ok=True)
+        lone.write_text(":10010000214601360121470136007EFE09D2190140\n"
+                        ":00000001FF\n", encoding="utf-8")
+        self.assertEqual(core.memory_for_scenario({"hex": "gotowe/lone.hex"}),
+                         {"flash_B": 16})
+        self.assertIsNone(core.memory_for_scenario({"hex": "gotowe/nie_ma.hex"}))
+
+    def test_wiersz_dziennika_ma_pamiec_z_obrazu(self):
+        # Całość razem: wiersz CSV scenariusza, którego build jest aktualny,
+        # a pliku z liczbami nie ma.
+        write_image_artifacts(core.ROOT / "build_wiersz" / "zephyr",
+                              flash_used=212992, ram_used=47200)
+        (core.ROOT / "build_wiersz" / "zephyr" / "zephyr.hex").write_text(
+            ":00000001FF\n", encoding="utf-8")
+        row = core.make_row("zwykly", self.scenarios["zwykly"], self.profile,
+                            "BTZ #1", "3.0", 1.23, "test",
+                            build_dir="build_wiersz")
+        self.assertEqual(row["flash_B"], 212992)
+        self.assertEqual(row["ram_B"], 47200)
+        self.assertEqual(row["flash_pct"], 13.65)
 
     def test_record_memory_wybiera_domene_z_domains_yaml(self):
         # Przy sysbuildzie nazwę obrazu aplikacji bierzemy z domains.yaml,

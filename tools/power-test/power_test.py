@@ -48,6 +48,7 @@ import json
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import unicodedata
 from datetime import datetime
@@ -1013,10 +1014,8 @@ def record_memory(build_dir, output):
     return usage
 
 
-def load_memory_usage(build_dir):
-    """Zajętość pamięci zapamiętana przy budowaniu tego katalogu (albo
-    None). Używane, gdy build został POMINIĘTY jako aktualny – obraz jest
-    ten sam, więc liczby też."""
+def _cached_memory(build_dir):
+    """Tylko zapamiętany plik – bez liczenia z obrazu."""
     if not build_dir:
         return None
     try:
@@ -1025,6 +1024,202 @@ def load_memory_usage(build_dir):
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+# ------------------------------------------------------------
+#  Zajętość pamięci policzona z GOTOWEGO obrazu
+# ------------------------------------------------------------
+# Liczby z linkera są tylko w wyjściu builda, a linker milczy, kiedy nic
+# nie linkuje. Zdarza się to często i z powodów niezależnych od kodu:
+# build pominięty jako aktualny, build bez pracy dla ninji, katalog
+# zbudowany starszą wersją narzędzia (przed wprowadzeniem zapisu pamięci),
+# obraz przyniesiony z innego komputera. Bez zapasowej drogi takie pomiary
+# trafiały do dziennika z pustymi kolumnami pamięci.
+#
+# Dlatego liczymy je wprost z artefaktów obrazu: rozmiary REGIONÓW z
+# `.config` (CONFIG_FLASH_SIZE / CONFIG_SRAM_SIZE – uwzględniają wycinki
+# w rodzaju podtrzymanej sekcji RAM, więc procenty wychodzą właściwe), a
+# ZAJĘTOŚĆ z segmentów PT_LOAD pliku ELF. `ld --print-memory-usage`
+# raportuje „koniec ostatniej alokacji minus początek regionu”, więc ta
+# sama arytmetyka daje ten sam wynik – sprawdzone bajt w bajt na 13
+# katalogach builda (FLASH i RAM, także obrazy z retencją RAM).
+
+_ELF_MAGIC = b"\x7fELF"
+PT_LOAD = 1
+
+
+def _elf_load_segments(path):
+    """Segmenty PT_LOAD z ELF32 little-endian:
+    [(vaddr, paddr, filesz, memsz), …]. Puste, gdy to nie taki ELF –
+    obrazy nRF są 32-bitowe LE, a przy czymkolwiek innym lepiej nie
+    zgadywać niż wpisać do dziennika bzdurę."""
+    try:
+        blob = Path(path).read_bytes()
+    except OSError:
+        return []
+    if len(blob) < 52 or blob[:4] != _ELF_MAGIC:
+        return []
+    if blob[4] != 1 or blob[5] != 1:          # EI_CLASS=32, EI_DATA=LE
+        return []
+    try:
+        e_phoff, = struct.unpack_from("<I", blob, 28)
+        e_phentsize, e_phnum = struct.unpack_from("<HH", blob, 42)
+    except struct.error:
+        return []
+    out = []
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        try:
+            (p_type, _p_offset, p_vaddr, p_paddr, p_filesz,
+             p_memsz) = struct.unpack_from("<6I", blob, off)
+        except struct.error:
+            break
+        if p_type == PT_LOAD and p_memsz:
+            out.append((p_vaddr, p_paddr, p_filesz, p_memsz))
+    return out
+
+
+def _image_regions(image_dir):
+    """{'flash': (baza, rozmiar), 'ram': (baza, rozmiar)} z `.config`
+    obrazu (rozmiary w Kconfigu są w KB). None, gdy pliku nie ma albo
+    brakuje wpisów."""
+    try:
+        text = (Path(image_dir) / ".config").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    cfg = {}
+    for line in text.splitlines():
+        if line.startswith("CONFIG_") and "=" in line:
+            key, value = line.split("=", 1)
+            cfg[key] = value.strip().strip('"')
+
+    def number(key, scale=1):
+        raw = cfg.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw, 0) * scale
+        except ValueError:
+            return None
+
+    out = {}
+    for name, base_key, size_key in (
+            ("flash", "CONFIG_FLASH_BASE_ADDRESS", "CONFIG_FLASH_SIZE"),
+            ("ram", "CONFIG_SRAM_BASE_ADDRESS", "CONFIG_SRAM_SIZE")):
+        base, size = number(base_key), number(size_key, 1024)
+        if base is not None and size:
+            out[name] = (base, size)
+    return out or None
+
+
+def memory_from_image(image_dir):
+    """Zajętość FLASH/RAM policzona z artefaktów obrazu (ELF + .config)
+    w formacie dziennika: {'flash_B','flash_pct','ram_B','ram_pct'}.
+    None, gdy brakuje któregoś artefaktu. FLASH liczymy z adresów
+    ŁADOWANIA (paddr) i bajtów w pliku, RAM z adresów wykonania (vaddr)
+    i rozmiaru w pamięci – tak samo, jak przypisuje sekcje do regionów
+    skrypt linkera."""
+    image_dir = Path(image_dir)
+    regions = _image_regions(image_dir)
+    if not regions:
+        return None
+    segments = _elf_load_segments(image_dir / "zephyr.elf")
+    if not segments:
+        return None
+    usage = {}
+    for name, (base, size) in regions.items():
+        if name == "flash":
+            ends = [paddr + filesz for _v, paddr, filesz, _m in segments
+                    if base <= paddr < base + size]
+        else:
+            ends = [vaddr + memsz for vaddr, _p, _f, memsz in segments
+                    if base <= vaddr < base + size]
+        if not ends:
+            continue
+        used = max(ends) - base
+        if used <= 0:
+            continue
+        usage[f"{name}_B"] = used
+        usage[f"{name}_pct"] = round(used / size * 100, 2)
+    return usage or None
+
+
+def image_dir_for_build(build_dir):
+    """Katalog z artefaktami obrazu w `build_dir` (zwykły build albo
+    domena sysbuilda) – ten sam, w którym leży zbudowany hex."""
+    image = built_hex(build_dir) if build_dir else None
+    return image.parent if image is not None else None
+
+
+def hex_payload_bytes(path):
+    """Suma bajtów danych w pliku Intel HEX albo None. Ostatnia deska
+    ratunku dla scenariusza `hex` bez drzewa builda: mówi, ile waży obraz,
+    choć bez procentów (nie znamy rozmiaru regionu) i bez RAM-u – tej
+    informacji w pliku hex po prostu nie ma."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    total = 0
+    for line in lines.splitlines():
+        line = line.strip()
+        if not line.startswith(":") or len(line) < 11:
+            continue
+        try:
+            count = int(line[1:3], 16)
+            rectype = int(line[7:9], 16)
+        except ValueError:
+            continue
+        if rectype == 0:                     # rekord danych
+            total += count
+    return total or None
+
+
+def memory_for_scenario(scen, build_dir=None):
+    """Zajętość pamięci do wiersza dziennika, z trzech źródeł po kolei:
+
+    1. plik zapamiętany przy budowaniu (`.bpt_memory.json`),
+    2. artefakty obrazu – ELF + .config (katalog builda albo katalog,
+       w którym leży wskazany `hex`); wynik zapamiętujemy, żeby policzyć
+       go raz,
+    3. sam plik `hex` – wtedy tylko rozmiar obrazu (flash_B).
+
+    Dzięki 2. i 3. KAŻDY scenariusz niesie te liczby: także zbudowany
+    dawno, zbudowany na innej maszynie albo wskazany jako gotowa binarka.
+    None tylko wtedy, gdy nie ma ani obrazu, ani katalogu builda."""
+    cached = _cached_memory(build_dir)
+    if cached:
+        return cached
+    image_dir = image_dir_for_build(build_dir)
+    hex_path = None
+    if scen and scen.get("hex"):
+        hex_path = resolve_path(scen["hex"])
+        if image_dir is None:
+            image_dir = hex_path.parent
+    usage = memory_from_image(image_dir) if image_dir is not None else None
+    if usage:
+        if build_dir:
+            # Zapamiętujemy jak record_memory: liczymy raz, a kolejne
+            # pomiary tego obrazu czytają już gotowy plik. Cicho
+            # odpuszczamy przy niezapisywalnym katalogu – to metadane.
+            try:
+                (ROOT / build_dir / MEMORY_CACHE_NAME).write_text(
+                    json.dumps(usage), encoding="utf-8")
+            except OSError:
+                pass
+        return usage
+    if hex_path is not None:
+        size = hex_payload_bytes(hex_path)
+        if size:
+            return {"flash_B": size}
+    return None
+
+
+def load_memory_usage(build_dir):
+    """Zajętość pamięci obrazu z `build_dir`: zapamiętana przy budowaniu
+    albo – gdy pliku nie ma – policzona z artefaktów obrazu (patrz
+    memory_for_scenario)."""
+    return memory_for_scenario(None, build_dir)
 
 
 def copy_to_clipboard(text):
@@ -1087,7 +1282,10 @@ def make_row(name, scen, profile, sample, voltage, current, uwagi,
         "prad_uA": current,
         "oczekiwane": scen.get("expected", ""),
         "uwagi": uwagi,
-        **(load_memory_usage(build_dir) or {}),
+        # Zajętość pamięci: plik zapamiętany przy buildzie, a gdy go nie ma
+        # – policzona z artefaktów obrazu (także dla scenariusza `hex`),
+        # żeby KAŻDY kod niósł te liczby, nie tylko świeżo zbudowany.
+        **(memory_for_scenario(scen, build_dir) or {}),
     }
 
 

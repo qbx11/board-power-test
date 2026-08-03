@@ -14,7 +14,8 @@ import unittest
 import numpy as np
 
 from common import FakeEnv
-from fakes import FakeRttReader, FakeSampler, FakeSerialReader
+from fakes import (FakeRttReader, FakeSampler, FakeSerialReader,
+                   write_image_artifacts)
 
 import power_test as core
 from autorun import engine as eng
@@ -719,6 +720,36 @@ class EngineTest(unittest.TestCase):
         with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         self.assertEqual([r["flash_B"] for r in rows], ["118436", "118436"])
+
+    def test_pominiety_build_bez_pliku_bierze_pamiec_z_obrazu(self):
+        # REGRESJA (znaleziona w repo): katalog builda był aktualny, ale nie
+        # miał .bpt_memory.json – bo zbudowała go starsza wersja narzędzia
+        # albo ninja nie miała nic do zrobienia. Linker wtedy milczy, więc
+        # wiersz dziennika szedł z PUSTYMI kolumnami pamięci. Teraz liczby
+        # mają się wziąć wprost z obrazu (ELF + .config).
+        step = dict(scenario="zwykly", duration_s=0.15,
+                    trigger=planmod.Trigger(type="delay", seconds=0))
+        self._run(planmod.Plan(name="p", board="btz",
+                               steps=[planmod.PlanStep(**step)]))
+        build = core.ROOT / "build_zwykly"
+        (build / core.MEMORY_CACHE_NAME).unlink()     # tak wyglądał ten stan
+        write_image_artifacts(build / "zephyr", flash_used=222_000,
+                              ram_used=33_000)
+        self.events.clear()
+        self._run(planmod.Plan(name="p", board="btz",
+                               steps=[planmod.PlanStep(**step)]))
+        # Build faktycznie pominięty (żadnej komendy west build w 2. przebiegu).
+        self.assertFalse([c for c in self.env.commands()
+                          if c.startswith("west build")][1:],
+                         "drugi przebieg nie powinien budować")
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(rows[-1]["flash_B"], "222000")
+        self.assertEqual(rows[-1]["ram_B"], "33000")
+        self.assertEqual(rows[-1]["flash_pct"], "14.23")
+        # I zapamiętane, żeby policzyć to raz.
+        self.assertEqual(core._cached_memory("build_zwykly")["flash_B"],
+                         222_000)
 
     def test_sweep_distinct_builds_and_csv(self):
         # Seria (sweep): jeden "Pomiar 1" -> "1.1/1.2/1.3", każda wartość

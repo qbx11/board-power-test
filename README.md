@@ -421,8 +421,22 @@ Działa to w obu trybach pomiaru.
 Narzędzie zapamiętuje te liczby w katalogu builda (`.bpt_memory.json`).
 Dzięki temu pomiar na gotowym obrazie też je ma, choć build się nie wykonał.
 
-Scenariusz na gotowym pliku `.hex` zostaje bez tych kolumn.
-Nie ma builda, więc nie ma tabelki linkera.
+Liczby ma **każdy** kod, nie tylko świeżo zbudowany.
+Linker wypisuje tabelkę tylko wtedy, gdy faktycznie linkuje — a milczy przy
+pominiętym buildzie, przy buildzie bez pracy dla ninji, w katalogu zbudowanym
+starszą wersją narzędzia i w obrazie przyniesionym z innego komputera.
+W takich przypadkach narzędzie liczy zajętość wprost z artefaktów obrazu:
+rozmiary regionów z `.config`, zajętość z segmentów `PT_LOAD` pliku `zephyr.elf`.
+Wynik jest identyczny z tabelką linkera (sprawdzone bajt w bajt na 13
+katalogach builda, także dla obrazów z podtrzymaną sekcją RAM, gdzie region
+RAM jest mniejszy niż całe SRAM). Policzone liczby są zapamiętywane, więc
+liczą się raz.
+
+Scenariusz na gotowym pliku `.hex` dostaje pełne cztery kolumny, o ile obok
+hexa leży jego `zephyr.elf` i `.config` — tak wygląda katalog builda
+przyniesiony z innej maszyny. Sam plik `.hex` bez tego drzewa daje tylko
+`flash_B`, czyli rozmiar obrazu: RAM-u i rozmiaru regionu w hexie po prostu
+nie ma.
 
 Sysbuild buduje kilka obrazów (aplikacja, MCUboot).
 Do wyników trafia obraz aplikacji, czyli domena domyślna z `domains.yaml`.

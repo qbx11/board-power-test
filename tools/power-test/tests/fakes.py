@@ -7,8 +7,10 @@
 # logu. Oba mają DOKŁADNIE ten sam kształt co Ppk2ApiSampler /
 # PylinkRttReader – silnik nie wie, że rozmawia z atrapą.
 
+import struct
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -121,3 +123,43 @@ class FakeSerialReader(FakeRttReader):
     """Monitor dongla bez sprzętu – ten sam interfejs co FakeRttReader
     (attach/readline/detach ze skryptem (opóźnienie_s, tekst))."""
     pass
+
+
+# ============================================================
+#  Artefakty zbudowanego obrazu (ELF + .config)
+# ============================================================
+# Narzędzie potrafi policzyć zajętość FLASH/RAM z GOTOWEGO obrazu, gdy
+# linker nic nie wypisał (build pominięty jako aktualny, katalog z innej
+# maszyny). Testy tej ścieżki potrzebują pary plików o kształcie takim,
+# jaki zostawia Zephyr – tyle, ile narzędzie faktycznie czyta.
+
+def elf32_load(segments):
+    """Minimalny ELF32 little-endian z segmentami PT_LOAD:
+    [(vaddr, paddr, filesz, memsz), …]."""
+    phoff, phentsize = 52, 32
+    head = (b"\x7fELF" + bytes([1, 1, 1]) + bytes(9)
+            + struct.pack("<HHIIIIIHHHHHH", 2, 40, 1, 0, phoff, 0, 0,
+                          52, phentsize, len(segments), 40, 0, 0))
+    body = b"".join(struct.pack("<8I", 1, 0, vaddr, paddr, filesz, memsz, 5, 4)
+                    for vaddr, paddr, filesz, memsz in segments)
+    return head + body
+
+
+def write_image_artifacts(image_dir, flash_used, ram_used, flash_kb=1524,
+                          ram_kb=256, flash_base=0x0, ram_base=0x20000000,
+                          elf=True):
+    """Atrapa katalogu obrazu: .config z rozmiarami regionów + ELF
+    z segmentami dającymi zadaną zajętość. Segment RAM ma adres ładowania
+    w RAM, żeby nie podnosił końca regionu FLASH."""
+    image_dir = Path(image_dir)
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / ".config").write_text(
+        f"CONFIG_FLASH_BASE_ADDRESS={hex(flash_base)}\n"
+        f"CONFIG_FLASH_SIZE={flash_kb}\n"
+        f"CONFIG_SRAM_BASE_ADDRESS={hex(ram_base)}\n"
+        f"CONFIG_SRAM_SIZE={ram_kb}\n", encoding="utf-8")
+    if elf:
+        (image_dir / "zephyr.elf").write_bytes(elf32_load([
+            (flash_base, flash_base, flash_used, flash_used),
+            (ram_base, ram_base, 0, ram_used)]))
+    return image_dir
