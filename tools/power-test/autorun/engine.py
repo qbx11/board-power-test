@@ -367,10 +367,17 @@ class AutoRunner:
 
     def __init__(self, plan, manifest, sample, *, sampler_factory=None,
                  rtt_factory=None, serial_factory=None, event_cb=None,
-                 cancel=None, pause=None, dry_run=False):
+                 cancel=None, pause=None, dry_run=False, mock=None):
         self.plan = plan
         self.manifest = manifest
         self.sample = sample
+        # SYMULACJA (mock): cały przebieg bez PPK2, programatora i płytki –
+        # patrz autorun/mock.py. Domyślne fabryki wskazują wtedy atrapy, ale
+        # jawnie podana fabryka ma pierwszeństwo (testy podstawiają własne).
+        self.mock = mock
+        if mock is not None and sampler_factory is None:
+            from .mock import mock_sampler_factory
+            sampler_factory = mock_sampler_factory(mock)
         self.sampler_factory = sampler_factory or default_sampler_factory
         self.rtt_factory = rtt_factory or default_rtt_factory
         self.serial_factory = serial_factory or default_serial_factory
@@ -407,6 +414,19 @@ class AutoRunner:
         self._chip = None
 
     # ---------- pomocnicze ----------
+
+    @property
+    def _time_scale(self):
+        """Ile sekund PRZEBIEGU mieści się w sekundzie realnej. 1.0 na
+        sprzęcie; w symulacji `speedup`, bo atrapa oddaje próbki tyle razy
+        szybciej. Skala dotyczy zegara (odliczanie, oczekiwania) – dane
+        sesji liczą się z próbek, więc są wierne bez żadnej korekty."""
+        return self.mock.speedup if self.mock is not None else 1.0
+
+    def _sleep_scaled(self, seconds):
+        """Oczekiwanie na sprzęt (rozruch płytki, uspokojenie po odcięciu
+        zasilania) skrócone w symulacji – tam nie ma czego czekać."""
+        time.sleep(seconds / self._time_scale)
 
     def _emit(self, kind, step=0, name="", text="", data=None, **extra):
         """Zdarzenie do UI. Dane można podać słownikiem (data={...}) albo
@@ -758,29 +778,33 @@ class AutoRunner:
         # rtt='trigger': zamknij J-Link PRZED pomiarem (podłączony
         # debugger dodaje prąd); krótka chwila na uspokojenie.
         reader.detach()
-        time.sleep(1.0)
+        self._sleep_scaled(1.0)
         return None
 
     def _sleep_cancellable(self, seconds):
-        deadline = time.monotonic() + seconds
+        deadline = time.monotonic() + seconds / self._time_scale
         while time.monotonic() < deadline:
             self._check_cancel()
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
     def _countdown(self, idx, step, seconds):
         """Odliczanie do startu pomiaru (trigger delay): co ~0.5 s emituje
-        pozostały czas, żeby UI mogło pokazać odliczanie po flashu."""
-        deadline = time.monotonic() + seconds
+        pozostały czas, żeby UI mogło pokazać odliczanie po flashu.
+        W symulacji czekanie jest krótsze, ale ODLICZANIE pokazuje sekundy
+        z planu – przewija się po prostu tyle razy szybciej."""
+        scale = self._time_scale
+        deadline = time.monotonic() + seconds / scale
         while True:
             self._check_cancel()
-            remaining = deadline - time.monotonic()
+            remaining = (deadline - time.monotonic()) * scale
             if remaining <= 0:
                 break
             self._emit("countdown", idx, step.scenario,
                        data={"remaining_s": round(remaining, 1)})
             # Częściej niż raz na sekundę: pojedyncze zacięcie (GC, zajęte
-            # UI) nie zabiera wtedy całej sekundy z odliczania.
-            time.sleep(min(0.25, remaining))
+            # UI) nie zabiera wtedy całej sekundy z odliczania. `remaining`
+            # jest w sekundach PRZEBIEGU, więc na sen wraca przez skalę.
+            time.sleep(min(0.25, remaining / scale))
 
     def _start_monitor(self, idx, step, session_dir):
         """Uruchom monitor dongla, jeśli krok podał `monitor_port`. Gdy port
@@ -875,6 +899,10 @@ class AutoRunner:
 
         sampler.start()
         errors = 0
+        # Skala zegara: 1.0 na sprzęcie, `speedup` w symulacji. Okno i
+        # odliczanie liczą się wtedy w sekundach PRZEBIEGU, a nie realnych
+        # (atrapa oddaje próbki tyle razy szybciej).
+        scale = self._time_scale
         last_data = time.monotonic()
         sec_sum, sec_n = 0.0, 0
         expected_base = time.monotonic()
@@ -896,7 +924,7 @@ class AutoRunner:
                 if self.pause.is_set():
                     paused_s = self._do_pause(
                         sampler, writer, idx, step,
-                        time.monotonic() - expected_base)
+                        (time.monotonic() - expected_base) * scale)
                     expected_base += paused_s
                     next_status += paused_s
                     # Okno „teraz” przesuwamy tak samo i zaczynamy je od
@@ -909,7 +937,8 @@ class AutoRunner:
                 # KONIEC: zamknięte okno czasowe (pauzy się nie liczą) albo
                 # komplet próbek. Sprawdzamy PO pauzie, żeby Stop w UI nie
                 # skracał pomiaru.
-                if (time.monotonic() - expected_base >= step.duration_s
+                if ((time.monotonic() - expected_base) * scale
+                        >= step.duration_s
                         or writer.samples_written >= target):
                     break
                 time.sleep(READ_INTERVAL_S)
@@ -974,7 +1003,7 @@ class AutoRunner:
                     # Rozliczenie zgubionych próbek: ile powinno przyjść
                     # wg zegara vs ile przyszło (w jednostkach efektywnej
                     # częstotliwości; nadwyżka deficytu -> meta.gaps).
-                    wall_elapsed = now - expected_base
+                    wall_elapsed = (now - expected_base) * scale
                     expected = wall_elapsed * eff_rate
                     deficit = int(expected - writer.samples_written
                                   - reported_deficit)
@@ -1142,12 +1171,15 @@ class AutoRunner:
             self._set_voltage(voltage)
 
             self._emit("state", idx, step.scenario, "flash")
-            rc = self._run_streamed(
-                core.flash_cmd_for(scen, build_dir, self.profile),
-                workspace, f"flash {step.scenario}", idx, step.scenario,
-                log_file=run_log)
-            if rc != 0:
-                raise AutoRunError(f"flash zakończony błędem (kod {rc})")
+            flash_cmd = core.flash_cmd_for(scen, build_dir, self.profile)
+            if self.mock is not None:
+                self._mock_flash(flash_cmd, idx, step, run_log)
+            else:
+                rc = self._run_streamed(
+                    flash_cmd, workspace, f"flash {step.scenario}", idx,
+                    step.scenario, log_file=run_log)
+                if rc != 0:
+                    raise AutoRunError(f"flash zakończony błędem (kod {rc})")
 
             if step.power_cycle and not self.dry_run:
                 # Czysty zimny start: chwilowe odcięcie zasilania po
@@ -1155,7 +1187,7 @@ class AutoRunner:
                 self._note("power-cycle płytki (czysty start)", idx,
                            step.scenario, files=(run_log,))
                 self._sampler.dut_power(False)
-                time.sleep(0.5)
+                self._sleep_scaled(0.5)
                 self._sampler.dut_power(True)
                 self._dut_on = True
                 # Po odcięciu i podaniu zasilania regulator dostaje wartość
@@ -1167,6 +1199,13 @@ class AutoRunner:
             monitor = self._start_monitor(idx, step, session_dir)
             rtt_reader = self._wait_trigger(idx, step, session_dir,
                                             run_log, monitor)
+
+            # Symulacja: dostrój przebieg do TEGO kroku (podłoga ze
+            # scenariusza, odstęp wybudzeń z parametru serii, nowe
+            # losowanie retransmisji). Prawdziwy sampler tej metody nie ma.
+            prepare = getattr(self._sampler, "prepare_step", None)
+            if prepare is not None:
+                prepare(step, scen)
 
             self._emit("state", idx, step.scenario, "measure")
             self._emit("session", idx, step.scenario,
@@ -1251,6 +1290,20 @@ class AutoRunner:
                    detail=f"{step.duration_s:g} s (dry-run – bez pomiaru)")
         return StepResult(idx, step.scenario, "done")
 
+    def _mock_flash(self, cmd, idx, step, run_log):
+        """Flash w symulacji: komenda idzie do logu i do panelu tak jak
+        prawdziwa (zwijana sekcja wygląda bez zmian), ale nikt jej nie
+        wykonuje – nie ma płytki ani programatora."""
+        title = f"flash {step.scenario}"
+        header = f"$ {shlex.join(cmd)}"
+        self._log(f"{title}: {header}", files=(run_log,))
+        self._emit("cmd_start", idx, step.scenario, text=title)
+        self._emit("line", idx, step.scenario, header)
+        self._emit("line", idx, step.scenario,
+                   "[SYMULACJA] flash pominięty – bez płytki i programatora")
+        self._emit("cmd_end", idx, step.scenario,
+                   data={"rc": 0, "title": title})
+
     def _session_meta(self, idx, step, scen, voltage, build_dir):
         return {"plan": self.plan.name, "step": idx,
                 "step_label": step.label or str(idx),
@@ -1293,6 +1346,12 @@ class AutoRunner:
     def _append_csv(self, step, scen, voltage, summary, session_dir,
                     note="", build_dir=None):
         if not summary.get("samples"):
+            return
+        # Zmyślone µA nie mają prawa wejść do dziennika, z którego czytamy
+        # wyniki i rysujemy wykresy. Sesja zostaje (w sessions-mock), więc
+        # przebieg da się obejrzeć – po prostu nie ma go w pomiary.csv.
+        if self.mock is not None:
+            self._note("SYMULACJA: wynik NIE trafia do dziennika pomiarów")
             return
         # Domyślna 'uwaga': plan + (dla serii) sweepowany parametr i jego
         # wartość, żeby kolumna niosła treść nawet w widokach bez kolumn
@@ -1340,7 +1399,10 @@ class AutoRunner:
             raise AutoRunError("\n  ".join(
                 [f"błędy planu '{self.plan.name}':"] + errors))
 
-        sessions_root = core.CSV_PATH.parent / "sessions"
+        # Symulacja pisze do OSOBNEGO katalogu: prawdziwe dane pomiarowe
+        # zostają nietknięte, a sessions-mock można kasować bez myślenia.
+        sessions_root = core.CSV_PATH.parent / (
+            "sessions-mock" if self.mock is not None else "sessions")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if self.dry_run:
             self.run_dir = sessions_root / f"{stamp}_{self.plan.name}"
@@ -1362,11 +1424,18 @@ class AutoRunner:
                       f"krok(ów), profil {self.prof_name} "
                       f"({self.profile['board']}), egzemplarz "
                       f"{self.sample}")
+            if self.mock is not None:
+                self._note(f"SYMULACJA ({self.mock.summary}): bez PPK2, bez "
+                           "programatora i bez płytki. Liczby są zmyślone, "
+                           "sesje idą do sessions-mock, dziennik pomiarów "
+                           "zostaje nietknięty")
 
             # Blokada usypiania na cały przebieg (patrz INHIBIT_WHAT).
             # Brak blokady nie zatrzymuje pomiaru – tylko ostrzegamy, żeby
             # dało się później zrozumieć urwany strumień próbek.
-            if not self.dry_run:
+            # Symulacja trwa sekundy i nie ma czego chronić – blokady
+            # usypiania nie bierzemy (nie odpalamy procesu bez powodu).
+            if not self.dry_run and self.mock is None:
                 self._inhibitor = _SleepInhibitor(
                     f"pomiar prądu: plan {self.plan.name}")
                 what, why_not = self._inhibitor.start()
@@ -1381,7 +1450,9 @@ class AutoRunner:
             # Przebiegu NIE blokujemy – może startować z crona/SSH bez
             # nikogo przy klawiaturze – ale wpisujemy to do plan.log i
             # pokazujemy w UI, żeby wynik dał się później zinterpretować.
-            if not self.dry_run:
+            # W symulacji nie tykamy sondy, więc cudza sesja J-Linka nie ma
+            # jak zawyżyć pomiaru – ostrzeżenie byłoby tylko szumem.
+            if not self.dry_run and self.mock is None:
                 owners = core.jlink_owners()
                 if owners:
                     self._note("UWAGA: " + core.jlink_conflict_message(owners))
