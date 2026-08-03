@@ -127,6 +127,17 @@ Narzędzie odcina wtedy zasilanie płytki na pół sekundy po wgraniu obrazu.
 Odznacz go, gdy firmware przenosi stan przez podtrzymaną sekcję RAM.
 Odcięcie zasilania kasuje taki blok, więc pierwszy cykl wychodzi zimny.
 
+**Przycisk „x1” w nagłówku karty** ustawia krotność pomiaru.
+Klik przestawia go x1 → x2 → … → x5, a po x5 wraca do x1.
+Krotność `xK` wykonuje ten pomiar K razy, jako K osobnych pomiarów.
+Każda powtórka ma własny flash, katalog sesji i wiersz w dzienniku.
+Etykiety powtórek to `N/1, N/2, …`, a w serii `N.M/1, N.M/2, …`.
+Powtórki jednego ustawienia idą obok siebie, także w serii.
+Obraz jest ten sam, więc narzędzie buduje go raz i tylko flashuje ponownie.
+Krotność działa w każdym protokole i przenosi ją „Zastosuj do …”.
+Powtarzaj pomiary, gdy szukasz rozrzutu — ten sam kod potrafi dać
+7 µA i 28 µA, jeśli w oknie pomiaru wypadnie inna liczba retransmisji.
+
 „Start pomiaru po czasie” i „Konsola RTT” są schowane z widoku.
 Kod obu został na miejscu, tylko interfejs ich nie pokazuje.
 Pomiar rusza po stałym odczekaniu na rozruch płytki, bez konsoli RTT.

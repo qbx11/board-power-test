@@ -74,7 +74,9 @@ CSV_PATH = ROOT / "reports" / "pomiary.csv"
 # Wiersze ręczne zostawiają nowe pola puste – ensure_csv_schema()
 # dopisuje brakujące kolumny do starego pliku bez utraty danych.
 # pomiar_id/parametr/wartosc wypełnia tryb autonomiczny dla serii (sweep):
-# etykieta "N.M" oraz sweepowany symbol Kconfig i jego wartość. Seria po
+# etykieta "N.M" oraz sweepowany symbol Kconfig i jego wartość. Krotność
+# karty ('x1 … x5') dokłada do etykiety numer powtórki po ukośniku: "N/k",
+# w serii "N.M/k" – każda powtórka to osobny wiersz dziennika. Seria po
 # dwóch parametrach naraz zapisuje drugą oś w parametr2/wartosc2 – osobne
 # kolumny, żeby dało się sortować i filtrować po każdej osi z osobna.
 CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",

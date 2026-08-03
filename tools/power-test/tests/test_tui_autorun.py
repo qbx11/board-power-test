@@ -1160,6 +1160,179 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(second.get_config()["power_cycle"])
 
+    # ---------- krotność karty: 'x1' … 'x5' w nagłówku ----------
+
+    def _repeat_btn(self, card):
+        return card.query_one(".card-repeat", tui.RepeatButton)
+
+    async def test_krotnosc_domyslnie_x1(self):
+        # Domyślnie jeden pomiar – przycisk pokazuje 'x1' i plan ma jeden
+        # krok z etykietą bez sufiksu powtórki.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            btn = self._repeat_btn(card)
+            self.assertEqual(str(btn.label), "x1")
+            self.assertFalse(btn.has_class("on"))
+            self.assertEqual(card.get_config()["repeat"], 1)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            await pilot.pause()
+            steps = app._build_auto_plan("btz").steps
+            self.assertEqual([s.label for s in steps], ["1"])
+
+    async def test_klik_krazy_x1_do_x5_i_wraca(self):
+        # Klik przestawia krotność o jeden, a po x5 wraca do x1 – jeden
+        # przycisk zamiast pola liczbowego, więc musi się domykać w cykl.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            btn = self._repeat_btn(card)
+            seen = []
+            for _ in range(6):
+                btn.scroll_visible(animate=False)
+                await pilot.pause()
+                await pilot.click(btn)
+                await pilot.pause()
+                seen.append((str(btn.label), card.get_config()["repeat"]))
+            self.assertEqual(seen, [("x2", 2), ("x3", 3), ("x4", 4),
+                                    ("x5", 5), ("x1", 1), ("x2", 2)])
+            # Krotność > 1 wyróżniona, bo zmienia czas całego przebiegu.
+            self.assertTrue(btn.has_class("on"))
+            btn.count = 1
+            await pilot.pause()
+            self.assertFalse(btn.has_class("on"))
+
+    @staticmethod
+    def _head_line(app):
+        """Wiersz nagłówka pierwszej karty tak, jak WIDZI go użytkownik –
+        z kompozytora, nie z atrybutów widgetu."""
+        import io
+
+        from rich.console import Console
+        con = Console(file=io.StringIO(), width=100, height=45,
+                      legacy_windows=False)
+        con.print(app.screen._compositor)
+        for line in con.file.getvalue().splitlines():
+            if "Pomiar 1" in line:
+                return line
+        return ""
+
+    async def test_krotnosc_zostaje_widoczna_po_najechaniu_i_kliknieciu(self):
+        # REGRESJA: reguły Button:hover / Button:focus / Button.-active z CSS
+        # aplikacji są wyżej w specyficzności niż sama klasa przycisku, więc
+        # po najechaniu i po kliknięciu wracała 'border: round'. Nagłówek
+        # karty ma wysokość jednego wiersza, więc zamiast napisu widać było
+        # górną krawędź ramki: 'x2' zamieniało się w '╭──╮'.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(100, 45)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            btn = self._repeat_btn(card)
+            btn.scroll_visible(animate=False)
+            await pilot.pause()
+            self.assertIn("x1", self._head_line(app))
+            await pilot.hover(btn)
+            await pilot.pause()
+            self.assertIn("x1", self._head_line(app), "hover zjadł napis")
+            await pilot.click(btn)
+            await pilot.pause()
+            await pilot.pause()
+            head = self._head_line(app)
+            self.assertIn("x2", head, "klik zjadł napis")
+            # Żadnej ramki w wierszu nagłówka – ta jedna linia należy do
+            # ramki KARTY, więc narożnik może w niej być tylko po bokach.
+            self.assertNotIn("╭", head)
+            self.assertNotIn("╮", head.rstrip()[:-1])
+
+    async def test_krotnosc_daje_osobne_kroki_w_planie(self):
+        # x3 to TRZY osobne kroki (osobny flash, osobna sesja, osobny
+        # wiersz w raporcie), a nie jeden dłuższy pomiar.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            self._repeat_btn(card).count = 3
+            await pilot.pause()
+            steps = app._build_auto_plan("btz").steps
+            self.assertEqual([s.label for s in steps], ["1/1", "1/2", "1/3"])
+            self.assertTrue(all(s.scenario == "zwykly" for s in steps))
+            self.assertTrue(all(s.duration_s == 30 for s in steps))
+
+    async def test_krotnosc_dziala_w_kazdym_protokole(self):
+        # Przycisk leży w nagłówku karty, POZA zakładkami – więc jest ten
+        # sam w BLE Mesh, Thread i Zigbee (Thread wymaga jeszcze Node ID
+        # Mattera, bo tam pomiar rusza na raporcie z subskrypcji).
+        for proto in ("ble_mesh", "thread", "zigbee"):
+            app = tui.PowerTestApp()
+            async with app.run_test(size=(120, 70)) as pilot:
+                await pilot.click("#mode-label-auto")
+                await pilot.pause()
+                card = self._card(app)
+                await self._proto(pilot, card, proto)
+                card.query_one(".card-scenario", Select).value = "zwykly"
+                card.query_one(".card-duration", Input).value = "30s"
+                if proto == "thread":
+                    card.field(".card-chip-node").value = "5"
+                    card.field(".card-chip-disc").value = "3840"
+                self._repeat_btn(card).count = 2
+                await pilot.pause()
+                steps = app._build_auto_plan("btz").steps
+                self.assertEqual([s.label for s in steps], ["1/1", "1/2"],
+                                 msg=proto)
+
+    async def test_krotnosc_z_seria_klei_powtorki_obok_siebie(self):
+        # Seria ×3 z krotnością x2: kolejność 1.1/1, 1.1/2, 1.2/1, … –
+        # powtórki tego samego ustawienia lecą jedna po drugiej.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            await self._proto(pilot, card, "ble_mesh")
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "10m"
+            card.field(".card-sweep-param").value = \
+                "CONFIG_LPN_SENSOR_INTERVAL_S"
+            card.field(".card-sweep-values").value = "1, 5, 10"
+            self._repeat_btn(card).count = 2
+            await pilot.pause()
+            steps = app._build_auto_plan("btz").steps
+            self.assertEqual([s.label for s in steps],
+                             ["1.1/1", "1.1/2", "1.2/1", "1.2/2",
+                              "1.3/1", "1.3/2"])
+            self.assertEqual([s.sweep[0][1] for s in steps],
+                             ["1", "1", "5", "5", "10", "10"])
+
+    async def test_krotnosc_przenosi_sie_i_dziedziczy(self):
+        # 'Zastosuj do wszystkich' niesie krotność jak resztę ustawień,
+        # a nowa karta dziedziczy ją po poprzedniej.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second = list(app.query(tui.MeasurementCard))
+            self._repeat_btn(first).count = 4
+            await pilot.pause()
+            app._apply_to_all(first.query_one(".card-apply", tui.Button))
+            await pilot.pause()
+            self.assertEqual(second.get_config()["repeat"], 4)
+            self.assertEqual(str(self._repeat_btn(second).label), "x4")
+            app.add_measurement()
+            await pilot.pause()
+            third = list(app.query(tui.MeasurementCard))[-1]
+            self.assertEqual(third.get_config()["repeat"], 4)
+
 
 class LostSamplesWarningTest(unittest.TestCase):
     """Od kiedy okno pomiaru zamyka zegar, zgubione próbki nie objawiają

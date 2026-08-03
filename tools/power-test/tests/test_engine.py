@@ -801,6 +801,35 @@ class EngineTest(unittest.TestCase):
                          [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
                            "value": "2"}])
 
+    def test_krotnosc_daje_osobne_pomiary_z_jednego_builda(self):
+        # Krotność karty ('x3'): powtórka to PEŁNY krok – własny flash,
+        # własny katalog sesji i własny wiersz w dzienniku – ale obraz jest
+        # ten sam, więc build leci raz.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="zwykly", duration_s=0.15, label="1",
+                              power_cycle=True,
+                              trigger=planmod.Trigger(type="delay",
+                                                      seconds=0))], 3)
+        results = self._run(planmod.Plan(name="powt", board="btz",
+                                         steps=steps))
+        self.assertEqual([r.status for r in results], ["done"] * 3)
+        self.assertEqual([r.label for r in results], ["1/1", "1/2", "1/3"])
+        # Trzy OSOBNE sesje na dysku, każda z własnymi danymi.
+        dirs = [r.session_dir for r in results]
+        self.assertEqual(len(set(dirs)), 3)
+        self.assertTrue(all((d / "meta.json").is_file() for d in dirs))
+        cmds = self.env.commands()
+        self.assertEqual(len([c for c in cmds if c.startswith("west build")]),
+                         1, "powtórka nie powinna budować drugi raz")
+        self.assertEqual(len([c for c in cmds if c.startswith("west flash")]),
+                         3, "każda powtórka ma swój flash")
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([r["pomiar_id"] for r in rows], ["1/1", "1/2", "1/3"])
+        # Powtórka nie jest serią – kolumny parametrów zostają puste.
+        self.assertTrue(all(not r["parametr"] and not r["wartosc"]
+                            for r in rows))
+
     def test_flash_wymusza_reset_i_erase(self):
         # REGRESJA: bez --reset J-Link zostawia układ w stanie po
         # programowaniu (firmware nie startuje), więc pomiar łapie stary

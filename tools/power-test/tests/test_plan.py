@@ -439,6 +439,60 @@ class SweepTest(unittest.TestCase):
         plan = planmod.Plan(name="t", board="btz", steps=steps)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
+    def test_expand_repeats(self):
+        # Krotność karty ('x3'): ten sam krok trzy razy, każdy z własną
+        # etykietą 'N/k'. Ukośnik, nie kropka – kropka jest zajęta przez
+        # serię, więc po etykiecie widać, co jest czym.
+        base = planmod.PlanStep(scenario="app", duration_s=600, label="2",
+                                build_extra_args=["-DCONFIG_LOG=n"])
+        steps = planmod.expand_repeats([base], 3)
+        self.assertEqual([s.label for s in steps], ["2/1", "2/2", "2/3"])
+        # Powtórka jest KOPIĄ: cała reszta pól bez zmian, także flagi builda
+        # (ten sam obraz -> silnik buduje raz, ale flashuje przed każdym).
+        self.assertTrue(all(s.scenario == "app" for s in steps))
+        self.assertTrue(all(s.duration_s == 600 for s in steps))
+        self.assertTrue(all(s.build_extra_args == ["-DCONFIG_LOG=n"]
+                            for s in steps))
+        self.assertIsNot(steps[0], steps[1])
+        # x1 (i mniej) zostawia krok w spokoju – bez sufiksu '/1', żeby
+        # zwykły pomiar wyglądał w raporcie jak dotąd.
+        for count in (1, 0, -2):
+            self.assertEqual([s.label
+                              for s in planmod.expand_repeats([base], count)],
+                             ["2"])
+        # Powyżej limitu UI obcinamy do REPEAT_MAX.
+        self.assertEqual(len(planmod.expand_repeats([base], 99)),
+                         planmod.REPEAT_MAX)
+
+    def test_expand_repeats_po_serii_klei_powtorki_obok_siebie(self):
+        # Seria ×2 z krotnością x3 daje A A A B B B, nie A B A B A B:
+        # powtórki jednego ustawienia mierzą się w najbliższych sobie
+        # warunkach, więc widoczny rozrzut jest rozrzutem POMIARU.
+        steps = planmod.expand_repeats(
+            planmod.expand_sweep(3, [("CONFIG_P", "10, 20")],
+                                 dict(scenario="app", duration_s=60)), 3)
+        self.assertEqual([s.label for s in steps],
+                         ["3.1/1", "3.1/2", "3.1/3",
+                          "3.2/1", "3.2/2", "3.2/3"])
+        self.assertEqual([s.sweep[0][1] for s in steps],
+                         ["10", "10", "10", "20", "20", "20"])
+
+    def test_expand_repeats_bez_etykiety_numeruje_od_pozycji(self):
+        # Kroki spoza kreatora (plan z TOML) etykiety nie mają – powtórka
+        # nie może wyjść jako '/2', bo taki wiersz nic nie mówi.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="app", duration_s=1),
+             planmod.PlanStep(scenario="app", duration_s=1)], 2)
+        self.assertEqual([s.label for s in steps],
+                         ["1/1", "1/2", "2/1", "2/2"])
+
+    def test_repeated_steps_validate_against_manifest(self):
+        # Powtórki to zwykłe PlanStep – przechodzą walidację planu.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="app", duration_s=60, label="1")], 3)
+        plan = planmod.Plan(name="t", board="btz", steps=steps)
+        self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
+
     def test_sweep_on_hex_scenario_rejected(self):
         # Sweep (build_extra_args) na scenariuszu 'hex' -> błąd walidacji,
         # z etykietą kroku "N.M".

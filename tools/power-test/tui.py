@@ -41,6 +41,10 @@ from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
 
 import power_test as core
 
+# Limit krotności karty ('x1 … x5') trzyma plan – tam też rozwijają się
+# powtórki na osobne kroki, więc UI nie ma własnej, drugiej prawdy.
+from autorun.plan import REPEAT_MAX
+
 # Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
 # pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
 # jest edytowalne; to tylko wygodna wartość startowa dla typowego setupu.
@@ -198,6 +202,39 @@ class CardTitle(Static):
             card = card.parent
         if card is not None:
             card.toggle_collapsed()
+
+
+class RepeatButton(Button):
+    """Krotność w nagłówku karty 'Pomiar N': klik przestawia x1 -> x2 -> …
+    -> x5 -> x1. x1 to jeden pomiar (jak dotąd), xK to K OSOBNYCH pomiarów
+    tej samej karty, jeden po drugim – każdy z własnym flashem, oknem
+    pomiaru, katalogiem sesji i wierszem w raporcie. Wspólne dla
+    protokołów, dlatego siedzi w nagłówku, a nie w zakładce."""
+
+    def __init__(self, count=1, **kwargs):
+        super().__init__(classes="card-repeat", **kwargs)
+        self.count = count
+
+    @property
+    def count(self):
+        return self._count
+
+    @count.setter
+    def count(self, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = 1
+        self._count = max(1, min(value, REPEAT_MAX))
+        self.label = f"x{self._count}"
+        # Krotność > 1 wyróżniamy, bo zmienia CZAS przebiegu – przy dwóch
+        # cyfrach w kolumnie kart musi być widać, która karta jedzie kilka
+        # razy, bez czytania każdej z bliska.
+        self.set_class(self._count > 1, "on")
+
+    def bump(self):
+        """Następna krotność w cyklu; po x5 wracamy do x1."""
+        self.count = 1 if self._count >= REPEAT_MAX else self._count + 1
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -1080,6 +1117,10 @@ class MeasurementCard(Vertical):
         opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
         with Horizontal(classes="card-head"):
             yield CardTitle(f"▼ Pomiar {self.number}", classes="card-title")
+            # Krotność w nagłówku, nie w zaawansowanych: widać ją także na
+            # zwiniętej karcie, więc czas całego planu da się oszacować
+            # jednym spojrzeniem na listę pomiarów.
+            yield RepeatButton(c.get("repeat", 1))
             yield CardDelete(self.uid)
         # Ciało karty (chowane przy zwinięciu). Selecty MUSZĄ powstać jako
         # widoczne – Select zamontowany od razu jako display:none nie tworzy
@@ -1332,6 +1373,14 @@ class MeasurementCard(Vertical):
         self._sync_advanced()
         event.stop()
 
+    def on_button_pressed(self, event):
+        # Krotność obsługujemy TU i zatrzymujemy zdarzenie – klik zmienia
+        # tylko tę kartę. Przyciski „Zastosuj do …” zostawiamy w spokoju:
+        # bez event.stop() lecą dalej, do App.on_button_pressed.
+        if isinstance(event.button, RepeatButton):
+            event.button.bump()
+            event.stop()
+
     def on_tabbed_content_tab_activated(self, event):
         # Każda zakładka ma własne pola serii, więc zmiana protokołu zmienia
         # też serię – dopisek o niej w tytule musi za tym nadążyć.
@@ -1562,6 +1611,7 @@ class MeasurementCard(Vertical):
             "sample_rate": self.query_one(".card-rate", Select).value,
             "power_cycle": self.query_one(".card-power-cycle",
                                           Checkbox).value,
+            "repeat": self.query_one(".card-repeat", RepeatButton).count,
         }
 
     def apply_shared(self, cfg):
@@ -1605,6 +1655,7 @@ class MeasurementCard(Vertical):
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
         self.query_one(".card-power-cycle", Checkbox).value = cfg["power_cycle"]
+        self.query_one(".card-repeat", RepeatButton).count = cfg["repeat"]
         self._sync_advanced()
         self._refresh_title()
 
@@ -1888,8 +1939,15 @@ class AutoRunScreen(Screen):
 
     @staticmethod
     def _step_label(ev):
-        """Etykieta kroku do wyświetlenia: 'N.M' dla serii, inaczej numer."""
+        """Etykieta kroku do wyświetlenia: 'N.M' dla serii, 'N/k' dla
+        powtórki, inaczej numer."""
         return ev.data.get("label") or str(ev.step)
+
+    def _step_of(self, ev):
+        """'3/2 z 6' – etykieta kroku i liczba kroków planu. Ukośnik jest
+        zajęty przez numer powtórki, więc miejsca w planie NIE dopisujemy
+        drugim ukośnikiem ('3/2/6' czytało się jak trzy poziomy)."""
+        return f"{self._step_label(ev)} z {self._n_steps}"
 
     @staticmethod
     def _sweep_str(sweep):
@@ -1963,8 +2021,7 @@ class AutoRunScreen(Screen):
         self.pause.clear()
         self.query_one("#stop_measure", Button).label = "Stop"
         sweep = self._sweep_str(ev.data.get("sweep"))
-        head = (f"[b]POMIAR[/b] · Pomiar {self._step_label(ev)}/"
-                f"{self._n_steps} · {ev.name}")
+        head = f"[b]POMIAR[/b] · Pomiar {self._step_of(ev)} · {ev.name}"
         if sweep:
             head += f" · {sweep}"
         self.query_one("#measure-head", Static).update(head)
@@ -2005,8 +2062,7 @@ class AutoRunScreen(Screen):
         btn = self.query_one("#stop_measure", Button)
         sweep = self._sweep_str(ev.data.get("sweep"))
         tail = f" · {sweep}" if sweep else ""
-        base = (f"Pomiar {self._step_label(ev)}/{self._n_steps} · "
-                f"{ev.name}{tail}")
+        base = f"Pomiar {self._step_of(ev)} · {ev.name}{tail}"
         if paused:
             head.update(f"[b]PAUZA[/b] · {base}"
                         f"  (śr {self._fmt_uA(ev.data.get('avg_uA'))})")
@@ -2152,6 +2208,21 @@ class PowerTestApp(App):
     .card-title:hover { color: #bbbbbb; }
     .card-del { width: 3; content-align: center middle; color: #666666; }
     .card-del:hover { background: #333333; color: $text; }
+    /* Krotność karty: przycisk bez ramki i tła, żeby nagłówek (wysoki na
+       jeden wiersz) został linią tekstu, a nie paskiem widgetów. */
+    .card-repeat { width: 4; min-width: 0; height: 1; padding: 0;
+                   border: none; background: transparent; color: #666666;
+                   text-style: none; }
+    /* REGRESJA: ramkę trzeba zdjąć JAWNIE w każdym stanie. Reguły
+       Button:hover / Button:focus / Button.-active są wyżej w
+       specyficzności niż sama klasa, więc po najechaniu i po kliknięciu
+       wracała 'border: round' – a w nagłówku wysokim na jeden wiersz
+       widać wtedy górną krawędź ramki zamiast napisu ('x2' -> '╭──╮').
+       Podświetlenie zostaje, tylko robi je tło, nie ramka. */
+    .card-repeat:hover, .card-repeat:focus, .card-repeat.-active {
+                   border: none; background: #333333; color: $text; }
+    .card-repeat.on, .card-repeat.on:hover, .card-repeat.on:focus,
+    .card-repeat.on.-active { color: $text; text-style: bold; }
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
@@ -2808,7 +2879,8 @@ class PowerTestApp(App):
         płytki – bierze WIĘKSZY z dwóch czasów, nie sumę, więc tutaj nic
         nie doliczamy."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
-                                  Trigger, expand_sweep, parse_duration)
+                                  Trigger, expand_repeats, expand_sweep,
+                                  parse_duration)
 
         pristine = self.query_one("#pristine", Checkbox).value
         cards = list(self.query(MeasurementCard))
@@ -2904,12 +2976,16 @@ class PowerTestApp(App):
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
                 # Druga oś opcjonalna – wypełniona daje iloczyn kartezjański.
                 try:
-                    steps.extend(expand_sweep(
-                        card.number, _sweep_axes(c), base))
+                    card_steps = expand_sweep(
+                        card.number, _sweep_axes(c), base)
                 except ValueError as e:
                     raise ValueError(f"Pomiar {card.number}: {e}")
             else:
-                steps.append(PlanStep(label=str(card.number), **base))
+                card_steps = [PlanStep(label=str(card.number), **base)]
+            # Krotność ('x1 … x5' w nagłówku karty) na końcu, bo mnoży to,
+            # co karta już wyprodukowała: przy serii każda wartość dostaje
+            # swoje powtórki obok siebie (N.1/1, N.1/2, N.2/1, …).
+            steps.extend(expand_repeats(card_steps, c["repeat"]))
         return Plan(name="interfejs", board=prof_name, steps=steps)
 
 

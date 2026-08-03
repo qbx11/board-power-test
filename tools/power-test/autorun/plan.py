@@ -11,7 +11,7 @@ import itertools
 import re
 import shlex
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 RTT_MODES = ("off", "trigger", "continuous")
@@ -282,6 +282,43 @@ def expand_sweep(number, axes, base):
                                            for s, v in pairs],
             label=f"{number}.{j}", sweep=pairs, **common))
     return steps
+
+
+# ------------------------------------------------------------
+#  Krotność karty ("x1 … x5" w nagłówku 'Pomiar N'): ten sam pomiar
+#  powtórzony kilka razy, ZAWSZE jako osobne kroki – osobny flash, osobne
+#  okno pomiaru, osobny katalog sesji i osobny wiersz w raporcie. Stąd
+#  bierze się rozrzut pomiaru (patrz 7 µA vs 28 µA na tych samych
+#  ustawieniach), więc powtórki muszą być widoczne jako oddzielne liczby,
+#  a nie uśrednione w jedną.
+#
+#  Powtórki idą OBOK SIEBIE: seria [A, B] ×3 to A A A B B B. Dzięki temu
+#  powtórki jednego ustawienia mierzą się w najbliższych sobie warunkach –
+#  rozrzut, który widać, jest rozrzutem pomiaru, a nie dryfem otoczenia
+#  między początkiem i końcem przebiegu.
+# ------------------------------------------------------------
+
+REPEAT_MAX = 5          # dalej klik wraca do x1 (limit UI i tej funkcji)
+
+
+def expand_repeats(steps, count):
+    """Powtórz każdy krok `count` razy, powtórki obok siebie. Etykieta
+    dostaje sufiks '/k' ('3' -> '3/1, 3/2', seria '3.2' -> '3.2/1, 3.2/2') –
+    kropka zostaje zarezerwowana dla serii, więc z etykiety widać, co jest
+    wartością parametru, a co numerem powtórki. `count` <= 1 zwraca kroki
+    bez zmian i BEZ sufiksu, żeby zwykły pomiar wyglądał jak dotąd; powyżej
+    REPEAT_MAX obcinamy do limitu. Kroki są kopiowane (dataclasses.replace),
+    więc każdy ma własną etykietę, a resztę pól dzieli z pierwowzorem."""
+    steps = list(steps)
+    count = min(int(count), REPEAT_MAX)
+    if count <= 1:
+        return steps
+    out = []
+    for i, step in enumerate(steps, 1):
+        base_label = step.label or str(i)
+        for k in range(1, count + 1):
+            out.append(replace(step, label=f"{base_label}/{k}"))
+    return out
 
 
 @dataclass
