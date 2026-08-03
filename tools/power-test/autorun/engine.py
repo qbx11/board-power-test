@@ -177,6 +177,10 @@ def default_serial_factory(port):
     return SerialLineReader(port)
 
 
+def default_chip_factory(cmd, engine, log_path, idx, scenario):
+    return _ChipSession(cmd, engine, log_path, idx, scenario)
+
+
 # Dongiel buforuje logi, dopóki nikt nie trzyma portu otwartego – build
 # trwa minuty, a USB CDC pamięta – i wyrzuca cały bufor w momencie otwarcia
 # portu. Te linie powstały PRZED flashem (stara firmware, stary krok serii),
@@ -366,8 +370,9 @@ class _ChipSession:
 class AutoRunner:
 
     def __init__(self, plan, manifest, sample, *, sampler_factory=None,
-                 rtt_factory=None, serial_factory=None, event_cb=None,
-                 cancel=None, pause=None, dry_run=False, mock=None):
+                 rtt_factory=None, serial_factory=None, chip_factory=None,
+                 event_cb=None, cancel=None, pause=None, dry_run=False,
+                 mock=None):
         self.plan = plan
         self.manifest = manifest
         self.sample = sample
@@ -375,12 +380,17 @@ class AutoRunner:
         # patrz autorun/mock.py. Domyślne fabryki wskazują wtedy atrapy, ale
         # jawnie podana fabryka ma pierwszeństwo (testy podstawiają własne).
         self.mock = mock
-        if mock is not None and sampler_factory is None:
-            from .mock import mock_sampler_factory
-            sampler_factory = mock_sampler_factory(mock)
+        if mock is not None:
+            from .mock import mock_factories
+            m_sampler, m_rtt, m_serial, m_chip = mock_factories(mock, self)
+            sampler_factory = sampler_factory or m_sampler
+            rtt_factory = rtt_factory or m_rtt
+            serial_factory = serial_factory or m_serial
+            chip_factory = chip_factory or m_chip
         self.sampler_factory = sampler_factory or default_sampler_factory
         self.rtt_factory = rtt_factory or default_rtt_factory
         self.serial_factory = serial_factory or default_serial_factory
+        self.chip_factory = chip_factory or default_chip_factory
         self.event_cb = event_cb or (lambda ev: None)
         self.cancel = cancel or threading.Event()
         # pause: gdy ustawiony, pętla pomiaru wstrzymuje sampler i zamraża
@@ -412,6 +422,9 @@ class AutoRunner:
         # ustawiana w _wait_trigger, zamykana w _run_step (finally), żeby
         # subskrypcja żyła przez cały pomiar i została ubita po nim.
         self._chip = None
+        # Krok wykonywany w tej chwili (ustawiany w _run_step) – czytają go
+        # atrapy logu w symulacji, patrz autorun/mock.py.
+        self._cur_step = None
 
     # ---------- pomocnicze ----------
 
@@ -714,8 +727,8 @@ class AutoRunner:
             # PRZED chip.start(), żeby linie z wątku drenującego trafiły do niej.
             title = f"chip {step.scenario}: parowanie + subskrypcja"
             self._emit("cmd_start", idx, step.scenario, text=title)
-            chip = _ChipSession(cmd, self, session_dir / "chip.log",
-                                idx, step.scenario)
+            chip = self.chip_factory(cmd, self, session_dir / "chip.log",
+                                     idx, step.scenario)
             chip.start()
             try:
                 chip.wait_first_value(trig.timeout_s + CHIP_PAIR_ALLOWANCE_S,
@@ -1140,6 +1153,10 @@ class AutoRunner:
         # Kontekst dla _emit: etykieta "N.M" (albo numer) i para sweepa.
         self._cur_label = step.label or str(idx)
         self._cur_sweep = _sweep_payload(step)
+        # Krok wykonywany TERAZ – atrapy logu (symulacja) czytają z niego
+        # wzorzec triggera i reguły etykiet, bo ich fabryki dostają tylko
+        # port albo profil płytki.
+        self._cur_step = step
         self._emit("step_start", idx, step.scenario,
                    data={"duration_s": step.duration_s,
                          "voltage": voltage})

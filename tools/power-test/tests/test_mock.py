@@ -150,9 +150,12 @@ class MockRunTest(unittest.TestCase):
         self.addCleanup(setattr, eng, name, old)
 
     def _run(self, plan, speedup=100.0, seed=5):
+        # Żadnych atrap testowych: silnik ma sam podstawić wszystkie
+        # atrapy symulacji (sampler, dongiel, RTT, chip). Podanie tu
+        # rtt_factory zasłoniłoby atrapę mocka – jawne fabryki mają
+        # pierwszeństwo.
         runner = AutoRunner(
             plan, self.manifest, "BTZ #1",
-            rtt_factory=lambda prof: FakeRttReader(),
             event_cb=self.events.append,
             cancel=threading.Event(),
             mock=mockmod.MockConfig(speedup=speedup, seed=seed))
@@ -222,19 +225,30 @@ class MockRunTest(unittest.TestCase):
         # poszłoby na płytkę.
         self.assertTrue(any("west flash" in t for t in lines))
 
-    def test_powtorki_daja_rozne_srednie(self):
-        # x3 w karcie -> trzy osobne pomiary; na mocku muszą się różnić,
-        # inaczej nie da się na nim pracować nad rozrzutem.
+    def test_powtorki_dostaja_swieze_losowanie(self):
+        # x3 w karcie -> trzy osobne pomiary, każdy z NOWYM losowaniem
+        # retransmisji. Sprawdzamy mechanizm (trzy różne ziarna), a nie
+        # same średnie: przy oknie krótszym od kilku cykli wybudzeń średnia
+        # przyjmuje kilka dyskretnych wartości i dwa przebiegi mogą wyjść
+        # identyczne przez przypadek. Rozrzut samego modelu (długie okno)
+        # pilnuje MockWaveformTest.
         steps = planmod.expand_repeats(
             [planmod.PlanStep(scenario="zwykly", duration_s=20.0, label="1",
                               trigger=planmod.Trigger(type="delay",
                                                       seconds=0))], 3)
-        results = self._run(planmod.Plan(name="mock", board="btz",
-                                         steps=steps), seed=None)
+        sampler = mockmod.MockSampler(mockmod.MockConfig(speedup=100.0))
+        runner = AutoRunner(
+            planmod.Plan(name="mock", board="btz", steps=steps),
+            self.manifest, "BTZ #1",
+            sampler_factory=lambda p: sampler,
+            event_cb=self.events.append,
+            mock=mockmod.MockConfig(speedup=100.0))
+        results = runner.run()
         self.assertEqual([r.status for r in results], ["done"] * 3)
         self.assertEqual([r.label for r in results], ["1/1", "1/2", "1/3"])
-        avgs = [r.summary["avg_uA"] for r in results]
-        self.assertEqual(len(set(avgs)), 3, avgs)
+        seeds = [entry for entry in sampler.log if entry.startswith("step ")]
+        self.assertEqual(len(seeds), 3, seeds)
+        self.assertEqual(len(set(seeds)), 3, seeds)
 
     def test_sweep_daje_malejaca_krzywa(self):
         steps = planmod.expand_sweep(
@@ -262,6 +276,74 @@ class MockRunTest(unittest.TestCase):
         self.assertTrue(remaining)
         self.assertGreater(max(remaining), 30.0, remaining[:5])
         self.assertLessEqual(max(remaining), 60.0)
+
+    # ---------- triggery: bez atrap każdy krok padłby na timeout ----------
+
+    def test_trigger_z_logu_dongla(self):
+        results = self._run(self._plan(
+            duration_s=20.0, monitor_port="/dev/ttyMOCK",
+            trigger=planmod.Trigger(type="serial",
+                                    pattern="friendship z 0x0001",
+                                    timeout_s=30.0)))
+        self.assertEqual(results[0].status, "done")
+        # Linia z wzorcem poszła do logu dongla sesji i do panelu.
+        dongle = (results[0].session_dir / "dongle.log").read_text()
+        self.assertIn("friendship z 0x0001", dongle)
+        monitor = [ev.text for ev in self.events if ev.kind == "monitor"]
+        self.assertTrue(any("friendship z 0x0001" in t for t in monitor),
+                        monitor)
+        # Bufor sprzed flasha nie może zjeść linii triggera: atrapa milczy
+        # na starcie, więc drenaż nic nie wyrzuca.
+        self.assertFalse(any("przed flashem" in t for t in monitor), monitor)
+
+    def test_trigger_z_konsoli_rtt(self):
+        results = self._run(self._plan(
+            duration_s=20.0, rtt="trigger",
+            trigger=planmod.Trigger(type="rtt", pattern="friendship",
+                                    timeout_s=30.0)))
+        self.assertEqual(results[0].status, "done")
+        rtt_log = (results[0].session_dir / "rtt.log").read_text()
+        self.assertIn("friendship", rtt_log)
+
+    def test_etykiety_rtt_continuous(self):
+        # rtt='continuous': atrapa wypisuje wzorce reguł, więc w sesji
+        # powstają adnotacje – da się pracować nad ich wyświetlaniem.
+        results = self._run(self._plan(
+            duration_s=20.0, rtt="continuous",
+            labels=[planmod.LabelRule(pattern="publikacja temperatury",
+                                      label="publikacja")],
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        marks = [ev.text for ev in self.events if ev.kind == "annotation"]
+        self.assertTrue(marks, "brak adnotacji z etykiet RTT")
+
+    def test_trigger_mattera(self):
+        # Zakładka Thread: pomiar rusza na pierwszym raporcie subskrypcji.
+        self._patch_engine("CHIP_START_SETTLE_S", 0.2)
+        results = self._run(self._plan(
+            duration_s=20.0,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    discriminator="3840", dataset="0e08",
+                                    timeout_s=30.0)))
+        self.assertEqual(results[0].status, "done")
+        chip_log = (results[0].session_dir / "chip.log").read_text()
+        self.assertIn("subscription established", chip_log)
+        self.assertIn("FIRST-VALUE", chip_log)
+        notes = " | ".join(self._notes())
+        self.assertIn("pierwsza wartość", notes)
+
+    def test_atrapy_nie_wchodza_gdy_nie_ma_mocka(self):
+        # Fabryki podane jawnie mają pierwszeństwo nad atrapami symulacji
+        # (na tym stoją wszystkie pozostałe testy silnika).
+        marker = object()
+        runner = AutoRunner(self._plan(), self.manifest, "BTZ #1",
+                            chip_factory=lambda *a: marker,
+                            mock=mockmod.MockConfig())
+        self.assertIs(runner.chip_factory("c", None, None, 1, "s"), marker)
+        # Bez mocka: prawdziwe fabryki.
+        plain = AutoRunner(self._plan(), self.manifest, "BTZ #1")
+        self.assertIs(plain.chip_factory, eng.default_chip_factory)
+        self.assertIs(plain.serial_factory, eng.default_serial_factory)
 
     def test_bez_mocka_nic_sie_nie_zmienia(self):
         # Skala czasu poza symulacją to 1.0, a sesje wracają do
