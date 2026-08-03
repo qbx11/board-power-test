@@ -1161,6 +1161,16 @@ class MeasurementCard(Vertical):
                               ("1", 1)],
                              value=c.get("sample_rate", 100000),
                              allow_blank=False, classes="card-rate")
+                # Power-cycle = krótkie odcięcie VOUT po flashu. Domyślnie
+                # włączony, bo daje czysty zimny start (stan z sesji
+                # programowania nie zostaje). Odznacz, gdy firmware przenosi
+                # stan przez podtrzymaną sekcję RAM (System OFF + retencja):
+                # odcięcie zasilania kasuje ten blok, więc pierwszy cykl
+                # wychodzi zimny nawet wtedy, gdy miał być ciepły.
+                yield Check("Power-cycle po flashu "
+                            "(zimny start; odznacz, by zachować retencję RAM)",
+                            value=c.get("power_cycle", True),
+                            classes="card-power-cycle")
             with Horizontal(classes="card-apply-row"):
                 yield Button("Zastosuj do wszystkich", classes="card-apply")
                 yield Button("Zastosuj do następnych",
@@ -1550,6 +1560,8 @@ class MeasurementCard(Vertical):
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
+            "power_cycle": self.query_one(".card-power-cycle",
+                                          Checkbox).value,
         }
 
     def apply_shared(self, cfg):
@@ -1592,6 +1604,7 @@ class MeasurementCard(Vertical):
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
+        self.query_one(".card-power-cycle", Checkbox).value = cfg["power_cycle"]
         self._sync_advanced()
         self._refresh_title()
 
@@ -2884,7 +2897,8 @@ class PowerTestApp(App):
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
-                labels=labels, pristine=pristine)
+                labels=labels, pristine=pristine,
+                power_cycle=c["power_cycle"])
             if _sweep_on(c):
                 # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).

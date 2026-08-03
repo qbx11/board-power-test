@@ -1342,9 +1342,15 @@ class AutoRunner:
 
         sessions_root = core.CSV_PATH.parent / "sessions"
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = sessions_root / f"{stamp}_{self.plan.name}"
-        if not self.dry_run:
-            self.run_dir.mkdir(parents=True)
+        if self.dry_run:
+            self.run_dir = sessions_root / f"{stamp}_{self.plan.name}"
+        else:
+            # Katalog przebiegu przez new_session_dir, nie mkdir(): dwa
+            # przebiegi tego samego planu w TEJ SAMEJ sekundzie (restart
+            # zaraz po Esc) trafiały na istniejącą nazwę i przewracały się
+            # na FileExistsError. Tu kolizja dokleja licznik, jak w sesjach
+            # kroków.
+            self.run_dir = new_session_dir(sessions_root, self.plan.name)
             self._plan_log = open(self.run_dir / "plan.log", "a",
                                   encoding="utf-8")
         results = []

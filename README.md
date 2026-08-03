@@ -119,8 +119,13 @@ Zakładki nie dzielą się wartościami.
 Symbol Kconfig serii mesha nie ma sensu w Zigbee, więc każdy protokół
 pamięta własne wpisy, a pomiar bierze tylko te z wybranej zakładki.
 
-Pod zakładkami leżą napięcie, zapis danych i próbkowanie.
+Pod zakładkami leżą napięcie, zapis danych, próbkowanie i power-cycle.
 Dotyczą sprzętu i pomiaru, więc są wspólne dla wszystkich protokołów.
+
+**„Power-cycle po flashu”** jest domyślnie włączony i daje czysty zimny start.
+Narzędzie odcina wtedy zasilanie płytki na pół sekundy po wgraniu obrazu.
+Odznacz go, gdy firmware przenosi stan przez podtrzymaną sekcję RAM.
+Odcięcie zasilania kasuje taki blok, więc pierwszy cykl wychodzi zimny.
 
 „Start pomiaru po czasie” i „Konsola RTT” są schowane z widoku.
 Kod obu został na miejscu, tylko interfejs ich nie pokazuje.

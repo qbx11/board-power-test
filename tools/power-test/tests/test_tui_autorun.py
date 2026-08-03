@@ -14,7 +14,8 @@ from fakes import FakeRttReader, FakeSampler
 import tui
 from autorun import engine as eng
 from autorun import ppk2 as ppk2mod
-from textual.widgets import Collapsible, DataTable, Input, Select, Static
+from textual.widgets import (Checkbox, Collapsible, DataTable, Input, Select,
+                             Static)
 from textual.widgets._tabbed_content import ContentTab
 
 
@@ -1112,6 +1113,52 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             plan = app._build_auto_plan("btz")
             self.assertEqual(plan.steps[0].sample_rate, 1000)
+
+    async def test_power_cycle_domyslnie_wlaczony(self):
+        # Domyślnie czysty zimny start – stan z sesji programowania nie
+        # zostaje. Checkbox jest w ustawieniach zaawansowanych karty.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            await pilot.pause()
+            self.assertTrue(card.get_config()["power_cycle"])
+            self.assertTrue(app._build_auto_plan("btz").steps[0].power_cycle)
+
+    async def test_power_cycle_odznaczony_trafia_do_planu(self):
+        # Odznaczenie zostawia zasilanie w spokoju po flashu – tego wymaga
+        # firmware, które przenosi stan przez podtrzymaną sekcję RAM
+        # (System OFF + retencja); odcięcie VOUT kasowałoby ten blok.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            card = self._card(app)
+            card.query_one(".card-scenario", Select).value = "zwykly"
+            card.query_one(".card-duration", Input).value = "30s"
+            card.query_one(".card-power-cycle", Checkbox).value = False
+            await pilot.pause()
+            self.assertFalse(card.get_config()["power_cycle"])
+            self.assertFalse(app._build_auto_plan("btz").steps[0].power_cycle)
+
+    async def test_power_cycle_przenosi_sie_do_wszystkich_kart(self):
+        # „Zastosuj do wszystkich” musi nieść też ten przełącznik – inaczej
+        # jedna karta serii mierzyłaby zimny start, a reszta ciepły.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.click("#mode-label-auto")
+            await pilot.pause()
+            app.add_measurement()
+            await pilot.pause()
+            first, second = list(app.query(tui.MeasurementCard))
+            first.query_one(".card-power-cycle", Checkbox).value = False
+            await pilot.pause()
+            app._apply_to_all(first.query_one(".card-apply", tui.Button))
+            await pilot.pause()
+            self.assertFalse(second.get_config()["power_cycle"])
 
 
 class LostSamplesWarningTest(unittest.TestCase):

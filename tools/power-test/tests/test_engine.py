@@ -149,6 +149,40 @@ class EngineTest(unittest.TestCase):
         self.assertGreater(log.index("start"),
                            max(i for i, e in enumerate(log) if e == "dut=ON"))
 
+    def test_dwa_przebiegi_w_tej_samej_sekundzie(self):
+        # Katalog przebiegu ma w nazwie znacznik z dokładnością do sekundy,
+        # więc restart planu zaraz po poprzednim (np. po Esc) trafiał na
+        # istniejącą nazwę i przewracał się na FileExistsError.
+        trig = planmod.Trigger(type="delay", seconds=0)
+        first = self._run(_plan(trigger=trig))
+        dir_a = self.runner.run_dir
+        second = self._run(_plan(trigger=trig))
+        dir_b = self.runner.run_dir
+        self.assertEqual(first[0].status, "done")
+        self.assertEqual(second[0].status, "done")
+        self.assertNotEqual(dir_a, dir_b)
+        self.assertTrue(dir_b.is_dir())
+
+    def test_bez_power_cycle_zasilanie_zostaje(self):
+        # power_cycle=False: po flashu NIE odcinamy VOUT, więc podtrzymana
+        # sekcja RAM (System OFF + retencja) przeżywa i pierwszy cykl może
+        # być ciepły. Zasilanie idzie raz i zostaje aż do końca kroku.
+        self._run(_plan(power_cycle=False,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        start = log.index("start")
+        # Przed pomiarem dokładnie jedno włączenie i ani jednego odcięcia.
+        self.assertEqual(log[:start].count("dut=ON"), 1)
+        self.assertNotIn("dut=OFF", log[:start])
+        # Dla kontrastu: z power-cycle jest OFF/ON między flashem a pomiarem.
+        self.sampler.log.clear()
+        self._run(_plan(power_cycle=True,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        start = log.index("start")
+        self.assertIn("dut=OFF", log[:start])
+        self.assertEqual(log[:start].count("dut=ON"), 2)
+
     def test_csv_row_written(self):
         self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
         with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
