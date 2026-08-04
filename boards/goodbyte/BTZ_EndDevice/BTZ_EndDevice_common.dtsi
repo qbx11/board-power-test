@@ -69,10 +69,15 @@
 		repeatability = <2>;
 	};
 
-	bmi270: bmi270@68 {
-		compatible = "bosch,bmi270";
-		reg = <0x68>;
-	};
+	/* BMI270 nieużywany — wyłączony, żeby driver nie był wciągany do builda
+	 * (sterownik ma "default y if DT_HAS_BOSCH_BMI270_ENABLED", więc sam
+	 * wpis w devicetree wystarczyłby do jego włączenia).
+	 *
+	 * bmi270: bmi270@68 {
+	 *	compatible = "bosch,bmi270";
+	 *	reg = <0x68>;
+	 * };
+	 */
 
 	ltr329: ltr329@29 {
 		compatible = "liteon,ltr329";

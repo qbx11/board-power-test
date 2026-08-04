@@ -460,13 +460,14 @@ class ResultsScreen(ModalScreen):
     # 'egzemplarz' jest w OBU trybach: bez niego nie wiadomo, której płytki
     # dotyczy wiersz, a dziennik zbiera wyniki z wielu egzemplarzy.
     AUTO_COLS = ["data", "egzemplarz", "pomiar_id", "scenariusz", "parametr",
-                 "wartosc", "parametr2", "wartosc2", "napiecie_V", "prad_uA",
+                 "wartosc", "parametr2", "wartosc2", "parametr3", "wartosc3",
+                 "napiecie_V", "prad_uA",
                  "flash_B", "flash_pct", "ram_B", "ram_pct", "czas_s"]
     # Kolumny pokazywane tylko wtedy, gdy JAKIŚ widoczny wiersz je wypełnia.
     # Bez tego dziennik bez serii dwuparametrowej albo ze scenariuszami na
     # gotowym hexie (brak builda = brak tabelki pamięci) niósłby stale puste
     # kolumny, a te zjadają szerokość potrzebną nazwie scenariusza.
-    OPTIONAL_COLS = ("parametr2", "wartosc2",
+    OPTIONAL_COLS = ("parametr2", "wartosc2", "parametr3", "wartosc3",
                      "flash_B", "flash_pct", "ram_B", "ram_pct")
     # Kolumny liczbowe pokazywane z dokładnością do 2 miejsc po przecinku
     # (surowe wartości w CSV zostają pełne). min/max prądu celowo NIE są
@@ -1007,10 +1008,27 @@ ANY_SWEEP = (("Parametr (symbol Kconfig)", "",
               "Wartości (po przecinku lub spacją)"),
              ("Drugi parametr (opcjonalny)", "",
               "Wartości drugiego parametru"))
+# Zigbee (sleepy end device): parametry, które realnie zmieniają pobór
+# prądu. Send interval to okres wysyłania danych (T z modelu
+# I_avg(T) = E_report/T + I_sleep); long-poll decyduje, ile DODATKOWYCH
+# wybudzeń dochodzi między wysyłkami. Keepalive jest w aplikacji wpisany
+# na stałe, więc nie ma tu swojego pola. Symbole muszą istnieć w Kconfigu
+# budowanej aplikacji – bez tego flaga nie ma czego zmienić.
+ZIGBEE_SWEEP = (("Send interval (T) — symbol Kconfig",
+                 "CONFIG_ZB_SEND_INTERVAL_S",
+                 "Wartości (s, po przecinku lub spacją)"),
+                ("Long-poll interval — symbol Kconfig",
+                 "CONFIG_ZB_POLL_INTERVAL_S",
+                 "Wartości (s) — pusto = bez tej osi"))
 #             symbol       etykieta    monitor  matter  pola serii
 PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False, MESH_SWEEP),
              ("thread", "Thread", False, True, ANY_SWEEP),
-             ("zigbee", "Zigbee", True, False, ANY_SWEEP))
+             ("zigbee", "Zigbee", True, False, ZIGBEE_SWEEP))
+# Sufiksy pól/kluczy kolejnych osi serii: 1. oś bez sufiksu (zgodność ze
+# starym dziennikiem i planami), kolejne numerowane. Długość = maksymalna
+# liczba osi, jaką obsługuje interfejs i dziennik.
+SWEEP_AXIS_SUFFIXES = ("", "2", "3")
+SWEEP_AXIS_NAMES = ("serii", "drugiej osi serii", "trzeciej osi serii")
 # Nowa karta startuje BEZ protokołu: żadna zakładka nie jest aktywna, więc
 # pomiar jest zwykły – bez serii, bez monitora dongla, bez Mattera. Protokół
 # włącza kliknięcie zakładki, a kliknięcie AKTYWNEJ zakładki z niego wychodzi
@@ -1025,24 +1043,24 @@ def _sweep_on(cfg):
     """Czy karta ma serię: gdy WARTOŚCI którejś osi są wypełnione. Sama nazwa
     parametru nie wystarcza, bo symbole Kconfig są w zakładce wpisane
     domyślnie (PROTOCOLS) – inaczej każda karta byłaby serią bez wartości."""
-    return any(cfg.get(k) for k in ("sweep_values", "sweep_values2"))
+    return any(cfg.get(f"sweep_values{s}") for s in SWEEP_AXIS_SUFFIXES)
 
 
 def _sweep_axes(cfg):
     """Osie serii z konfiguracji karty -> [(parametr, wartości), …] dla
     expand_sweep(). Oś liczy się, gdy ma WARTOŚCI: puste pole wartości
     znaczy „tej osi nie ma” (sam wpisany symbol niczego nie mierzy), więc
-    można sweepować dowolną z dwóch osi albo obie. Wartości bez nazwy
+    można sweepować dowolną oś albo kilka naraz. Wartości bez nazwy
     parametru to przeoczenie – mówimy o tym wprost, zamiast po cichu
     ignorować połowę konfiguracji."""
     axes = []
-    for suffix in ("", "2"):
+    for i, suffix in enumerate(SWEEP_AXIS_SUFFIXES):
         param = cfg.get(f"sweep_param{suffix}", "")
         values = cfg.get(f"sweep_values{suffix}", "")
         if not values:
             continue
         if not param:
-            which = "drugiej osi serii" if suffix else "serii"
+            which = SWEEP_AXIS_NAMES[i] if i else "serii"
             raise ValueError(f"wartości {which} bez nazwy parametru")
         axes.append((param, values))
     if not axes:
@@ -1172,25 +1190,20 @@ class MeasurementCard(Vertical):
         # budowany z inną flagą -DCONFIG_...=<wartość>. Pola są od razu
         # gotowe do wpisania – wpisane WARTOŚCI włączają serię (sam symbol
         # nie, bo bywa wpisany domyślnie), puste zostawiają jeden pomiar.
-        (param1, default1, values1), (param2, default2, values2) = sweep
-        yield Label(f"{param1}:")
-        yield Input(value=c.get("sweep_param", default1),
-                    placeholder="np. CONFIG_MOJ_PARAMETR",
-                    classes="card-sweep-param")
-        yield Label(f"{values1}:")
-        yield Input(value=c.get("sweep_values", ""),
-                    placeholder="np. 10, 60, 300 — pusto = bez tej osi",
-                    classes="card-sweep-values")
-        # Druga oś jest OPCJONALNA: wypełnione wartości dają iloczyn
-        # kartezjański (3 × 2 = 6 pomiarów), puste – serię po jednej osi.
-        yield Label(f"{param2}:")
-        yield Input(value=c.get("sweep_param2", default2),
-                    placeholder="np. CONFIG_MOJ_PARAMETR",
-                    classes="card-sweep-param2")
-        yield Label(f"{values2}:")
-        yield Input(value=c.get("sweep_values2", ""),
-                    placeholder="np. 60, 120, 200 — pusto = bez tej osi",
-                    classes="card-sweep-values2")
+        # Osi jest tyle, ile protokół zgłasza w PROTOCOLS (BLE Mesh i Thread
+        # po dwie, Zigbee trzy). Każda kolejna jest OPCJONALNA: wypełnione
+        # wartości dokładają wymiar do iloczynu kartezjańskiego (3 × 2 = 6
+        # pomiarów), puste – oś po prostu nie istnieje.
+        for (param, default, values), suffix in zip(sweep,
+                                                    SWEEP_AXIS_SUFFIXES):
+            yield Label(f"{param}:")
+            yield Input(value=c.get(f"sweep_param{suffix}", default),
+                        placeholder="np. CONFIG_MOJ_PARAMETR",
+                        classes=f"card-sweep-param{suffix}")
+            yield Label(f"{values}:")
+            yield Input(value=c.get(f"sweep_values{suffix}", ""),
+                        placeholder="np. 10, 60, 300 — pusto = bez tej osi",
+                        classes=f"card-sweep-values{suffix}")
         if matter:
             yield from MeasurementCard._matter_fields(c)
         if not monitor:
@@ -1482,6 +1495,10 @@ class MeasurementCard(Vertical):
             "sweep_values": self._field_value(".card-sweep-values"),
             "sweep_param2": self._field_value(".card-sweep-param2"),
             "sweep_values2": self._field_value(".card-sweep-values2"),
+            # Trzecia oś istnieje tylko w zakładkach, które ją zgłaszają
+            # (Zigbee); gdzie indziej _field_value zwraca "" i oś odpada.
+            "sweep_param3": self._field_value(".card-sweep-param3"),
+            "sweep_values3": self._field_value(".card-sweep-values3"),
             "duration": self.query_one(".card-duration", Input).value.strip(),
             "delay_on": self.query_one(".card-delay-on", Checkbox).value,
             "delay_s": self.query_one(".card-delay-s", Input).value.strip(),
@@ -1519,6 +1536,8 @@ class MeasurementCard(Vertical):
                               ("sweep_values", ".card-sweep-values"),
                               ("sweep_param2", ".card-sweep-param2"),
                               ("sweep_values2", ".card-sweep-values2"),
+                              ("sweep_param3", ".card-sweep-param3"),
+                              ("sweep_values3", ".card-sweep-values3"),
                               ("serial_port", ".card-serial-port"),
                               ("serial_pattern", ".card-serial-pattern"),
                               ("chip_node_id", ".card-chip-node"),
@@ -2103,6 +2122,7 @@ class PowerTestApp(App):
     .card-delay-s, .card-voltage { width: 100%; }
     .card-sweep-param, .card-sweep-values { width: 100%; }
     .card-sweep-param2, .card-sweep-values2 { width: 100%; }
+    .card-sweep-param3, .card-sweep-values3 { width: 100%; }
     .card-serial-port, .card-serial-pattern { width: 100%; }
     .card-rtt-box, .card-hidden-adv { height: auto; }
     /* Zakładki protokołu (BLE Mesh / Thread / Zigbee) u góry ustawień
@@ -2340,7 +2360,12 @@ class PowerTestApp(App):
                                 id="mode-label-auto", classes="mode-label")
             yield Static(LOGO, id="logo")
             yield Label("Płytka", classes="h")
-            yield Select(((b["board"], n) for n, b in self.boards.items()),
+            # Etykieta = target west + nazwa profilu. Sam target nie wystarcza:
+            # kilka profili może budować NA TĘ SAMĄ płytkę, różniąc się SDK,
+            # board rootem czy flagami flasha – wtedy lista pokazywałaby kilka
+            # identycznych pozycji i łatwo wybrać nie ten profil.
+            yield Select(((f"{b['board']}  ·  {n}", n)
+                          for n, b in self.boards.items()),
                          value=default_prof, allow_blank=False, id="profile")
             # --- Tryb ręczny: checklista scenariuszy ---
             yield Label("Scenariusze", classes="h standard-only")

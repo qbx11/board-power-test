@@ -13,5 +13,7 @@ plans/*.toml
 # Prywatny manifest scenariuszy (własne/cudze wpisy `source`) – scala się
 # na wierzch scenarios.toml, ale zostaje lokalny.
 scenarios.local.toml
+# Lokalne środowisko (ścieżka do toolchaina NCS) – zależy od maszyny.
+.bpt_env
 # Dziennik pomiarów – dane lokalne, nie trzymamy ich na remote.
 reports/pomiary.csv

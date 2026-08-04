@@ -131,3 +131,8 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # Wpisy, których NIE chcesz trzymać na remote (np. cudze aplikacje
 # `source` z sąsiednich repo), umieść w scenarios.local.toml – ten plik
 # jest w .gitignore i scala się na wierzch tego manifestu przy starcie.
+
+[scenarios.zigbee-internal-btz]
+label       = "zigbee"
+description = "Aplikacja z ../workspace_zigbee/zigbee-internal-btz (build przez west)."
+source      = "../workspace_zigbee/zigbee-internal-btz"

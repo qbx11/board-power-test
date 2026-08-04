@@ -1243,13 +1243,15 @@ class AutoRunner:
             "czas_s": summary["duration_s"],
             "sesja": str(Path(session_dir).relative_to(core.ROOT)),
             "pomiar_id": step.label})
-        # Osie serii w kolumnach parametr/wartosc i parametr2/wartosc2.
-        # Krok spoza serii zostawia je puste, jednoosiowy – tylko drugą parę.
-        # Dziennik ma dwie pary kolumn (tyle wystawia interfejs); komplet
-        # flag – ile by ich nie było – jest w kolumnie 'flagi' i w 'uwagi'.
+        # Osie serii w kolumnach parametr/wartosc, parametr2/wartosc2 i
+        # parametr3/wartosc3. Krok spoza serii zostawia je puste, jednoosiowy
+        # – tylko pierwszą parę. Dziennik ma tyle par, ile wystawia interfejs
+        # (Zigbee sweepuje trzy); komplet flag – ile by ich nie było – jest
+        # i tak w kolumnie 'flagi' oraz w 'uwagi'.
         for (param, value), (col_p, col_v) in zip(
                 step.sweep, (("parametr", "wartosc"),
-                             ("parametr2", "wartosc2"))):
+                             ("parametr2", "wartosc2"),
+                             ("parametr3", "wartosc3"))):
             row[col_p], row[col_v] = param, value
         core.append_row(row, verbose=False)
 
@@ -1296,7 +1298,7 @@ class AutoRunner:
                              for s in self.plan.steps)
             workspace = core.ROOT
             if needs_west and not self.dry_run:
-                workspace = core.find_west_workspace()
+                workspace = core.find_west_workspace(self.profile)
                 if workspace != core.ROOT:
                     self._note(f"workspace NCS: {workspace} "
                                "(build out-of-tree)")

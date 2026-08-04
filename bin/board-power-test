@@ -68,6 +68,19 @@ elif [ "${BPT_NO_TUI:-}" != "1" ]; then
 	fi
 fi
 
+# Lokalna konfiguracja środowiska (plik poza gitem, patrz .gitignore).
+# Tu wskazujesz KONKRETNY toolchain/SDK – ten sam, w którym budujesz
+# aplikację ręcznie (`source .../ncsenv.sh`). Bez tego pliku zostaje
+# domyślne auto-uruchomienie nrfutil toolchain-manager (NCS_VERSION),
+# które może trafić w INNY toolchain niż Twój.
+# Źródłujemy PO instalacji venva: ncsenv.sh ustawia PYTHONHOME/PYTHONPATH
+# toolchaina, a pip venva ich nie lubi. Sam CLI radzi sobie z nimi przez
+# re-exec (BPT_SAVED_*, patrz nagłówek power_test.py).
+if [ -f "$REPO/.bpt_env" ]; then
+	# shellcheck source=/dev/null
+	. "$REPO/.bpt_env"
+fi
+
 # `west` już dostępny (terminal nRF Connect) albo auto-start wyłączony:
 if command -v west >/dev/null 2>&1 || [ "${BPT_NO_NCS_LAUNCH:-}" = "1" ]; then
 	exec "$PYBIN" "$CLI" "$@"

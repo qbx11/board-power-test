@@ -81,7 +81,7 @@ CSV_BASE_FIELDS = ["data", "plytka", "egzemplarz", "scenariusz", "flagi",
                    "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
 CSV_AUTORUN_FIELDS = ["prad_min_uA", "prad_max_uA", "czas_s", "sesja",
                       "pomiar_id", "parametr", "wartosc",
-                      "parametr2", "wartosc2"]
+                      "parametr2", "wartosc2", "parametr3", "wartosc3"]
 # Zajętość pamięci zbudowanego obrazu (tabelka linkera z końca builda).
 # Wypełniane w OBU trybach, bo obraz buduje się tak samo; scenariusz na
 # gotowym hexie zostawia je puste (nie ma builda, więc nie ma tabelki).
@@ -288,14 +288,26 @@ def run_cmd(cmd, dry, cwd=ROOT, capture=None):
         die(f"komenda zakończyła się kodem {rc} – przerywam scenariusz")
 
 
-def find_west_workspace():
+def find_west_workspace(profile=None):
     """Katalog, z którego wołamy westa.
 
     `west build` działa tylko wewnątrz workspace'u west. To repo zwykle
     leży POZA workspace'em NCS – wtedy budujemy "out-of-tree": west
     uruchamiany z katalogu SDK, a ścieżki aplikacji/builda są absolutne.
-    Kolejność: workspace obejmujący to repo > env NCS_WORKSPACE >
-    ~/ncs/<NCS_VERSION> (domyślna lokalizacja instalacji SDK)."""
+    Kolejność: `workspace` z profilu płytki > workspace obejmujący to repo >
+    env NCS_WORKSPACE > ~/ncs/<NCS_VERSION> (domyślna lokalizacja SDK).
+
+    `workspace` w profilu jest po to, żeby zbudować cudzą aplikację TYM
+    SDK, którym buduje ją jej autor: wykrywanie automatyczne trafia w SDK
+    z ~/ncs, a aplikacja z własnego workspace'u (inna wersja Zephyra, własne
+    moduły – np. ncs-zigbee) skompiluje się wtedy inaczej niż u autora."""
+    if profile and profile.get("workspace"):
+        p = resolve_path(profile["workspace"])
+        if not (p / ".west").is_dir():
+            die(f"profil płytki wskazuje workspace '{p}', ale nie ma tam "
+                "katalogu .west/ – to nie jest workspace west")
+        return p
+
     r = subprocess.run(["west", "topdir"], cwd=ROOT,
                        capture_output=True, text=True, env=child_env())
     if r.returncode == 0:
@@ -674,7 +686,7 @@ def cmd_run(args):
             die("brak 'nrfutil' w PATH – potrzebny do wgrania gotowego "
                 "pliku hex (scenariusze z polem `hex`)")
         if to_build:
-            workspace = find_west_workspace()
+            workspace = find_west_workspace(profile)
             if workspace != ROOT:
                 print(f"Workspace NCS: {workspace} (repo poza workspace'em – "
                       "build out-of-tree)")
@@ -753,8 +765,15 @@ def make_build_cmd(name, scen, prof_name, profile, default_prof=None,
     prefix = "" if prof_name == default_prof else f"{prof_name}_"
     build_dir = f"build_{prefix}{name}"
     src = resolve_path(scen["source"]) if scen.get("source") else ROOT
-    cmd = ["west", "build", "-b", profile["board"], "-p", pristine,
-           "-d", str(ROOT / build_dir), str(src)]
+    cmd = ["west", "build", "-b", profile["board"]]
+    # `sysbuild = true` w profilu -> `west build --sysbuild`, jak przy
+    # ręcznym buildzie aplikacji, która ma własny sysbuild.conf (np. Zigbee
+    # potrzebuje SB_CONFIG_PARTITION_MANAGER=y na partycje ZBOSS NVRAM).
+    # Domyślnie NIE dodajemy flagi: west >= 1.5 włącza sysbuild sam, a
+    # firmware z tego repo jest jednoobrazowe i flagi nie potrzebuje.
+    if profile.get("sysbuild"):
+        cmd.append("--sysbuild")
+    cmd += ["-p", pristine, "-d", str(ROOT / build_dir), str(src)]
     root_arg = board_root_arg(profile)
     extra = ([root_arg] if root_arg else []) + list(scen.get("cmake_args", []))
     if extra:
@@ -771,9 +790,14 @@ def make_flash_cmd(build_dir, profile, erase=True, reset=True):
     cmd = ["west", "flash", "-d", str(ROOT / build_dir)]
     if profile.get("runner"):
         cmd += ["-r", profile["runner"]]
-    if erase:
+    # Profil może zdjąć oba domyślne dodatki (`erase = false` / `reset =
+    # false`), gdy obraz ma być wgrywany dokładnie tak jak gołym
+    # `west flash` – np. sieciowy stack z danymi w pamięci nieulotnej
+    # (ZBOSS NVRAM): --erase kasuje klucze sieci, więc każdy pomiar
+    # mierzyłby wtedy PIERWSZE dołączenie do sieci zamiast pracy w niej.
+    if erase and profile.get("erase", True):
         cmd += ["--erase"]
-    if reset:
+    if reset and profile.get("reset", True):
         cmd += ["--reset"]
     return cmd
 
@@ -1222,8 +1246,9 @@ def cmd_report(args):
             "napiecie_V", "prad_uA", "oczekiwane", "uwagi"]
     # Druga oś serii tylko wtedy, gdy jakiś pomiar ją ma – inaczej dwie
     # puste kolumny zwężałyby resztę tabeli w każdym zwykłym raporcie.
-    if any(r.get("parametr2") for r in rows):
-        cols[5:5] = ["parametr2", "wartosc2"]
+    for col in ("parametr3", "parametr2"):
+        if any(r.get(col) for r in rows):
+            cols[5:5] = [col, col.replace("parametr", "wartosc")]
     print_table(tuple(cols), [tuple(r.get(c, "") for c in cols) for r in rows])
     print(f"\n({len(rows)} pomiarów; pełne dane, w tym flagi builda: "
           f"{CSV_PATH.relative_to(ROOT)})")

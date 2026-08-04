@@ -697,17 +697,25 @@ class AutorunTuiTest(unittest.IsolatedAsyncioTestCase):
                                      0 if proto == "thread" else 1,
                                      f"{proto} {cls}")
                 self.assertIsNone(card.field(".card-serial-port", "thread"))
-            # BLE Mesh zna nazwy swoich parametrów, więc ma je wpisane od
-            # razu (także zanim ktokolwiek włączy tę zakładkę); Thread
-            # i Zigbee startują z pustymi polami.
+            # BLE Mesh i Zigbee znają nazwy swoich parametrów, więc mają je
+            # wpisane od razu (także zanim ktokolwiek włączy zakładkę);
+            # Thread startuje z pustymi polami.
             self.assertEqual(card.field(".card-sweep-param", "ble_mesh").value,
                              "CONFIG_LPN_SENSOR_INTERVAL_S")
             self.assertEqual(card.field(".card-sweep-param2", "ble_mesh").value,
                              "CONFIG_BT_MESH_LPN_POLL_TIMEOUT")
-            for proto in ("thread", "zigbee"):
-                for cls in (".card-sweep-param", ".card-sweep-param2"):
-                    self.assertEqual(card.field(cls, proto).value, "",
-                                     f"{proto} {cls}")
+            # Zigbee sweepuje send interval i long-poll (keepalive jest
+            # w aplikacji wpisany na stałe, więc nie ma swojego pola).
+            for cls, symbol in ((".card-sweep-param", "CONFIG_ZB_SEND_INTERVAL_S"),
+                                (".card-sweep-param2", "CONFIG_ZB_POLL_INTERVAL_S")):
+                self.assertEqual(card.field(cls, "zigbee").value, symbol, cls)
+            for cls in (".card-sweep-param", ".card-sweep-param2"):
+                self.assertEqual(card.field(cls, "thread").value, "",
+                                 f"thread {cls}")
+            # Żaden protokół nie wystawia dziś trzeciej osi.
+            for proto in ("ble_mesh", "thread", "zigbee"):
+                self.assertIsNone(card.field(".card-sweep-param3", proto),
+                                  f"{proto} .card-sweep-param3")
 
     async def test_klik_w_aktywna_zakladke_wychodzi_z_protokolu(self):
         # Klik w zakładkę AKTYWNEGO protokołu wychodzi z trybu: karta staje
