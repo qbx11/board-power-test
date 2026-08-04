@@ -276,11 +276,29 @@ CHIP_PAIR_ALLOWANCE_S = 240.0
 # pierwsze sekundy to ruch Thread/Matter po parowaniu, nie normalna praca
 # węzła. Odczekaj tyle, żeby ten pik nie wchodził do pomiaru.
 CHIP_START_SETTLE_S = 10.0
+# Przy rejestracji ICD (LIT) commissioning kończy się komendą StayActive
+# (chip-tool: "Send ICD StayActive with Duration <icd_stay_active_ms>"), więc
+# węzeł TRZYMA ActiveMode i pollue co CHIP_ICD_FAST_POLLING_INTERVAL jeszcze
+# długo po pierwszym raporcie. Zmierzone: przy fast pollingu 500 ms i settle
+# 10 s do średniej wchodziło ~17 s wymuszonego pollingu, co zawyżało wynik
+# o 0,3–0,9 uA (tym bardziej, im krótszy pomiar). Bez rejestracji chip-tool
+# StayActive pomija ("Skipping kICDSendStayActive") i 10 s wystarcza.
+# 40 s = 30 s okna StayActive + zapas na commissioning-complete i subskrypcję.
+# Stała wystarcza na każdy `icd_stay_active_ms`: węzeł obcina StayActive do
+# 30 s (kGuaranteedStayActiveDuration), więc dłuższa wartość okna nie wydłuża.
+CHIP_ICD_START_SETTLE_S = 40.0
 # To samo po triggerze z dongla: log, na który czekamy, pada zwykle w chwili
 # dołączania węzła do sieci (u nas Friendship z LPN nawiązany + pierwsza
 # publikacja), a wtedy radio jeszcze pracuje na pełnych obrotach. Bez tego
 # zapasu pierwszy cykl organizacyjny wchodziłby do średniej.
 SERIAL_START_SETTLE_S = 10.0
+
+
+def chip_settle_s(trigger):
+    """Ile odczekać od markera FIRST-VALUE do startu pomiaru (trigger
+    'chip'). Z rejestracją ICD dłużej – trzeba przeczekać StayActive."""
+    return (CHIP_ICD_START_SETTLE_S if trigger.icd_registration
+            else CHIP_START_SETTLE_S)
 
 
 class _ChipSession:
@@ -673,7 +691,7 @@ class AutoRunner:
 
         if trig.type == "chip":
             # Po flashu: sparuj węzeł Matter i otwórz subskrypcję atrybutu;
-            # pomiar startuje CHIP_START_SETTLE_S po PIERWSZYM raporcie
+            # pomiar startuje chip_settle_s() po PIERWSZYM raporcie
             # (marker FIRST-VALUE ze scripts/pair_and_subscribe.py), żeby
             # pominąć poparowaniowy pik. Subskrypcja żyje przez cały
             # pomiar – proces zamyka _run_step (finally) przez self._chip.
@@ -708,12 +726,15 @@ class AutoRunner:
             self._emit("cmd_end", idx, step.scenario,
                        data={"rc": 0, "title": title})
             self._chip = chip
+            settle_s = chip_settle_s(trig)
             self._note(f"chip: pierwsza wartość ({chip.value}) – odczekuję "
-                       f"{CHIP_START_SETTLE_S:g} s przed startem pomiaru",
+                       f"{settle_s:g} s przed startem pomiaru"
+                       + (" (okno StayActive po rejestracji ICD)"
+                          if trig.icd_registration else ""),
                        idx, step.scenario, files=(run_log,))
             self._emit("state", idx, step.scenario, "trigger",
-                       detail=f"Matter: start za {CHIP_START_SETTLE_S:g} s")
-            self._sleep_cancellable(CHIP_START_SETTLE_S)
+                       detail=f"Matter: start za {settle_s:g} s")
+            self._sleep_cancellable(settle_s)
             if step.rtt == "continuous":
                 reader = self.rtt_factory(self.profile)
                 reader.attach()

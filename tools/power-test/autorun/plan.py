@@ -83,8 +83,9 @@ class Trigger:
       'serial' = j.w., ale na logu dongla (fragment `pattern`),
       'chip'   = po flashu sparuj węzeł Matter i otwórz subskrypcję
                  atrybutu; pomiar startuje krótko po PIERWSZYM raporcie
-                 (engine.CHIP_START_SETTLE_S – zapas na uspokojenie się
-                 sieci po parowaniu; patrz scripts/pair_and_subscribe.py).
+                 (engine.chip_settle_s – zapas na uspokojenie się sieci
+                 po parowaniu, dłuższy przy `icd_registration` o okno
+                 StayActive; patrz scripts/pair_and_subscribe.py).
                  Pola chip_* niżej.
                  `timeout_s` = ile czekać na pierwszą wartość."""
     type: str = "delay"
