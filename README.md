@@ -119,13 +119,15 @@ Zakładki nie dzielą się wartościami.
 Symbol Kconfig serii mesha nie ma sensu w Zigbee, więc każdy protokół
 pamięta własne wpisy, a pomiar bierze tylko te z wybranej zakładki.
 
-Pod zakładkami leżą napięcie, zapis danych, próbkowanie i power-cycle.
+Pod zakładkami leżą napięcie, zapis danych i próbkowanie.
 Dotyczą sprzętu i pomiaru, więc są wspólne dla wszystkich protokołów.
 
-**„Power-cycle po flashu”** jest domyślnie włączony i daje czysty zimny start.
-Narzędzie odcina wtedy zasilanie płytki na pół sekundy po wgraniu obrazu.
-Odznacz go, gdy firmware przenosi stan przez podtrzymaną sekcję RAM.
-Odcięcie zasilania kasuje taki blok, więc pierwszy cykl wychodzi zimny.
+Po wgraniu obrazu narzędzie odcina zasilanie płytki na pół sekundy.
+Ten power-cycle daje czysty zimny start: stan z sesji programowania nie zostaje.
+Interfejs go nie wyłącza — robi to dopiero `power_cycle = false` w planie
+`plans/*.toml`. Przydaje się to firmware'owi, który przenosi stan przez
+podtrzymaną sekcję RAM: odcięcie zasilania kasuje taki blok, więc pierwszy
+cykl wychodzi zimny nawet wtedy, gdy miał być ciepły.
 
 **Przycisk „x1” w nagłówku karty** ustawia krotność pomiaru.
 Klik przestawia go x1 → x2 → … → x5, a po x5 wraca do x1.
