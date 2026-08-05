@@ -1011,6 +1011,19 @@ class EngineTest(unittest.TestCase):
                      "--icd-stay-active-duration"):
             self.assertNotIn(flag, cmd)
 
+    def test_chip_settle_longer_with_icd_registration(self):
+        # Z rejestracją trzeba przeczekać okno StayActive (węzeł pollue
+        # fast pollingiem jeszcze 30 s po parowaniu), bez niej chip-tool
+        # StayActive pomija i wystarcza krótki zapas.
+        icd = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                              discriminator="3840", icd_registration=True)
+        plain = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                                discriminator="3840")
+        self.assertEqual(eng.chip_settle_s(icd), eng.CHIP_ICD_START_SETTLE_S)
+        self.assertEqual(eng.chip_settle_s(plain), eng.CHIP_START_SETTLE_S)
+        self.assertGreater(eng.CHIP_ICD_START_SETTLE_S,
+                           eng.CHIP_START_SETTLE_S)
+
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.
         results = self._run(_plan(

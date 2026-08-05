@@ -96,6 +96,13 @@ stoi w `CHIP_ICD_SLOW_POLL_INTERVAL`.
 Narzędzie odczytuje wtedy `OperatingMode` przed pomiarem i przerywa
 krok, jeśli węzeł mimo wszystko jedzie w SIT.
 
+Parowanie z rejestracją kończy się komendą StayActive: węzeł trzyma
+ActiveMode i pollue fast pollingiem jeszcze 30 s po parowaniu.
+Dlatego pomiar w tym trybie startuje 40 s po pierwszym raporcie, a nie
+10 s jak bez rejestracji — inaczej to wymuszone pollowanie wchodzi do
+średniej i zawyża wynik (przy fast pollingu 500 ms było to 0,3–0,9 µA,
+tym więcej, im krótszy pomiar).
+
 To zwykłe pola do wpisania, bez checkboxa „włącz”.
 Wpisana treść włącza funkcję, puste pole ją wyłącza.
 
