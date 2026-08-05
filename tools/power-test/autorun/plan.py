@@ -145,6 +145,12 @@ class PlanStep:
     build_cmd: str = ""          # pełny override komendy builda (shlex)
     pristine: bool = False
     power_cycle: bool = True
+    # Protokół, w którym mierzymy ('ble_mesh' / 'thread' / 'zigbee'; puste =
+    # zwykły pomiar bez protokołu). Sam pomiar go nie używa – trafia do
+    # meta.json sesji, żeby kalkulator poboru prądu wiedział, z której sesji
+    # wolno się kalibrować dla danej sekcji. Wcześniej protokół znała tylko
+    # karta w interfejsie i ginął po starcie przebiegu.
+    protocol: str = ""
     labels: list = field(default_factory=list)
     # --- seria (sweep): jeden "Pomiar N" rozbity na "Pomiar N.M" ---
     label: str = ""              # etykieta w UI/CSV ("N.M"); puste = numer kroku
@@ -379,6 +385,7 @@ def _step_from_toml(raw, idx):
         build_cmd=raw.get("build_cmd", ""),
         pristine=bool(raw.get("pristine", False)),
         power_cycle=bool(raw.get("power_cycle", True)),
+        protocol=str(raw.get("protocol", "")),
         labels=labels)
 
 

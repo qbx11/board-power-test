@@ -1123,6 +1123,17 @@ def ensure_csv_schema():
             writer.writerow({c: row.get(c, "") for c in fields})
 
 
+def sessions_dir():
+    """Katalog sesji trybu autonomicznego (przebiegi, meta, logi): silnik
+    zakłada tu podkatalog na przebieg i po jednym na krok, a czyta go
+    biblioteka sesji viewera i kalkulator poboru prądu.
+
+    FUNKCJA, nie stała: testy podmieniają CSV_PATH w locie
+    (tests/common.FakeEnv), a stała policzona przy importcie zostałaby przy
+    prawdziwym reports/ – przebieg testowy pisałby sesje do repo."""
+    return CSV_PATH.parent / "sessions"
+
+
 def append_row(row, verbose=True):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     new_file = not CSV_PATH.exists()

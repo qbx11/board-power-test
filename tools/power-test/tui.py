@@ -45,6 +45,10 @@ import power_test as core
 # powtórki na osobne kroki, więc UI nie ma własnej, drugiej prawdy.
 from autorun.plan import REPEAT_MAX
 
+# Model kalkulatora poboru prądu i kalibracja z przebiegu sesji – cała
+# matematyka siedzi tam, interfejs tylko zbiera liczby z pól.
+from autorun import energy
+
 # Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
 # pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
 # jest edytowalne; to tylko wygodna wartość startowa dla typowego setupu.
@@ -121,6 +125,22 @@ def _fmt_hms(seconds):
     h, r = divmod(seconds, 3600)
     m, s = divmod(r, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _fmt_uA(uA):
+    """Prąd w czytelnej jednostce: nA / µA / mA / A. Wspólny dla ekranu
+    przebiegu (zmierzony prąd) i kalkulatora (policzony) – ta sama liczba
+    nie ma wyglądać w dwóch miejscach inaczej."""
+    if uA is None:
+        return "—"
+    a = abs(uA)
+    if a < 1:
+        return f"{uA * 1000:.1f} nA"
+    if a < 1000:
+        return f"{uA:.1f} µA"
+    if a < 1e6:
+        return f"{uA / 1000:.3f} mA"
+    return f"{uA / 1e6:.3f} A"
 
 
 def _plural_measurements(n):
@@ -254,6 +274,124 @@ class RepeatButton(Button):
     def bump(self):
         """Następna krotność w cyklu; po x5 wracamy do x1."""
         self.count = 1 if self._count >= REPEAT_MAX else self._count + 1
+
+
+# Nazwy składników modelu w interfejsie. Silnik trzyma je jako klucze
+# ('send' / 'poll'), bo po nich rozpoznaje role interwałów w sesji.
+TERM_LABELS = {"send": "wysłania", "poll": "polle"}
+
+
+class CalculatorSection(Vertical):
+    """Sekcja kalkulatora poboru prądu dla JEDNEGO protokołu.
+
+    Model jest ten sam dla wszystkich trzech (patrz autorun/energy.py):
+    prąd średni to prąd bezczynności plus po jednym składniku na rodzaj
+    wybudzenia. Sekcje są osobne, bo każdy protokół ma własne, wpisane
+    liczby – a nie bo liczą inaczej.
+
+    Sekcja niczego nie mierzy i nie czyta zapisanych przebiegów. Wszystkie
+    liczby wpisuje człowiek; placeholdery podpowiadają rzędy wielkości
+    zmierzone w tym repo na węźle LPN."""
+
+    def __init__(self, protocol, label, **kwargs):
+        super().__init__(classes="calc-section", id=f"calc-{protocol}",
+                         **kwargs)
+        self.protocol = protocol
+        self.proto_label = label
+
+    def compose(self):
+        yield Label(self.proto_label, classes="h calc-head")
+        # Jednostki w nawiasach OKRĄGŁYCH, nie kwadratowych: Label renderuje
+        # treść przez markup Rich, w którym '[s]' jest znacznikiem
+        # przekreślenia – nawias znikał, a resztę wiersza przekreślało.
+        yield Label("Prąd bezczynności (baseline) w µA:")
+        yield Input(placeholder="np. 2.4", classes="calc-baseline")
+        with Horizontal(classes="calc-row"):
+            with Vertical(classes="calc-col"):
+                yield Label("Ładunek jednego wysłania (µC):")
+                yield Input(placeholder="np. 22", classes="calc-send-charge")
+            with Vertical(classes="calc-col"):
+                yield Label("Interwał send (s):")
+                yield Input(placeholder="np. 30", classes="calc-send-period")
+        with Horizontal(classes="calc-row"):
+            with Vertical(classes="calc-col"):
+                yield Label("Ładunek jednego polla (µC):")
+                yield Input(placeholder="np. 1478",
+                            classes="calc-poll-charge")
+            with Vertical(classes="calc-col"):
+                # Puste pola polla znaczą, że węzeł nie pollue – etykieta
+                # tego nie tłumaczy, bo to widać po wyniku (składnik po
+                # prostu nie wchodzi do rozkładu).
+                yield Label("Interwał poll (s):")
+                yield Input(placeholder="np. 60", classes="calc-poll-period")
+        # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu przyszło,
+        # więc nie ma być kolejnym wierszem tabelki. Podpis po lewej,
+        # liczba dociągnięta do prawej krawędzi.
+        with Horizontal(classes="calc-average"):
+            yield Static("Średni pobór prądu", classes="calc-average-label")
+            yield Static("—", classes="calc-average-value")
+        yield Static("", classes="calc-budget")
+
+    def on_mount(self):
+        self.refresh_result()
+
+    # ---------- odczyt pól ----------
+
+    def _value(self, selector):
+        """Liczba z pola albo None (puste / nie liczba). Kalkulator nie
+        krzyczy o niewypełnione pola – po prostu nie liczy tego składnika."""
+        text = self.query_one(selector, Input).value.strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+
+    def baseline_uA(self):
+        return self._value(".calc-baseline") or 0.0
+
+    def terms(self):
+        """Składniki modelu z pól. Składnik istnieje, gdy ma i ładunek,
+        i interwał – puste pole interwału znaczy „tego wybudzenia nie ma”
+        (np. węzeł, który nie pollue)."""
+        out = []
+        for role in ("send", "poll"):
+            charge = self._value(f".calc-{role}-charge")
+            period = self._value(f".calc-{role}-period")
+            if charge is None or not period:
+                continue
+            out.append(energy.Term(name=role, charge_uC=charge,
+                                   period_s=period))
+        return out
+
+    # ---------- wynik ----------
+
+    def refresh_result(self):
+        value = self.query_one(".calc-average-value", Static)
+        rows = self.query_one(".calc-budget", Static)
+        baseline = self.baseline_uA()
+        terms = self.terms()
+        if not terms and not baseline:
+            value.update("—")
+            rows.update("Wpisz prąd bezczynności i koszt wybudzeń.")
+            return
+        value.update(_fmt_uA(energy.average_uA(baseline, terms)))
+        lines = []
+        for share in energy.budget(baseline, terms):
+            name = TERM_LABELS.get(share.name, share.name)
+            # Rozkład ZAWSZE w µA, nawet gdy składnik schodzi poniżej 1 µA:
+            # ta tabela służy do porównywania wierszy ze sobą, a jeden
+            # wiersz w nA psułby porównanie mimo poprawnej wartości.
+            lines.append(f"{name:<14}{share.current_uA:9.2f} µA"
+                         f"{share.percent:6.0f}%")
+        rows.update("\n".join(lines))
+
+    def on_input_changed(self, event):
+        # Zdarzenia NIE zatrzymujemy: App też ich słucha (suma czasów
+        # w kreatorze trybu autonomicznego).
+        self.refresh_result()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -1971,19 +2109,7 @@ class AutoRunScreen(Screen):
             self.pause.set()
             btn.label = "Wznów"
 
-    @staticmethod
-    def _fmt_uA(uA):
-        """Prąd w czytelnej jednostce: nA / µA / mA / A."""
-        if uA is None:
-            return "—"
-        a = abs(uA)
-        if a < 1:
-            return f"{uA * 1000:.1f} nA"
-        if a < 1000:
-            return f"{uA:.1f} µA"
-        if a < 1e6:
-            return f"{uA / 1000:.3f} mA"
-        return f"{uA / 1e6:.3f} A"
+    _fmt_uA = staticmethod(_fmt_uA)
 
     _fmt_time = staticmethod(_fmt_hms)
 
@@ -2326,6 +2452,26 @@ class PowerTestApp(App):
        liczba stała pod czasami z nagłówków, a nie pod ich numerami. */
     #total-time { width: 72; max-width: 100%; height: 1;
                   text-align: right; color: #999999; }
+    /* Kalkulator poboru prądu: sekcje wyglądają jak karty pomiaru, bo są
+       tym samym rodzajem rzeczy – blokiem pól z wynikiem. */
+    #calculator { width: 72; max-width: 100%; height: auto; }
+    .calc-section { width: 100%; height: auto; border: round #555555;
+                    background: transparent; padding: 0 1;
+                    margin-bottom: 1; }
+    .calc-head { margin-top: 0; }
+    .calc-row { height: auto; width: 100%; }
+    .calc-col { width: 1fr; height: auto; padding-right: 1; }
+    .calc-baseline { width: 100%; }
+    .calc-send-charge, .calc-send-period { width: 100%; }
+    .calc-poll-charge, .calc-poll-period { width: 100%; }
+    /* Wynik w ramce – wyróżniony, bo to on jest odpowiedzią sekcji.
+       Jaśniejsza obwódka niż pola, żeby wzrok siadał tutaj. */
+    .calc-average { height: 3; width: 100%; margin-top: 1;
+                    border: round #aaaaaa; padding: 0 1; }
+    .calc-average-label { width: auto; text-style: bold; }
+    .calc-average-value { width: 1fr; text-align: right;
+                          text-style: bold; color: $text; }
+    .calc-budget { height: auto; margin-top: 1; color: #999999; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
        Select zamontowany od razu jako display:none nie tworzy overlaya. */
@@ -2520,7 +2666,7 @@ class PowerTestApp(App):
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
         # Start w trybie autonomicznym: to jest tryb, w którym narzędzie
         # samo mierzy (PPK2). Ręczny zostaje pod kliknięciem w przełącznik.
-        self.mode = "auto"              # standard | auto
+        self.mode = "auto"        # standard | auto | calc
         self._card_uid = 0              # licznik kart 'Pomiar N'
         self._card_template = None      # config dziedziczony przez nowe karty
 
@@ -2541,10 +2687,14 @@ class PowerTestApp(App):
                 yield Static("│", classes="mode-sep")
                 yield ModeLabel("Tryb autonomiczny", "auto",
                                 id="mode-label-auto", classes="mode-label")
+                yield Static("│", classes="mode-sep")
+                yield ModeLabel("Kalkulator poboru prądu", "calc",
+                                id="mode-label-calc", classes="mode-label")
             yield Static(LOGO, id="logo")
-            yield Label("Płytka", classes="h")
+            yield Label("Płytka", classes="h measure-only")
             yield Select(((b["board"], n) for n, b in self.boards.items()),
-                         value=default_prof, allow_blank=False, id="profile")
+                         value=default_prof, allow_blank=False, id="profile",
+                         classes="measure-only")
             # --- Tryb ręczny: checklista scenariuszy ---
             yield Label("Scenariusze", classes="h standard-only")
             with Vertical(id="scenarios", classes="standard-only"):
@@ -2567,30 +2717,42 @@ class PowerTestApp(App):
             # której dotyczy, a nad polami niezwiązanymi z czasem.
             yield Static("", id="total-time", classes="auto-only")
 
-            yield Label("Egzemplarz płytki", classes="h")
-            yield Input(placeholder="np. BTZ #2", id="sample")
+            # --- Kalkulator poboru prądu: trzy sekcje, po jednej na
+            # protokół. Nie mierzy niczego i nie czyta zapisanych sesji –
+            # liczy prąd średni z modelu I_avg = I_baseline + Q/T z liczb
+            # wpisanych w polach.
+            with Vertical(id="calculator", classes="calc-only"):
+                for proto, label, _mon, _matter, _sweep in PROTOCOLS:
+                    yield CalculatorSection(proto, label)
+
+            yield Label("Egzemplarz płytki", classes="h measure-only")
+            yield Input(placeholder="np. BTZ #2", id="sample",
+                        classes="measure-only")
             yield Check("Wymuś pełny rebuild (gotowe buildy są "
-                        "normalnie pomijane)", value=False, id="pristine")
+                        "normalnie pomijane)", value=False, id="pristine",
+                        classes="measure-only")
             yield Check("Zresetuj płytkę po wgraniu (J-Link)",
                         value=True, id="reset", classes="standard-only")
             yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
                         value=True, id="swd_reminder",
                         classes="standard-only")
             with Horizontal(id="actions"):
-                yield Button("Start", id="start")
-                yield Static(classes="actions-gap")
+                yield Button("Start", id="start", classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 yield Button("Zaznacz wszystkie", id="select_all",
                              classes="standard-only")
                 yield Static(classes="actions-gap standard-only")
-                yield Button("Dodaj kod", id="add_fw")
-                yield Static(classes="actions-gap")
+                yield Button("Dodaj kod", id="add_fw",
+                             classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 # Lista scenariuszy (opis + usuwanie) tylko w trybie
                 # autonomicznym – w ręcznym stoi wprost na ekranie.
                 yield Button("Scenariusze", id="scenarios_btn",
                              classes="auto-only")
                 yield Static(classes="actions-gap auto-only")
-                yield Button("Wyniki", id="results_btn")
-                yield Static(classes="actions-gap")
+                yield Button("Wyniki", id="results_btn",
+                             classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 yield Button("Wyjście", id="quit")
 
     def _scenario_row(self, n, s, value=False):
@@ -2735,18 +2897,23 @@ class PowerTestApp(App):
 
     def _apply_mode(self):
         """Pokaż/ukryj elementy zależne od trybu i wytłuść aktywną
-        etykietę przełącznika. Widoczność sterowana klasą na widgetach
-        (.auto-only / .standard-only)."""
-        auto = self.mode == "auto"
-        self.query_one("#mode-label-standard", Static).set_class(
-            not auto, "active")
-        self.query_one("#mode-label-auto", Static).set_class(auto, "active")
-        for w in self.query(".auto-only"):
-            w.display = auto
-        for w in self.query(".standard-only"):
-            w.display = not auto
+        etykietę przełącznika.
+
+        Widoczność sterowana klasą na widgetach: `.standard-only`,
+        `.auto-only` i `.calc-only` należą do jednego trybu, a
+        `.measure-only` do dwóch, które faktycznie mierzą – kalkulator nie
+        rusza płytki, więc profil, egzemplarz i przyciski przebiegu nie mają
+        w nim czego robić. Widgety BEZ żadnej z tych klas (logo, Wyniki,
+        Wyjście) są wszędzie."""
+        for mode in ("standard", "auto", "calc"):
+            self.query_one(f"#mode-label-{mode}", Static).set_class(
+                self.mode == mode, "active")
+            for w in self.query(f".{mode}-only"):
+                w.display = self.mode == mode
+        for w in self.query(".measure-only"):
+            w.display = self.mode != "calc"
         start = self.query_one("#start", Button)
-        start.label = "Dalej: PPK2 →" if auto else "Start"
+        start.label = "Dalej: PPK2 →" if self.mode == "auto" else "Start"
         # Szerokość `auto` przycisku nie przelicza się po samej zmianie
         # etykiety – bez tego dłuższy podpis trybu autonomicznego zostawał
         # przycięty do szerokości słowa "Start" ("Dalej").
@@ -3082,7 +3249,8 @@ class PowerTestApp(App):
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
-                labels=labels, pristine=pristine)
+                labels=labels, pristine=pristine,
+                protocol=c["protocol"])
             # power_cycle zostaje domyślne (True) – kreator go nie ustawia,
             # więc każdy pomiar z interfejsu ma po flashu odcięcie VOUT.
             # Wyłączyć da się tylko planem: power_cycle = false w plans/*.toml.
