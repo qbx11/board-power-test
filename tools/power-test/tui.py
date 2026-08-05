@@ -113,6 +113,25 @@ def _label(name, item):
     return item.get("label", name)
 
 
+def _fmt_hms(seconds):
+    """Czas jako 'h:mm:ss', a poniżej godziny 'mm:ss' – ten sam format na
+    ekranie przebiegu (zegar pomiaru) i w kreatorze (czas kart i suma),
+    żeby te same liczby nie wyglądały w dwóch miejscach inaczej."""
+    seconds = max(0, int(round(seconds)))
+    h, r = divmod(seconds, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _plural_measurements(n):
+    """'1 pomiar' / '3 pomiary' / '7 pomiarów' – odmiana do podpisu sumy."""
+    if n == 1:
+        return "1 pomiar"
+    if 2 <= n % 10 <= 4 and n % 100 not in (12, 13, 14):
+        return f"{n} pomiary"
+    return f"{n} pomiarów"
+
+
 class Check(Checkbox):
     """Checkbox z ptaszkiem (✓) zamiast domyślnego X w stanie zaznaczonym."""
 
@@ -1116,7 +1135,7 @@ class MeasurementCard(Vertical):
         c = self._config
         opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
         with Horizontal(classes="card-head"):
-            yield CardTitle(f"▼ Pomiar {self.number}", classes="card-title")
+            yield CardTitle(f"▼ {self.number}", classes="card-title")
             # Krotność w nagłówku, nie w zaawansowanych: widać ją także na
             # zwiniętej karcie, więc czas całego planu da się oszacować
             # jednym spojrzeniem na listę pomiarów.
@@ -1369,18 +1388,25 @@ class MeasurementCard(Vertical):
         # bez event.stop() lecą dalej, do App.on_button_pressed.
         if isinstance(event.button, RepeatButton):
             event.button.bump()
+            # Krotność mnoży liczbę pomiarów, więc zmienia i tytuł tej karty
+            # (gdy zwinięta), i sumę czasów pod listą.
+            self._refresh_title()
+            self.app._refresh_total()
             event.stop()
 
     def on_tabbed_content_tab_activated(self, event):
         # Każda zakładka ma własne pola serii, więc zmiana protokołu zmienia
-        # też serię – dopisek o niej w tytule musi za tym nadążyć.
+        # też serię – dopisek o niej w tytule i suma czasów muszą za tym
+        # nadążyć (inna zakładka = inna liczba kombinacji).
         self._refresh_title()
+        self.app._refresh_total()
         event.stop()
 
     def on_tabbed_content_cleared(self, event):
         # Wyjście z protokołu (żadna zakładka nie jest aktywna) też zmienia
         # serię – karta staje się zwykłym pomiarem.
         self._refresh_title()
+        self.app._refresh_total()
         event.stop()
 
     def on_mouse_down(self, event):
@@ -1498,51 +1524,102 @@ class MeasurementCard(Vertical):
         self._refresh_title()
 
     def _refresh_title(self):
+        """Nagłówek karty. Rozwinięta pokazuje sam numer – reszta stoi
+        w polach pod nim. Zwinięta dokłada scenariusz, wartości serii
+        i czas, bo to jedyny wiersz, jaki wtedy widać:
+
+            ▶ 1  LPN OFF · (10, 60, 300), (5, 10) · 6 × 20:00 = 2:00:00
+
+        Krotności NIE piszemy – mówi ją przycisk 'xN' obok, a liczba
+        pomiarów przed '×' i tak ją już zawiera."""
         title = self.query_one(".card-title", CardTitle)
         if not self.collapsed:
-            title.update(f"▼ Pomiar {self.number}")
+            title.update(f"▼ {self.number}")
             return
         scen = self._scenario()
         if not scen:
-            title.update(f"▶ Pomiar {self.number} — (wybierz scenariusz)")
+            title.update(f"▶ {self.number}  (wybierz scenariusz)")
             return
-        label = _label(scen, self.scenarios.get(scen, {}))
-        # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
-        # Pytamy własny ekran, nie App: App.query widzi tylko wierzchni
-        # ekran, a tytuły odświeżamy też spod otwartego dialogu.
-        dupes = sum(1 for card in self.screen.query(MeasurementCard)
-                    if card._scenario() == scen)
-        suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
-        title.update(f"▶ {label}{suffix}{self._sweep_title()}")
+        parts = [_label(scen, self.scenarios.get(scen, {}))]
+        parts += [p for p in (self._sweep_title(), self._time_title()) if p]
+        title.update(f"▶ {self.number}  " + " · ".join(parts))
 
     def _sweep_title(self):
-        """Dopisek do tytułu zwiniętej karty, gdy karta ma serię (sweep):
-        ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
-        liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
-        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola wartości wybranego
-        protokołu są puste albo gdy żaden protokół nie jest aktywny. Osie
-        liczymy tak samo jak plan (_sweep_axes), żeby tytuł nie obiecywał
-        pomiarów, których nie będzie."""
+        """Wartości serii do tytułu zwiniętej karty: '(10, 60, 300), (5, 10)'
+        – jedna para nawiasów na oś, w kolejności osi. Pokazujemy WARTOŚCI,
+        nie symbole Kconfig: symbol bywa wpisany domyślnie (PROTOCOLS), więc
+        nie mówi nic nowego, a to wartości decydują, ile pomiarów wyjdzie.
+        Wypisujemy je po sparsowaniu, żeby '10,60' i '10, 60' wyglądały tak
+        samo. Pusty, gdy pola wartości wybranego protokołu są puste albo gdy
+        żaden protokół nie jest aktywny. Osie liczymy tak samo jak plan
+        (_sweep_axes), żeby tytuł nie obiecywał pomiarów, których nie będzie."""
         from autorun.plan import parse_sweep_values
         try:
             cfg = self.get_config()
             if not _sweep_on(cfg):
                 return ""
-            axes = [(p, len(parse_sweep_values(v)))
-                    for p, v in _sweep_axes(cfg)]
+            axes = [parse_sweep_values(v) for _p, v in _sweep_axes(cfg)]
         except ValueError:
             # Wartości bez nazwy parametru – plan to odrzuci przed startem,
             # a tytuł mówi wprost, czego brakuje.
-            return " · sweep (brak parametru)"
+            return "(brak parametru)"
         except Exception:
             return ""
-        text = " · ".join(f"{p} ×{n}" for p, n in axes)
-        if len(axes) > 1:
-            total = 1
-            for _, n in axes:
-                total *= n
-            text += f" = {total}"
-        return f" · sweep {text}"
+        return ", ".join("(" + ", ".join(str(v) for v in vals) + ")"
+                         for vals in axes)
+
+    def _time_title(self):
+        """Czas karty do tytułu zwiniętej karty: samo okno pomiaru przy
+        jednym pomiarze, a przy serii/powtórkach mnożenie z sumą
+        ('6 × 20:00 = 2:00:00'). Liczymy TYLKO okna pomiarowe – build,
+        flash i triggery zależą od sprzętu i cache'u, więc doliczone
+        dawałyby liczbę, która i tak się nie sprawdzi. Puste, gdy czas
+        nie jest jeszcze wpisany albo nie jest czasem."""
+        secs = self.duration_s()
+        if secs is None:
+            return ""
+        n = self.plan_size()
+        if n <= 1:
+            return _fmt_hms(secs)
+        return f"{n} × {_fmt_hms(secs)} = {_fmt_hms(secs * n)}"
+
+    def duration_s(self):
+        """Okno pomiaru karty w sekundach albo None, gdy pole jest puste
+        lub nie jest czasem (kreator zgłosi to dopiero przy Starcie)."""
+        from autorun.plan import parse_duration
+        text = self.query_one(".card-duration", Input).value.strip()
+        if not text:
+            return None
+        try:
+            return parse_duration(text)
+        except ValueError:
+            return None
+
+    def plan_size(self):
+        """Ile POMIARÓW da ta karta: kombinacje serii × krotność. Tyle
+        wierszy trafi do dziennika i tyle okien pomiarowych zajmie karta
+        w przebiegu. Niepełną serię liczymy jak brak serii – plan odrzuci
+        ją przed startem z konkretnym błędem, a tytuł nie ma w tym czasie
+        udawać, że wie lepiej."""
+        from autorun.plan import parse_sweep_values
+        combos = 1
+        try:
+            cfg = self.get_config()
+            if _sweep_on(cfg):
+                for _p, values in _sweep_axes(cfg):
+                    combos *= len(parse_sweep_values(values))
+        except Exception:
+            combos = 1
+        return combos * self.repeat()
+
+    def plan_seconds(self):
+        """Suma okien pomiarowych karty (0.0, gdy czas nie jest wpisany)."""
+        secs = self.duration_s()
+        return 0.0 if secs is None else secs * self.plan_size()
+
+    def repeat(self):
+        """Krotność z przycisku w nagłówku (x1…x5)."""
+        return self.query_one(".card-repeat", RepeatButton).count
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -1908,12 +1985,7 @@ class AutoRunScreen(Screen):
             return f"{uA / 1000:.3f} mA"
         return f"{uA / 1e6:.3f} A"
 
-    @staticmethod
-    def _fmt_time(s):
-        s = max(0, int(round(s)))
-        h, r = divmod(s, 3600)
-        m, sec = divmod(r, 60)
-        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+    _fmt_time = staticmethod(_fmt_hms)
 
     @classmethod
     def _fmt_countdown(cls, s):
@@ -2249,6 +2321,11 @@ class PowerTestApp(App):
     .card-apply-row { height: auto; align-horizontal: center; }
     .card-apply, .card-apply-next { min-width: 0; margin: 1 1; }
     #add_measurement { min-width: 0; width: 72; max-width: 100%; }
+    /* Czas łączny pod listą kart: przygaszony, bo to podsumowanie, nie
+       pole do wypełnienia; wyrównany do prawej krawędzi kolumny kart, żeby
+       liczba stała pod czasami z nagłówków, a nie pod ich numerami. */
+    #total-time { width: 72; max-width: 100%; height: 1;
+                  text-align: right; color: #999999; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
        Select zamontowany od razu jako display:none nie tworzy overlaya. */
@@ -2486,6 +2563,9 @@ class PowerTestApp(App):
                 yield MeasurementCard(0, self.scenarios, 1)
             yield Button("+ Dodaj pomiar", id="add_measurement",
                          classes="auto-only")
+            # Suma czasów zamyka sekcję pomiarów – stoi pod listą kart,
+            # której dotyczy, a nad polami niezwiązanymi z czasem.
+            yield Static("", id="total-time", classes="auto-only")
 
             yield Label("Egzemplarz płytki", classes="h")
             yield Input(placeholder="np. BTZ #2", id="sample")
@@ -2616,6 +2696,14 @@ class PowerTestApp(App):
 
     def on_mount(self):
         self._apply_mode()
+        self._refresh_total()
+
+    def on_input_changed(self, event):
+        # Czas i wartości serii wpisuje się w Inputach, a od nich zależy
+        # suma pod listą pomiarów – niech nadąża za pisaniem. Zdarzenia NIE
+        # zatrzymujemy: Inputy karty nie mają innych odbiorców, ale i tak
+        # nie ma powodu ich obcinać.
+        self._refresh_total()
 
     def on_button_pressed(self, event):
         if event.button.id == "quit":
@@ -2688,6 +2776,7 @@ class PowerTestApp(App):
         # Przewiń do nowej karty dopiero PO zamontowaniu (inaczej wymusza
         # przedwczesny layout Selecta, zanim powstanie jego overlay).
         self.call_after_refresh(card.scroll_visible, animate=False)
+        self.call_after_refresh(self._refresh_total)
 
     def remove_measurement(self, uid):
         cards = list(self.query(MeasurementCard))
@@ -2704,10 +2793,47 @@ class PowerTestApp(App):
         # więc ponowne odpytanie drzewa wciąż widzi znikającą kartę).
         for i, card in enumerate(remaining, 1):
             card.set_number(i)
+        # Suma z POZOSTAŁYCH kart – remove() jest asynchroniczny, więc
+        # liczymy dopiero po odświeżeniu drzewa.
+        self.call_after_refresh(self._refresh_total)
 
     def _refresh_card_titles(self):
         for card in self.query(MeasurementCard):
             card._refresh_title()
+        self._refresh_total()
+
+    def _refresh_total(self):
+        """Czas łączny wszystkich kart pod listą pomiarów. Suma OKIEN
+        pomiarowych (czas × kombinacje serii × krotność) – bez buildu,
+        flasha i triggerów, więc realny przebieg będzie dłuższy.
+
+        Liczymy tylko karty z WPISANYM czasem, żeby liczba w nawiasie
+        opisywała dokładnie to, co pokazuje zegar. Nowa karta dziedziczy
+        serię poprzedniej (bez czasu), więc bez tego warunku suma mówiłaby
+        np. '6:00:00 (36 pomiarów)' – zegar z jednej karty, liczba z dwóch.
+        Gdy żadna karta nie ma jeszcze czasu, piszemy '—' zamiast mylącego
+        '00:00'."""
+        main = self._main_screen()
+        found = main.query("#total-time")
+        if not found:
+            return              # ekran jeszcze nie złożony
+        total = found.first(Static)
+        timed = []
+        for card in main.query(MeasurementCard):
+            # Karta w trakcie usuwania wciąż jest w drzewie (remove() jest
+            # asynchroniczny), ale jej pól już nie ma – pomijamy ją, zamiast
+            # wysypywać odświeżanie sumy na brakującym widgecie.
+            if not (card.query(".card-repeat") and card.query(".card-duration")):
+                continue
+            if card.duration_s() is not None:
+                timed.append(card)
+        if not timed:
+            total.update("Łącznie: —")
+            return
+        seconds = sum(card.plan_seconds() for card in timed)
+        count = sum(card.plan_size() for card in timed)
+        total.update(f"Łącznie: {_fmt_hms(seconds)}  "
+                     f"({_plural_measurements(count)})")
 
     def _card_of(self, widget):
         while widget is not None and not isinstance(widget, MeasurementCard):

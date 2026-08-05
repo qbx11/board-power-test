@@ -33,8 +33,25 @@ Wynik trafia do wspólnego dziennika.
 
 **Tryb autonomiczny** mierzy prąd bez Twojego udziału.
 Narzędzie zasila płytkę z PPK2, mierzy przez zadany czas i zapisuje wynik.
-Ułóż sekwencję pomiarów na kartach „Pomiar 1, 2, …”.
+Ułóż sekwencję pomiarów na kartach numerowanych 1, 2, …
 Każda karta ma własny czas, napięcie, warunek startu i podgląd logów.
+
+Nagłówek karty niesie numer po lewej, a po zwinięciu także jej treść:
+
+```text
+▼ 1                                                  <- rozwinięta
+▶ 1  LPN OFF · 20:00                                 <- zwykły pomiar
+▶ 1  LPN OFF · (10, 60, 300), (5, 10) · 6 × 20:00 = 2:00:00    <- seria
+```
+
+Zwinięta karta pokazuje scenariusz, WARTOŚCI osi serii i czas.
+Liczba przed `×` to pomiary tej karty: kombinacje serii razy krotność.
+Krotności nagłówek nie powtarza — mówi ją przycisk `xN` w tym samym wierszu.
+
+Pod listą kart stoi **czas łączny**: `Łącznie: 3:30:00  (9 pomiarów)`.
+To suma samych okien pomiarowych, licząc serie i krotności.
+Build, flash i triggery nie wchodzą, więc realny przebieg będzie dłuższy.
+Karty bez wpisanego czasu nie liczą się do żadnej z tych dwóch liczb.
 
 Narzędzie blokuje usypianie komputera na czas całego przebiegu.
 Blokada obejmuje bezczynność, jawny suspend i zamknięcie klapy.
