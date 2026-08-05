@@ -1277,6 +1277,11 @@ class AutoRunner:
                 "step_label": step.label or str(idx),
                 "scenario": step.scenario,
                 "label": scen.get("label", step.scenario),
+                # Protokół w meta, żeby kalkulator poboru prądu wiedział,
+                # z której sesji wolno kalibrować którą sekcję. Puste dla
+                # kroków spoza protokołu i dla planów z TOML-a, które go
+                # nie podają.
+                "protocol": step.protocol,
                 "sweep": _sweep_payload(step),
                 "flags": core.scenario_flags(scen)
                 + (" " + " ".join(step.build_extra_args)
@@ -1361,7 +1366,7 @@ class AutoRunner:
             raise AutoRunError("\n  ".join(
                 [f"błędy planu '{self.plan.name}':"] + errors))
 
-        sessions_root = core.CSV_PATH.parent / "sessions"
+        sessions_root = core.sessions_dir()
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if self.dry_run:
             self.run_dir = sessions_root / f"{stamp}_{self.plan.name}"

@@ -779,6 +779,27 @@ class EngineTest(unittest.TestCase):
         self.assertIn("-DCONFIG_P1=20", rows[3]["flagi"])
         self.assertIn("-DCONFIG_P2=200", rows[3]["flagi"])
 
+    def test_protokol_trafia_do_meta_sesji(self):
+        # Protokół znała dotąd tylko karta w interfejsie i ginął po starcie
+        # przebiegu. Kalkulator poboru prądu musi wiedzieć, z której sesji
+        # wolno kalibrować którą sekcję, więc protokół jedzie w meta.json.
+        import json
+        results = self._run(_plan(
+            scenario="zwykly", duration_s=0.15, protocol="zigbee",
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["protocol"], "zigbee")
+
+    def test_krok_bez_protokolu_ma_puste_pole(self):
+        # Zwykły pomiar (karta bez protokołu, plan z TOML-a) – pole jest,
+        # ale puste; kalkulator takiej sesji nie przypisze do sekcji.
+        import json
+        results = self._run(_plan(
+            scenario="zwykly", duration_s=0.15,
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["protocol"], "")
+
     def test_sweep_meta_and_events(self):
         import json
         base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
