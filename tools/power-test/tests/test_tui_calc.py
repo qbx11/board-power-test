@@ -217,6 +217,57 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
                 "Ładunek jednego polla (µC):",
                 "Interwał poll (s):"])
 
+    # ---------- tabelka wartości oczekiwanych ----------
+
+    async def test_klik_w_wiersz_wpisuje_wartosc_do_pola(self):
+        app = tui.PowerTestApp()
+        # Okno wysokie na tyle, żeby wszystkie trzy sekcje (BLE Mesh/Thread/
+        # Zigbee) mieściły się bez przewijania – klik Pilota trafia tylko
+        # w to, co faktycznie widać na ekranie.
+        async with app.run_test(size=(160, 200)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            ref_label = [w for w in sec.query(tui.RefLabel)
+                         if w.field == "send-charge"][0]
+            await pilot.click(ref_label)
+            await pilot.pause()
+            self.assertEqual(sec.query_one(".calc-send-charge", Input).value,
+                              "22")
+
+    async def test_edycja_referencji_nie_rusza_pola_dopoki_nie_klikniesz(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 200)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "zigbee")
+            ref_input = sec.query_one(".calc-ref-value.calc-ref-baseline",
+                                       Input)
+            ref_input.value = "9.9"
+            await pilot.pause()
+            self.assertEqual(sec.baseline_uA(), 0.0)
+            ref_label = [w for w in sec.query(tui.RefLabel)
+                         if w.field == "baseline"][0]
+            await pilot.click(ref_label)
+            await pilot.pause()
+            self.assertAlmostEqual(sec.baseline_uA(), 9.9)
+
+    async def test_sekcje_maja_wlasne_referencje(self):
+        # Tabelka jest w każdej sekcji osobno – edycja w BLE Mesh nie ma
+        # przestawiać referencji w Thread ani Zigbee.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            mesh = self.section(app, "ble_mesh")
+            mesh.query_one(".calc-ref-value.calc-ref-send-charge",
+                           Input).value = "5"
+            await pilot.pause()
+            for other in ("thread", "zigbee"):
+                value = self.section(app, other).query_one(
+                    ".calc-ref-value.calc-ref-send-charge", Input).value
+                self.assertEqual(value, "22")
+
     async def test_nie_ma_juz_kalibracji_ani_deep_sleepu(self):
         # Kalkulator liczy z wpisanych liczb – nie czyta przebiegów sesji
         # i nie ma drugiego pola podłogi.

@@ -280,6 +280,36 @@ class RepeatButton(Button):
 # ('send' / 'poll'), bo po nich rozpoznaje role interwałów w sesji.
 TERM_LABELS = {"send": "wysłania", "poll": "polle"}
 
+# Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
+# wielkości zmierzony na węźle LPN (te same liczby, co placeholdery pól).
+# Każda sekcja ma WŁASNĄ kopię tych pól (patrz CalculatorSection.compose),
+# więc edycja w jednym protokole nie rusza pozostałych dwóch.
+REF_FIELDS = (
+    ("baseline", "Baseline (µA)", "2.4"),
+    ("send-charge", "Ładunek send", "22"),
+    ("poll-charge", "Ładunek poll", "1478"),
+)
+
+
+class RefLabel(Static):
+    """Nazwa wiersza w tabelce wartości oczekiwanych – klik kopiuje liczbę
+    z pola obok (edytowalnego) do odpowiadającego pola kalkulatora tej
+    samej sekcji. Sama liczba w tabelce zostaje nietknięta, więc kolejny
+    klik po edycji wpisuje już nową wartość."""
+
+    def __init__(self, text, field, **kwargs):
+        super().__init__(text, classes="calc-ref-name", **kwargs)
+        self.field = field
+
+    def on_click(self, event):
+        event.stop()
+        value = self.parent.query_one(Input).value
+        section = self.parent
+        while section is not None and not isinstance(section, CalculatorSection):
+            section = section.parent
+        if section is not None:
+            section.apply_reference(self.field, value)
+
 
 class CalculatorSection(Vertical):
     """Sekcja kalkulatora poboru prądu dla JEDNEGO protokołu.
@@ -301,36 +331,54 @@ class CalculatorSection(Vertical):
 
     def compose(self):
         yield Label(self.proto_label, classes="h calc-head")
-        # Jednostki w nawiasach OKRĄGŁYCH, nie kwadratowych: Label renderuje
-        # treść przez markup Rich, w którym '[s]' jest znacznikiem
-        # przekreślenia – nawias znikał, a resztę wiersza przekreślało.
-        yield Label("Prąd bezczynności (baseline) w µA:")
-        yield Input(placeholder="np. 2.4", classes="calc-baseline")
-        with Horizontal(classes="calc-row"):
-            with Vertical(classes="calc-col"):
-                yield Label("Ładunek jednego wysłania (µC):")
-                yield Input(placeholder="np. 22", classes="calc-send-charge")
-            with Vertical(classes="calc-col"):
-                yield Label("Interwał send (s):")
-                yield Input(placeholder="np. 30", classes="calc-send-period")
-        with Horizontal(classes="calc-row"):
-            with Vertical(classes="calc-col"):
-                yield Label("Ładunek jednego polla (µC):")
-                yield Input(placeholder="np. 1478",
-                            classes="calc-poll-charge")
-            with Vertical(classes="calc-col"):
-                # Puste pola polla znaczą, że węzeł nie pollue – etykieta
-                # tego nie tłumaczy, bo to widać po wyniku (składnik po
-                # prostu nie wchodzi do rozkładu).
-                yield Label("Interwał poll (s):")
-                yield Input(placeholder="np. 60", classes="calc-poll-period")
-        # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu przyszło,
-        # więc nie ma być kolejnym wierszem tabelki. Podpis po lewej,
-        # liczba dociągnięta do prawej krawędzi.
-        with Horizontal(classes="calc-average"):
-            yield Static("Średni pobór prądu", classes="calc-average-label")
-            yield Static("—", classes="calc-average-value")
-        yield Static("", classes="calc-budget")
+        with Horizontal(classes="calc-body"):
+            with Vertical(classes="calc-fields"):
+                # Jednostki w nawiasach OKRĄGŁYCH, nie kwadratowych: Label
+                # renderuje treść przez markup Rich, w którym '[s]' jest
+                # znacznikiem przekreślenia – nawias znikał, a resztę
+                # wiersza przekreślało.
+                yield Label("Prąd bezczynności (baseline) w µA:")
+                yield Input(placeholder="np. 2.4", classes="calc-baseline")
+                with Horizontal(classes="calc-row"):
+                    with Vertical(classes="calc-col"):
+                        yield Label("Ładunek jednego wysłania (µC):")
+                        yield Input(placeholder="np. 22",
+                                    classes="calc-send-charge")
+                    with Vertical(classes="calc-col"):
+                        yield Label("Interwał send (s):")
+                        yield Input(placeholder="np. 30",
+                                    classes="calc-send-period")
+                with Horizontal(classes="calc-row"):
+                    with Vertical(classes="calc-col"):
+                        yield Label("Ładunek jednego polla (µC):")
+                        yield Input(placeholder="np. 1478",
+                                    classes="calc-poll-charge")
+                    with Vertical(classes="calc-col"):
+                        # Puste pola polla znaczą, że węzeł nie pollue –
+                        # etykieta tego nie tłumaczy, bo to widać po
+                        # wyniku (składnik po prostu nie wchodzi do
+                        # rozkładu).
+                        yield Label("Interwał poll (s):")
+                        yield Input(placeholder="np. 60",
+                                    classes="calc-poll-period")
+                # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu
+                # przyszło, więc nie ma być kolejnym wierszem tabelki.
+                # Podpis po lewej, liczba dociągnięta do prawej krawędzi.
+                with Horizontal(classes="calc-average"):
+                    yield Static("Średni pobór prądu",
+                                classes="calc-average-label")
+                    yield Static("—", classes="calc-average-value")
+                yield Static("", classes="calc-budget")
+            # Tabelka wartości oczekiwanych: osobna kolumna po prawej, żeby
+            # klik w wiersz i edycja liczby obok nie kolidowały z polami
+            # kalkulatora w kolumnie po lewej.
+            with Vertical(classes="calc-ref"):
+                yield Static("Wartości oczekiwane", classes="calc-ref-head")
+                for field, label, default in REF_FIELDS:
+                    with Horizontal(classes="calc-ref-row"):
+                        yield RefLabel(label, field)
+                        yield Input(value=default,
+                                    classes=f"calc-ref-value calc-ref-{field}")
 
     def on_mount(self):
         self.refresh_result()
@@ -391,6 +439,17 @@ class CalculatorSection(Vertical):
     def on_input_changed(self, event):
         # Zdarzenia NIE zatrzymujemy: App też ich słucha (suma czasów
         # w kreatorze trybu autonomicznego).
+        self.refresh_result()
+
+    # ---------- tabelka wartości oczekiwanych ----------
+
+    def apply_reference(self, field, value):
+        """Wpisz liczbę z tabelki wartości oczekiwanych do pola `field`
+        ('baseline' / 'send-charge' / ... – patrz REF_FIELDS)."""
+        value = value.strip()
+        if not value:
+            return
+        self.query_one(f".calc-{field}", Input).value = value
         self.refresh_result()
 
 
@@ -2453,12 +2512,16 @@ class PowerTestApp(App):
     #total-time { width: 72; max-width: 100%; height: 1;
                   text-align: right; color: #999999; }
     /* Kalkulator poboru prądu: sekcje wyglądają jak karty pomiaru, bo są
-       tym samym rodzajem rzeczy – blokiem pól z wynikiem. */
-    #calculator { width: 72; max-width: 100%; height: auto; }
+       tym samym rodzajem rzeczy – blokiem pól z wynikiem. Szersze niż
+       pozostałe panele (72), bo doszła kolumna z tabelką wartości
+       oczekiwanych po prawej. */
+    #calculator { width: 100; max-width: 100%; height: auto; }
     .calc-section { width: 100%; height: auto; border: round #555555;
                     background: transparent; padding: 0 1;
                     margin-bottom: 1; }
     .calc-head { margin-top: 0; }
+    .calc-body { height: auto; width: 100%; }
+    .calc-fields { width: 1fr; height: auto; padding-right: 2; }
     .calc-row { height: auto; width: 100%; }
     .calc-col { width: 1fr; height: auto; padding-right: 1; }
     .calc-baseline { width: 100%; }
@@ -2472,6 +2535,31 @@ class PowerTestApp(App):
     .calc-average-value { width: 1fr; text-align: right;
                           text-style: bold; color: $text; }
     .calc-budget { height: auto; margin-top: 1; color: #999999; }
+    /* Tabelka wartości oczekiwanych: kolumna po prawej stronie sekcji.
+       Nazwa pola (RefLabel) jest klikalna – kopiuje liczbę z pola obok
+       (edytowalnego Input) do kalkulatora; sama tabelka niczego nie liczy. */
+    .calc-ref { width: 33; height: auto; border-left: round #555555;
+                padding: 0 0 0 2; }
+    .calc-ref-head { color: #999999; margin-bottom: 1; }
+    /* Wiersz ma wysokość pola (3: obwódka/tekst/obwódka) – nazwa dostaje
+       taką samą wysokość i wyśrodkowuje w niej tekst (content-align),
+       więc obie kolumny stoją na tej samej linii bez sztuczek z
+       align-vertical na rzędzie. */
+    .calc-ref-row { height: 3; width: 100%; margin-bottom: 1; }
+    /* Obwódka jest ZAWSZE obecna (w kolorze tła – niewidoczna), żeby
+       najechanie myszką tylko zmieniało jej kolor, a nie dokładało
+       obwódkę i przesuwało layout o dodatkowe wiersze/kolumny. */
+    .calc-ref-name { width: 1fr; height: 3; content-align: left middle;
+                     text-wrap: nowrap; text-overflow: ellipsis;
+                     border: round #121212; padding: 0 1; }
+    .calc-ref-name:hover { border: round #aaaaaa; }
+    /* Input rezerwuje domyślnie padding 0 2 (Input.DEFAULT_CSS) – przy
+       szerokości 9 zostawiało to na tekst tylko 3 kolumny (9 - 2 obwódka
+       - 4 padding), więc "2.4" i "1478" (3-4 znaki) się nie mieściły i
+       renderowały jako obcięty, nieczytelny fragment. Szerokość dopasowana
+       do najdłuższej wartości (4 cyfry) minimalizuje puste miejsce po
+       prawej – Input renderuje tekst od lewej i nie ma opcji center. */
+    .calc-ref-value { width: 9; padding: 0 1; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
        Select zamontowany od razu jako display:none nie tworzy overlaya. */
