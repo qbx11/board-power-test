@@ -373,7 +373,7 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
             await pilot.click(ref_label)
             await pilot.pause()
             self.assertEqual(sec.query_one(".calc-send-charge", Input).value,
-                              "22")
+                              "95.5")
 
     async def test_edycja_referencji_nie_rusza_pola_dopoki_nie_klikniesz(self):
         app = tui.PowerTestApp()
@@ -403,10 +403,43 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
             mesh.query_one(".calc-ref-value.calc-ref-send-charge",
                            Input).value = "5"
             await pilot.pause()
-            for other in ("thread", "zigbee"):
+            for other, expected in (("thread", "95.5"), ("zigbee", "22")):
                 value = self.section(app, other).query_one(
                     ".calc-ref-value.calc-ref-send-charge", Input).value
-                self.assertEqual(value, "22")
+                self.assertEqual(value, expected, other)
+
+    async def test_thread_ma_wlasne_wartosci_oczekiwane(self):
+        # Thread rozkłada się odwrotnie niż węzeł LPN: wysyłka Mattera
+        # droga, poll tani. Liczby z mesha dawały tam wynik obok
+        # rzeczywistości, dopóki nie nadpisało się ich ręcznie.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 200)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            expected = {"ble_mesh": ("2.4", "22", "1478"),
+                        "thread": ("2.4", "95.5", "11"),
+                        "zigbee": ("2.4", "22", "1478")}
+            for proto, values in expected.items():
+                sec = self.section(app, proto)
+                self.assertEqual(
+                    tuple(sec.ref_default(f)
+                          for f in ("baseline", "send-charge", "poll-charge")),
+                    values, proto)
+
+    async def test_podpowiedzi_pol_ida_za_tabelka(self):
+        # Placeholder i liczba w tabelce to ta sama wartość – wpisane
+        # dwa razy rozjechałyby się przy pierwszej zmianie którejś z nich.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 200)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            for proto in ("ble_mesh", "thread", "zigbee"):
+                sec = self.section(app, proto)
+                for field in ("baseline", "send-charge", "poll-charge"):
+                    ref = sec.query_one(f".calc-ref-value.calc-ref-{field}",
+                                        Input).value
+                    hint = sec.query_one(f".calc-{field}", Input).placeholder
+                    self.assertEqual(hint, f"np. {ref}", f"{proto}/{field}")
 
     async def test_nie_ma_juz_kalibracji_ani_deep_sleepu(self):
         # Kalkulator liczy z wpisanych liczb – nie czyta przebiegów sesji

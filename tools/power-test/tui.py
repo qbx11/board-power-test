@@ -282,14 +282,22 @@ TERM_LABELS = {"send": "wysłania", "poll": "polle",
                energy.ACTIVE_WINDOW: "fast polle"}
 
 # Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
-# wielkości zmierzony na węźle LPN (te same liczby, co placeholdery pól).
-# Każda sekcja ma WŁASNĄ kopię tych pól (patrz CalculatorSection.compose),
-# więc edycja w jednym protokole nie rusza pozostałych dwóch.
+# wielkości zmierzony w tym repo. Każda sekcja ma WŁASNĄ kopię tych pól
+# (patrz CalculatorSection.compose), więc edycja w jednym protokole nie
+# rusza pozostałych dwóch.
 REF_FIELDS = (
     ("baseline", "Baseline (µA)", "2.4"),
     ("send-charge", "Ładunek send", "22"),
     ("poll-charge", "Ładunek poll", "1478"),
 )
+# Liczby zależą od protokołu, więc nie każdy bierze te z REF_FIELDS (rząd
+# wielkości z węzła LPN). Thread rozkłada się odwrotnie niż mesh: wysyłka
+# Mattera jest droga, a poll tani – wpisywanie tam 1478 µC za poll dawało
+# wynik obok rzeczywistości, dopóki się tego nie nadpisało ręcznie.
+# Czego tu nie ma, bierze wartość z REF_FIELDS.
+REF_OVERRIDES = {
+    "thread": {"send-charge": "95.5", "poll-charge": "11"},
+}
 
 
 class RefLabel(Static):
@@ -336,6 +344,20 @@ class CalculatorSection(Vertical):
         self.proto_label = label
         self.matter = matter
 
+    def ref_default(self, field):
+        """Wartość oczekiwana pola dla TEGO protokołu: nadpisanie
+        z REF_OVERRIDES, a w jego braku liczba z REF_FIELDS."""
+        override = REF_OVERRIDES.get(self.protocol, {})
+        for name, _label, default in REF_FIELDS:
+            if name == field:
+                return override.get(field, default)
+        return ""
+
+    def _hint(self, field):
+        """Placeholder pola z wartości oczekiwanej – żeby podpowiedź nad
+        pustym polem i liczba w tabelce obok nie mogły się rozjechać."""
+        return f"np. {self.ref_default(field)}"
+
     def compose(self):
         yield Label(self.proto_label, classes="h calc-head")
         with Horizontal(classes="calc-body"):
@@ -345,11 +367,12 @@ class CalculatorSection(Vertical):
                 # znacznikiem przekreślenia – nawias znikał, a resztę
                 # wiersza przekreślało.
                 yield Label("Prąd bezczynności (baseline) w µA:")
-                yield Input(placeholder="np. 2.4", classes="calc-baseline")
+                yield Input(placeholder=self._hint("baseline"),
+                            classes="calc-baseline")
                 with Horizontal(classes="calc-row"):
                     with Vertical(classes="calc-col"):
                         yield Label("Ładunek jednego wysłania (µC):")
-                        yield Input(placeholder="np. 22",
+                        yield Input(placeholder=self._hint("send-charge"),
                                     classes="calc-send-charge")
                     with Vertical(classes="calc-col"):
                         yield Label("Interwał send (s):")
@@ -358,7 +381,7 @@ class CalculatorSection(Vertical):
                 with Horizontal(classes="calc-row"):
                     with Vertical(classes="calc-col"):
                         yield Label("Ładunek jednego polla (µC):")
-                        yield Input(placeholder="np. 1478",
+                        yield Input(placeholder=self._hint("poll-charge"),
                                     classes="calc-poll-charge")
                     with Vertical(classes="calc-col"):
                         # Puste pola polla znaczą, że węzeł nie pollue –
@@ -402,10 +425,10 @@ class CalculatorSection(Vertical):
             # kalkulatora w kolumnie po lewej.
             with Vertical(classes="calc-ref"):
                 yield Static("Wartości oczekiwane", classes="calc-ref-head")
-                for field, label, default in REF_FIELDS:
+                for field, label, _default in REF_FIELDS:
                     with Horizontal(classes="calc-ref-row"):
                         yield RefLabel(label, field)
-                        yield Input(value=default,
+                        yield Input(value=self.ref_default(field),
                                     classes=f"calc-ref-value calc-ref-{field}")
 
     def on_mount(self):
