@@ -278,7 +278,33 @@ class RepeatButton(Button):
 
 # Nazwy składników modelu w interfejsie. Silnik trzyma je jako klucze
 # ('send' / 'poll'), bo po nich rozpoznaje role interwałów w sesji.
-TERM_LABELS = {"send": "wysłania", "poll": "polle"}
+TERM_LABELS = {"send": "wysłania", "poll": "polle",
+               "heartbeat": "heartbeat"}
+
+# Składniki, których NIE ma każdy protokół – dokładane do sekcji tylko tam,
+# gdzie występują. Zigbee ma heartbeat schedulera ZBOSS: co ~1 s procesor
+# budzi się na ~2 ms, żeby obsłużyć kolejkę timerów stosu, i wraca do snu.
+# To NIE jest keepalive ani poll – nic nie leci przez radio (0.92 µC wobec
+# ~46 µC realnego wysłania), ale przy interwałach rzędu minut ten składnik
+# bywa drugą co do wielkości pozycją budżetu, więc model bez niego zaniża
+# wynik. Wartości domyślne = pomiar z tego repo (0.92 µC co 1 s ≈ 0.92 µA).
+# Siedzi w prekompilowanym libzboss.a, więc aplikacja go nie wyłączy –
+# pole zostaje edytowalne, bo inna wersja stosu może mieć inny koszt.
+# Pola: (rola, etykieta ładunku, ładunek, etykieta interwału, interwał,
+#        nazwa w tabelce wartości oczekiwanych)
+EXTRA_TERMS = {
+    "zigbee": (("heartbeat", "Ładunek ZBOSS (µC):", "0.92",
+                "Interwał ZBOSS (s):", "1", "Ładunek ZBOSS"),),
+}
+
+# Wartości oczekiwane są rzędem wielkości z pomiarów – a te różnią się
+# między protokołami. REF_FIELDS trzyma liczby z węzła LPN (BLE Mesh),
+# a tu nadpisujemy je tam, gdzie mamy własny pomiar. Zigbee: BTZ_EndDevice
+# z tego repo (baseline 3.2 µA, wysłanie 46.2 µC, poll 19.8 µC).
+REF_OVERRIDES = {
+    "zigbee": {"baseline": "3.2", "send-charge": "46.2",
+               "poll-charge": "19.8"},
+}
 
 # Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
 # wielkości zmierzony na węźle LPN (te same liczby, co placeholdery pól).
@@ -361,6 +387,21 @@ class CalculatorSection(Vertical):
                         yield Label("Interwał poll (s):")
                         yield Input(placeholder="np. 60",
                                     classes="calc-poll-period")
+                # Składniki własne protokołu (patrz EXTRA_TERMS). Wpisane
+                # z góry, a nie jako placeholder: heartbeat jest w stosie
+                # zawsze, więc model ma go liczyć bez proszenia. Puste
+                # pole interwału nadal go wyłącza, jak każdy inny składnik.
+                for role, charge_label, charge_value, period_label, \
+                        period_value, _ref in EXTRA_TERMS.get(self.protocol, ()):
+                    with Horizontal(classes="calc-row"):
+                        with Vertical(classes="calc-col"):
+                            yield Label(charge_label)
+                            yield Input(value=charge_value,
+                                        classes=f"calc-{role}-charge")
+                        with Vertical(classes="calc-col"):
+                            yield Label(period_label)
+                            yield Input(value=period_value,
+                                        classes=f"calc-{role}-period")
                 # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu
                 # przyszło, więc nie ma być kolejnym wierszem tabelki.
                 # Podpis po lewej, liczba dociągnięta do prawej krawędzi.
@@ -374,10 +415,15 @@ class CalculatorSection(Vertical):
             # kalkulatora w kolumnie po lewej.
             with Vertical(classes="calc-ref"):
                 yield Static("Wartości oczekiwane", classes="calc-ref-head")
-                for field, label, default in REF_FIELDS:
+                extra_refs = tuple(
+                    (f"{role}-charge", ref_label, charge_value)
+                    for role, _cl, charge_value, _pl, _pv, ref_label
+                    in EXTRA_TERMS.get(self.protocol, ()))
+                overrides = REF_OVERRIDES.get(self.protocol, {})
+                for field, label, default in REF_FIELDS + extra_refs:
                     with Horizontal(classes="calc-ref-row"):
                         yield RefLabel(label, field)
-                        yield Input(value=default,
+                        yield Input(value=overrides.get(field, default),
                                     classes=f"calc-ref-value calc-ref-{field}")
 
     def on_mount(self):
@@ -405,7 +451,9 @@ class CalculatorSection(Vertical):
         i interwał – puste pole interwału znaczy „tego wybudzenia nie ma”
         (np. węzeł, który nie pollue)."""
         out = []
-        for role in ("send", "poll"):
+        roles = ("send", "poll") + tuple(
+            row[0] for row in EXTRA_TERMS.get(self.protocol, ()))
+        for role in roles:
             charge = self._value(f".calc-{role}-charge")
             period = self._value(f".calc-{role}-period")
             if charge is None or not period:

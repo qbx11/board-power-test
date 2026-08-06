@@ -101,8 +101,13 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
                       send_charge="22", send_period="30")
             await pilot.pause()
             self.assertIn("3.1 µA", self.result(self.section(app, "ble_mesh")))
-            for other in ("thread", "zigbee"):
-                self.assertIn("Wpisz", self.result(self.section(app, other)))
+            # Thread nie ma własnych składników, więc zostaje pusty.
+            self.assertIn("Wpisz", self.result(self.section(app, "thread")))
+            # Zigbee ma wpisany z góry heartbeat ZBOSS, więc liczy od razu –
+            # ale TYLKO jego, bez liczb wklepanych do mesha.
+            zigbee = self.result(self.section(app, "zigbee"))
+            self.assertIn("heartbeat", zigbee)
+            self.assertNotIn("wysłania", zigbee)
 
     # ---------- liczenie ----------
 
@@ -263,10 +268,12 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
             mesh.query_one(".calc-ref-value.calc-ref-send-charge",
                            Input).value = "5"
             await pilot.pause()
-            for other in ("thread", "zigbee"):
+            # Każda sekcja trzyma SWOJĄ referencję: Thread domyślną z
+            # REF_FIELDS, Zigbee własną z REF_OVERRIDES (pomiar BTZ).
+            for other, expected in (("thread", "22"), ("zigbee", "46.2")):
                 value = self.section(app, other).query_one(
                     ".calc-ref-value.calc-ref-send-charge", Input).value
-                self.assertEqual(value, "22")
+                self.assertEqual(value, expected, other)
 
     async def test_nie_ma_juz_kalibracji_ani_deep_sleepu(self):
         # Kalkulator liczy z wpisanych liczb – nie czyta przebiegów sesji
