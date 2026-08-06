@@ -1,0 +1,19 @@
+# ============================================================
+#  Lokalne środowisko board-power-test (poza gitem)
+# ============================================================
+# Źródłowane przez bin/board-power-test przed startem CLI.
+#
+# Toolchain NCS, w którym budujesz aplikację Zigbee ręcznie:
+#   source ~/ncs/toolchains/b77d8c1312/ncsenv.sh
+#   cd ~/projects/workspace_zigbee/zigbee-internal-btz
+#   west build -b BTZ_EndDevice/nrf54l15/cpuapp --sysbuild -- -DBOARD_ROOT=...
+#
+# Bez tego pliku launcher startuje własne środowisko przez
+# `nrfutil toolchain-manager launch --ncs-version v3.4.0`, czyli INNY
+# toolchain (fbf7391cab) i inny west (1.5 zamiast 1.2) niż Twój.
+. "$HOME/ncs/toolchains/b77d8c1312/ncsenv.sh"
+
+# UWAGA: ten toolchain jest sparowany z workspace'em ~/projects/workspace_zigbee.
+# Wbudowane scenariusze tego repo (reset_only, idle, ...) budują się w SDK
+# z ~/ncs/v3.4.0 – jeśli kiedyś przestaną się budować, zmień nazwę tego pliku
+# (np. na .bpt_env.off) i uruchom narzędzie jeszcze raz.
