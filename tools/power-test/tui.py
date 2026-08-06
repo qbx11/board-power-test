@@ -278,7 +278,8 @@ class RepeatButton(Button):
 
 # Nazwy składników modelu w interfejsie. Silnik trzyma je jako klucze
 # ('send' / 'poll'), bo po nich rozpoznaje role interwałów w sesji.
-TERM_LABELS = {"send": "wysłania", "poll": "polle"}
+TERM_LABELS = {"send": "wysłania", "poll": "polle",
+               energy.ACTIVE_WINDOW: "fast polle"}
 
 # Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
 # wielkości zmierzony na węźle LPN (te same liczby, co placeholdery pól).
@@ -321,13 +322,19 @@ class CalculatorSection(Vertical):
 
     Sekcja niczego nie mierzy i nie czyta zapisanych przebiegów. Wszystkie
     liczby wpisuje człowiek; placeholdery podpowiadają rzędy wielkości
-    zmierzone w tym repo na węźle LPN."""
+    zmierzone w tym repo na węźle LPN.
 
-    def __init__(self, protocol, label, **kwargs):
+    `matter=True` (tylko Thread) dokłada JEDNO pole: liczbę polli robionych
+    w oknie aktywnym po każdej wysyłce. Nie ma osobnego pola na ich ładunek,
+    bo kosztują tyle samo, co zwykły poll – patrz energy.active_window_term.
+    Pozostałe protokoły tego okna nie mają, więc nie mają i pola."""
+
+    def __init__(self, protocol, label, matter=False, **kwargs):
         super().__init__(classes="calc-section", id=f"calc-{protocol}",
                          **kwargs)
         self.protocol = protocol
         self.proto_label = label
+        self.matter = matter
 
     def compose(self):
         yield Label(self.proto_label, classes="h calc-head")
@@ -361,6 +368,27 @@ class CalculatorSection(Vertical):
                         yield Label("Interwał poll (s):")
                         yield Input(placeholder="np. 60",
                                     classes="calc-poll-period")
+                if self.matter:
+                    # Osobny wiersz, nie trzecia kolumna przy pollu: te
+                    # polle nie chodzą interwałem polla, tylko doklejają
+                    # się do wysyłki, i przy interwale send trzeba je
+                    # czytać.
+                    with Horizontal(classes="calc-row"):
+                        with Vertical(classes="calc-col"):
+                            # "Fast polli", nie "polli": w oknie aktywnym
+                            # idą interwałem fast polla i tylko ta nazwa
+                            # nie myli się ze slow pollem z pola wyżej.
+                            # Bez "(szt.)" na końcu – kolumna ma 29 znaków
+                            # i etykieta z jednostką ucinała się w połowie
+                            # słowa. Że to sztuki, widać po podpowiedzi obok.
+                            yield Label("Fast polli po send:")
+                            yield Input(placeholder="np. 3",
+                                        classes="calc-active-polls")
+                        with Vertical(classes="calc-col"):
+                            yield Static("Kosztują tyle, co zwykły poll, "
+                                         "a ostatni z nich przestawia "
+                                         "licznik slow polla.",
+                                         classes="calc-hint")
                 # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu
                 # przyszło, więc nie ma być kolejnym wierszem tabelki.
                 # Podpis po lewej, liczba dociągnięta do prawej krawędzi.
@@ -405,16 +433,54 @@ class CalculatorSection(Vertical):
         i interwał – puste pole interwału znaczy „tego wybudzenia nie ma”
         (np. węzeł, który nie pollue)."""
         out = []
-        for role in ("send", "poll"):
-            charge = self._value(f".calc-{role}-charge")
-            period = self._value(f".calc-{role}-period")
-            if charge is None or not period:
-                continue
-            out.append(energy.Term(name=role, charge_uC=charge,
+        charge = self._value(".calc-send-charge")
+        period = self._value(".calc-send-period")
+        if charge is not None and period:
+            out.append(energy.Term(name="send", charge_uC=charge,
                                    period_s=period))
+        return out + self.poll_terms()
+
+    def poll_terms(self):
+        """Składniki pollowania: zwykłe i te z okna aktywnego po wysyłce.
+
+        Liczone RAZEM, bo w Thready jedne zależą od drugich – licznik slow
+        polla startuje od ostatniego polla w oknie aktywnym, więc między
+        wysyłkami mieści się ich mniej, niż wychodzi z samego interwału
+        (energy.slow_poll_count). Osobne liczenie zawyżałoby wynik o jeden
+        poll na każdą wysyłkę."""
+        charge = self._value(".calc-poll-charge")
+        if charge is None:
+            return []
+        period = self._value(".calc-poll-period")
+        send_period = self._value(".calc-send-period")
+        count = self._value(".calc-active-polls") if self.matter else None
+        if not count or not send_period:
+            # Bez okna aktywnego nic nie przestawia licznika, więc zwykły
+            # model ciągły. Tak liczą BLE Mesh i Zigbee, i tak liczy Thread
+            # z pustym polem liczby polli.
+            if not period:
+                return []
+            return [energy.Term(name="poll", charge_uC=charge,
+                                period_s=period)]
+        out = []
+        # Pusty interwał polla to węzeł bez cyklicznego pollowania – okno
+        # aktywne ma wtedy nadal swoje polle.
+        if period:
+            out.append(energy.slow_poll_term(charge, period, send_period))
+        out.append(energy.active_window_term(charge, count, send_period))
         return out
 
     # ---------- wynik ----------
+
+    def term_label(self, name):
+        """Nazwa składnika w rozkładzie budżetu. W Thready zwykłe
+        pollowanie to SLOW polle, bo w wierszu obok stoją fast polle
+        z okna aktywnego i bez przymiotnika nie widać, który jest który.
+        W BLE Mesh i Zigbee fast polli nie ma, więc doprecyzowanie tylko
+        by sugerowało nieistniejący drugi rodzaj."""
+        if self.matter and name == "poll":
+            return "slow polle"
+        return TERM_LABELS.get(name, name)
 
     def refresh_result(self):
         value = self.query_one(".calc-average-value", Static)
@@ -428,7 +494,7 @@ class CalculatorSection(Vertical):
         value.update(_fmt_uA(energy.average_uA(baseline, terms)))
         lines = []
         for share in energy.budget(baseline, terms):
-            name = TERM_LABELS.get(share.name, share.name)
+            name = self.term_label(share.name)
             # Rozkład ZAWSZE w µA, nawet gdy składnik schodzi poniżej 1 µA:
             # ta tabela służy do porównywania wierszy ze sobą, a jeden
             # wiersz w nA psułby porównanie mimo poprawnej wartości.
@@ -2527,6 +2593,12 @@ class PowerTestApp(App):
     .calc-baseline { width: 100%; }
     .calc-send-charge, .calc-send-period { width: 100%; }
     .calc-poll-charge, .calc-poll-period { width: 100%; }
+    .calc-active-polls { width: 100%; }
+    /* Podpowiedź obok pola polli w oknie aktywnym: stoi w kolumnie pola,
+       którego tam nie ma (ładunek bierze się ze zwykłego polla), więc
+       wyrównana do dołu wiersza – na wysokości ramki Inputa obok. */
+    .calc-hint { width: 100%; height: auto; margin-top: 1;
+                 color: #999999; }
     /* Wynik w ramce – wyróżniony, bo to on jest odpowiedzią sekcji.
        Jaśniejsza obwódka niż pola, żeby wzrok siadał tutaj. */
     .calc-average { height: 3; width: 100%; margin-top: 1;
@@ -2810,8 +2882,8 @@ class PowerTestApp(App):
             # liczy prąd średni z modelu I_avg = I_baseline + Q/T z liczb
             # wpisanych w polach.
             with Vertical(id="calculator", classes="calc-only"):
-                for proto, label, _mon, _matter, _sweep in PROTOCOLS:
-                    yield CalculatorSection(proto, label)
+                for proto, label, _mon, matter, _sweep in PROTOCOLS:
+                    yield CalculatorSection(proto, label, matter=matter)
 
             yield Label("Egzemplarz płytki", classes="h measure-only")
             yield Input(placeholder="np. BTZ #2", id="sample",

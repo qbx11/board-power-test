@@ -217,6 +217,146 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
                 "Ładunek jednego polla (µC):",
                 "Interwał poll (s):"])
 
+    # ---------- polle w oknie aktywnym po wysyłce (tylko Thread) ----------
+
+    async def test_pole_polli_po_wyslaniu_tylko_w_thready(self):
+        # BLE Mesh i Zigbee nie mają okna aktywnego po wysyłce, więc nie
+        # mają i pola – inaczej byłoby to zaproszenie do wpisania liczby,
+        # której model tam nie użyje.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            self.assertEqual(
+                len(self.section(app, "thread").query(".calc-active-polls")), 1)
+            for other in ("ble_mesh", "zigbee"):
+                self.assertEqual(
+                    len(self.section(app, other).query(".calc-active-polls")),
+                    0, other)
+
+    async def test_polle_po_wyslaniu_wchodza_do_wzoru(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            self.fill(sec, baseline="2", send_charge="30", send_period="60",
+                      poll_charge="600", poll_period="15")
+            await pilot.pause()
+            # Bez okna aktywnego: 2 + 0.5 + 600/15 = 42.5
+            self.assertIn("42.5 µA", self.result(sec))
+            # Trzy polle w oknie aktywnym: slow polle spadają z czterech na
+            # trzy (3*600/60 = 30), a okno dokłada 3*600/60 = 30.
+            self.fill(sec, active_polls="3")
+            await pilot.pause()
+            self.assertIn("62.5 µA", self.result(sec))
+            self.assertIn("fast polle", self.result(sec))
+            self.assertIn("slow polle", self.result(sec))
+
+    async def test_jeden_poll_w_oknie_aktywnym_nic_nie_kosztuje(self):
+        # Licznik slow polla startuje od OSTATNIEGO polla w oknie aktywnym,
+        # więc jeden fast poll zajmuje miejsce slow polla, zamiast się do
+        # niego dokładać – wynik ma zostać ten sam.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            self.fill(sec, poll_charge="600", poll_period="15",
+                      send_period="60")
+            await pilot.pause()
+            self.assertIn("40.0 µA", self.result(sec))
+            self.fill(sec, active_polls="1")
+            await pilot.pause()
+            self.assertIn("40.0 µA", self.result(sec))
+            # Nie przez zaokrąglenie: slow polli jest teraz trzy, nie
+            # cztery, i tyle samo prądu co poll z okna.
+            self.assertEqual([round(t.current_uA(), 6) for t in sec.terms()],
+                             [30.0, 10.0])
+
+    async def test_gesta_wysylka_zjada_slow_polla_calkiem(self):
+        # Wysyłka co 10 s przy slow pollu co 60 s: licznik nigdy nie wybije,
+        # zostają same polle z okna aktywnego.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            self.fill(sec, baseline="2", send_charge="30", send_period="10",
+                      poll_charge="600", poll_period="60", active_polls="2")
+            await pilot.pause()
+            # 2 + 3 + 0 + 2*600/10 = 125
+            self.assertIn("125.0 µA", self.result(sec))
+            # Wiersz slow polla zostaje w rozkładzie, wyzerowany: to sama
+            # w sobie odpowiedź („przy tych interwałach slow polla nie ma”),
+            # a nie brak składnika.
+            self.assertEqual([(t.name, round(t.current_uA(), 6))
+                              for t in sec.terms()],
+                             [("send", 3.0), ("poll", 0.0), ("active", 120.0)])
+
+    async def test_sprzezenie_tylko_w_thready(self):
+        # BLE Mesh i Zigbee nie mają okna aktywnego, więc ich slow poll
+        # liczy się dalej po staremu: pełne Q/T, bez oglądania się na send.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            for proto in ("ble_mesh", "zigbee"):
+                sec = self.section(app, proto)
+                self.fill(sec, poll_charge="600", poll_period="15",
+                          send_period="60")
+                await pilot.pause()
+                self.assertIn("40.0 µA", self.result(sec), proto)
+
+    async def test_polle_po_wyslaniu_biora_ladunek_zwyklego_polla(self):
+        # Nie ma osobnego pola ładunku – jeden taki poll kosztuje tyle, co
+        # zwykły, a różni się tylko liczba i to, że wypada raz na send.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            self.assertEqual(len(sec.query(".calc-active-charge")), 0)
+            # Bez interwału polla (węzeł nie pollue cyklicznie) okno
+            # aktywne wciąż się liczy.
+            self.fill(sec, send_charge="30", send_period="10",
+                      poll_charge="600", active_polls="1")
+            await pilot.pause()
+            self.assertEqual([t.name for t in sec.terms()],
+                             ["send", "active"])
+            self.assertIn("63.0 µA", self.result(sec))   # 3 + 60
+
+    async def test_puste_pole_polli_znaczy_bez_okna_aktywnego(self):
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            sec = self.section(app, "thread")
+            self.fill(sec, baseline="2", send_charge="30", send_period="10",
+                      poll_charge="600", poll_period="60")
+            await pilot.pause()
+            for empty in ("", "0", "abc"):
+                self.fill(sec, active_polls=empty)
+                await pilot.pause()
+                self.assertIn("15.0 µA", self.result(sec), repr(empty))
+                self.assertNotIn("fast polle", self.result(sec))
+
+    async def test_etykiety_thready_z_polem_okna_aktywnego(self):
+        # Etykieta pola okna aktywnego ma się MIEŚCIĆ w kolumnie (29 znaków
+        # przy 120 kolumnach terminala) – dłuższa wersja z jednostką
+        # ucinała się w połowie słowa, a Label nie zawija.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(120, 70)) as pilot:
+            labels = [str(w.render())
+                      for w in self.section(app, "thread").query(Label)]
+            self.assertEqual(labels, [
+                "Thread",
+                "Prąd bezczynności (baseline) w µA:",
+                "Ładunek jednego wysłania (µC):",
+                "Interwał send (s):",
+                "Ładunek jednego polla (µC):",
+                "Interwał poll (s):",
+                "Fast polli po send:"])
+            self.assertLessEqual(len(labels[-1]), 29)
+
     # ---------- tabelka wartości oczekiwanych ----------
 
     async def test_klik_w_wiersz_wpisuje_wartosc_do_pola(self):
