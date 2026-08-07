@@ -33,8 +33,31 @@ Wynik trafia do wspólnego dziennika.
 
 **Tryb autonomiczny** mierzy prąd bez Twojego udziału.
 Narzędzie zasila płytkę z PPK2, mierzy przez zadany czas i zapisuje wynik.
-Ułóż sekwencję pomiarów na kartach „Pomiar 1, 2, …”.
+Ułóż sekwencję pomiarów na kartach numerowanych 1, 2, …
 Każda karta ma własny czas, napięcie, warunek startu i podgląd logów.
+
+Nagłówek karty niesie numer po lewej, a po zwinięciu także jej treść:
+
+```text
+▼ 1                                                  <- rozwinięta
+▶ 1  LPN OFF · 20:00                                 <- zwykły pomiar
+▶ 1  LPN OFF · (10, 60, 300), (5, 10) · 6 × 20:00 = 2:00:00    <- seria
+```
+
+Zwinięta karta pokazuje scenariusz, WARTOŚCI osi serii i czas.
+Liczba przed `×` to pomiary tej karty: kombinacje serii razy krotność.
+Krotności nagłówek nie powtarza — mówi ją przycisk `xN` w tym samym wierszu.
+
+Pod listą kart stoi **czas łączny**: `Łącznie: 3:30:00  (9 pomiarów)`.
+To suma samych okien pomiarowych, licząc serie i krotności.
+Build, flash i triggery nie wchodzą, więc realny przebieg będzie dłuższy.
+Karty bez wpisanego czasu nie liczą się do żadnej z tych dwóch liczb.
+
+Narzędzie blokuje usypianie komputera na czas całego przebiegu.
+Blokada obejmuje bezczynność, jawny suspend i zamknięcie klapy.
+Zamknij więc laptopa i zostaw pomiar; przebieg zwalnia blokadę na końcu.
+Uśpienie w środku okna zabija strumień próbek z PPK2 i psuje pomiar.
+Tryb ręczny blokady nie bierze, bo operator i tak siedzi przy klawiaturze.
 
 Aplikacja startuje w trybie autonomicznym.
 Kliknij napis **„Pomiar ręczny”** u góry ekranu, aby zmienić tryb.
@@ -71,6 +94,32 @@ Wpisane pola czekają w swojej zakładce i wracają po ponownym wejściu.
 Każda zakładka trzyma serię (sweep).
 BLE Mesh i Zigbee mają dodatkowo monitor dongla; Thread mierzymy bez niego.
 
+W zakładce Thread wybierasz, **co narzędzie robi po flashu**:
+
+```text
+Parowanie + subskrypcja                       -> węzeł zostaje SIT-em
+Parowanie z rejestracją ICD + subskrypcja     -> tryb LIT
+Tylko subskrypcja (węzeł już sparowany)       -> bez parowania
+```
+
+Trzy tryby wykluczają się nawzajem, więc jest to jeden wybór.
+Rejestracja idzie wyłącznie w trakcie parowania, więc nie da się jej
+połączyć z „już sparowany”.
+
+Wybierz wariant z rejestracją, gdy mierzysz długie interwały pollowania.
+Bez rejestracji urządzenie z `CHIP_ICD_LIT_SUPPORT` pracuje jako SIT.
+SIT pollue co najwyżej co `CHIP_ICD_SIT_SLOW_POLL_LIMIT`, cokolwiek
+stoi w `CHIP_ICD_SLOW_POLL_INTERVAL`.
+Narzędzie odczytuje wtedy `OperatingMode` przed pomiarem i przerywa
+krok, jeśli węzeł mimo wszystko jedzie w SIT.
+
+Parowanie z rejestracją kończy się komendą StayActive: węzeł trzyma
+ActiveMode i pollue fast pollingiem jeszcze 30 s po parowaniu.
+Dlatego pomiar w tym trybie startuje 40 s po pierwszym raporcie, a nie
+10 s jak bez rejestracji — inaczej to wymuszone pollowanie wchodzi do
+średniej i zawyża wynik (przy fast pollingu 500 ms było to 0,3–0,9 µA,
+tym więcej, im krótszy pomiar).
+
 To zwykłe pola do wpisania, bez checkboxa „włącz”.
 Wpisana treść włącza funkcję, puste pole ją wyłącza.
 
@@ -96,6 +145,24 @@ pamięta własne wpisy, a pomiar bierze tylko te z wybranej zakładki.
 
 Pod zakładkami leżą napięcie, zapis danych i próbkowanie.
 Dotyczą sprzętu i pomiaru, więc są wspólne dla wszystkich protokołów.
+
+Po wgraniu obrazu narzędzie odcina zasilanie płytki na pół sekundy.
+Ten power-cycle daje czysty zimny start: stan z sesji programowania nie zostaje.
+Interfejs go nie wyłącza — robi to dopiero `power_cycle = false` w planie
+`plans/*.toml`. Przydaje się to firmware'owi, który przenosi stan przez
+podtrzymaną sekcję RAM: odcięcie zasilania kasuje taki blok, więc pierwszy
+cykl wychodzi zimny nawet wtedy, gdy miał być ciepły.
+
+**Przycisk „x1” w nagłówku karty** ustawia krotność pomiaru.
+Klik przestawia go x1 → x2 → … → x5, a po x5 wraca do x1.
+Krotność `xK` wykonuje ten pomiar K razy, jako K osobnych pomiarów.
+Każda powtórka ma własny flash, katalog sesji i wiersz w dzienniku.
+Etykiety powtórek to `N/1, N/2, …`, a w serii `N.M/1, N.M/2, …`.
+Powtórki jednego ustawienia idą obok siebie, także w serii.
+Obraz jest ten sam, więc narzędzie buduje go raz i tylko flashuje ponownie.
+Krotność działa w każdym protokole i przenosi ją „Zastosuj do …”.
+Powtarzaj pomiary, gdy szukasz rozrzutu — ten sam kod potrafi dać
+7 µA i 28 µA, jeśli w oknie pomiaru wypadnie inna liczba retransmisji.
 
 „Start pomiaru po czasie” i „Konsola RTT” są schowane z widoku.
 Kod obu został na miejscu, tylko interfejs ich nie pokazuje.

@@ -69,6 +69,8 @@ rtt      = "off"                             # do prądu snu; RTT dodaje narzut
 #   rm /tmp/chip_* -> chip-tool pairing ble-thread -> interactive + subscribe.
 # Pomiar PPK2 startuje 10 s po PIERWSZYM raporcie MeasuredValue (nie na
 # sztywnym czasie) – te 10 s to zapas na uspokojenie się sieci po parowaniu.
+# Z `icd_registration = true` zapas rośnie do 40 s: commissioning wysyła
+# wtedy StayActive i węzeł pollue fast pollingiem jeszcze 30 s po parowaniu.
 # `timeout` = ile czekać na tę pierwszą wartość (po sparowaniu).
 trigger = { type = "chip", node_id = "5", discriminator = "3840", pin = "20202021", timeout = "120s", dataset = "0e08000000000001000000030000174a0300000e35060004001fffe00208813ba4b5a068fddf0708fddc8e685e36d6cc0510b840138392a6efbee61680bdca9ae7fd030f4f70656e5468726561642d666236650102fb6e04108c97ec5b81873b78c371537a24886bef0c0402a0f7f8" }
 # Opcjonalne (mają sensowne domyślne):
@@ -78,6 +80,9 @@ trigger = { type = "chip", node_id = "5", discriminator = "3840", pin = "2020202
 #   chip_dir = "/home/goodbyte/KZ/connectedhomeip"   chip_tool = "..."
 #   skip_pairing = true   # węzeł już w fabryce – tylko subskrypcja
 #   no_wipe = true        # nie kasuj /tmp/chip_* przed parowaniem
+#   icd_registration = true   # rejestracja klienta check-in (tryb LIT);
+#                             # bez niej węzeł jedzie jako SIT
+#   icd_stay_active_ms = 30000   # okno na subskrypcję po parowaniu
 
 # ============================================================
 #  Tryby RTT (pole `rtt`) – kompromis szum ↔ etykiety

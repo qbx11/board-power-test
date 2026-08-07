@@ -11,7 +11,7 @@ import itertools
 import re
 import shlex
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 RTT_MODES = ("off", "trigger", "continuous")
@@ -83,8 +83,9 @@ class Trigger:
       'serial' = j.w., ale na logu dongla (fragment `pattern`),
       'chip'   = po flashu sparuj węzeł Matter i otwórz subskrypcję
                  atrybutu; pomiar startuje krótko po PIERWSZYM raporcie
-                 (engine.CHIP_START_SETTLE_S – zapas na uspokojenie się
-                 sieci po parowaniu; patrz scripts/pair_and_subscribe.py).
+                 (engine.chip_settle_s – zapas na uspokojenie się sieci
+                 po parowaniu, dłuższy przy `icd_registration` o okno
+                 StayActive; patrz scripts/pair_and_subscribe.py).
                  Pola chip_* niżej.
                  `timeout_s` = ile czekać na pierwszą wartość."""
     type: str = "delay"
@@ -106,6 +107,12 @@ class Trigger:
     match: str = ""              # regex 1. wartości; puste = domyślny skryptu
     skip_pairing: bool = False   # węzeł już sparowany – tylko subskrypcja
     no_wipe: bool = False        # nie kasuj /tmp/chip_* przed parowaniem
+    # Rejestracja ICD: bez niej urządzenie z CHIP_ICD_LIT_SUPPORT pracuje
+    # jako SIT i pollue co najwyżej co SIT_SLOW_POLL_LIMIT, cokolwiek by nie
+    # stało w CHIP_ICD_SLOW_POLL_INTERVAL. Włącza też weryfikację
+    # OperatingMode przed pomiarem (--verify-icd).
+    icd_registration: bool = False
+    icd_stay_active_ms: int = 30000  # okno na subskrypcję po parowaniu
 
 
 @dataclass
@@ -138,6 +145,12 @@ class PlanStep:
     build_cmd: str = ""          # pełny override komendy builda (shlex)
     pristine: bool = False
     power_cycle: bool = True
+    # Protokół, w którym mierzymy ('ble_mesh' / 'thread' / 'zigbee'; puste =
+    # zwykły pomiar bez protokołu). Sam pomiar go nie używa – trafia do
+    # meta.json sesji, żeby kalkulator poboru prądu wiedział, z której sesji
+    # wolno się kalibrować dla danej sekcji. Wcześniej protokół znała tylko
+    # karta w interfejsie i ginął po starcie przebiegu.
+    protocol: str = ""
     labels: list = field(default_factory=list)
     # --- seria (sweep): jeden "Pomiar N" rozbity na "Pomiar N.M" ---
     label: str = ""              # etykieta w UI/CSV ("N.M"); puste = numer kroku
@@ -278,6 +291,43 @@ def expand_sweep(number, axes, base):
     return steps
 
 
+# ------------------------------------------------------------
+#  Krotność karty ("x1 … x5" w nagłówku 'Pomiar N'): ten sam pomiar
+#  powtórzony kilka razy, ZAWSZE jako osobne kroki – osobny flash, osobne
+#  okno pomiaru, osobny katalog sesji i osobny wiersz w raporcie. Stąd
+#  bierze się rozrzut pomiaru (patrz 7 µA vs 28 µA na tych samych
+#  ustawieniach), więc powtórki muszą być widoczne jako oddzielne liczby,
+#  a nie uśrednione w jedną.
+#
+#  Powtórki idą OBOK SIEBIE: seria [A, B] ×3 to A A A B B B. Dzięki temu
+#  powtórki jednego ustawienia mierzą się w najbliższych sobie warunkach –
+#  rozrzut, który widać, jest rozrzutem pomiaru, a nie dryfem otoczenia
+#  między początkiem i końcem przebiegu.
+# ------------------------------------------------------------
+
+REPEAT_MAX = 5          # dalej klik wraca do x1 (limit UI i tej funkcji)
+
+
+def expand_repeats(steps, count):
+    """Powtórz każdy krok `count` razy, powtórki obok siebie. Etykieta
+    dostaje sufiks '/k' ('3' -> '3/1, 3/2', seria '3.2' -> '3.2/1, 3.2/2') –
+    kropka zostaje zarezerwowana dla serii, więc z etykiety widać, co jest
+    wartością parametru, a co numerem powtórki. `count` <= 1 zwraca kroki
+    bez zmian i BEZ sufiksu, żeby zwykły pomiar wyglądał jak dotąd; powyżej
+    REPEAT_MAX obcinamy do limitu. Kroki są kopiowane (dataclasses.replace),
+    więc każdy ma własną etykietę, a resztę pól dzieli z pierwowzorem."""
+    steps = list(steps)
+    count = min(int(count), REPEAT_MAX)
+    if count <= 1:
+        return steps
+    out = []
+    for i, step in enumerate(steps, 1):
+        base_label = step.label or str(i)
+        for k in range(1, count + 1):
+            out.append(replace(step, label=f"{base_label}/{k}"))
+    return out
+
+
 @dataclass
 class Plan:
     name: str
@@ -313,7 +363,9 @@ def _step_from_toml(raw, idx):
         chip_tool=str(trig_raw.get("chip_tool", "")),
         match=str(trig_raw.get("match", "")),
         skip_pairing=bool(trig_raw.get("skip_pairing", False)),
-        no_wipe=bool(trig_raw.get("no_wipe", False)))
+        no_wipe=bool(trig_raw.get("no_wipe", False)),
+        icd_registration=bool(trig_raw.get("icd_registration", False)),
+        icd_stay_active_ms=int(trig_raw.get("icd_stay_active_ms", 30000)))
     stor_raw = raw.get("storage", {})
     storage = Storage(mode=stor_raw.get("mode", "downsampled"),
                       window_ms=int(stor_raw.get("window_ms", 1)))
@@ -333,6 +385,7 @@ def _step_from_toml(raw, idx):
         build_cmd=raw.get("build_cmd", ""),
         pristine=bool(raw.get("pristine", False)),
         power_cycle=bool(raw.get("power_cycle", True)),
+        protocol=str(raw.get("protocol", "")),
         labels=labels)
 
 
@@ -439,6 +492,16 @@ def validate_plan(plan, manifest):
             if step.trigger.match and not _regex_ok(step.trigger.match):
                 errors.append(f"{who}: trigger chip 'match' nie jest poprawnym "
                               f"regexem: '{step.trigger.match}'")
+            if step.trigger.icd_registration and step.trigger.skip_pairing:
+                # Rejestracja idzie WYŁĄCZNIE w trakcie commissioningu, więc
+                # przy pominiętym parowaniu byłaby cicho zignorowana –
+                # a pomiar wyszedłby z trybu SIT bez śladu w dzienniku.
+                errors.append(f"{who}: trigger chip – 'icd_registration' "
+                              "wymaga parowania, a 'skip_pairing' je pomija; "
+                              "zostaw jedno")
+            if step.trigger.icd_stay_active_ms < 1:
+                errors.append(f"{who}: trigger chip – 'icd_stay_active_ms' "
+                              "musi być dodatnie")
         if step.labels and step.rtt != "continuous":
             errors.append(f"{who}: auto-etykiety (labels) działają tylko "
                           "przy rtt = 'continuous' – znaczniki powstają "

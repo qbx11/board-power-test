@@ -35,10 +35,19 @@ from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, Collapsible, DataTable,
-                             DirectoryTree, Input, Label, Log, Select, Static,
-                             TabbedContent, TabPane, TextArea)
+                             DirectoryTree, Input, Label, Log, RadioButton,
+                             RadioSet, Select, Static, TabbedContent, TabPane,
+                             TextArea)
 
 import power_test as core
+
+# Limit krotności karty ('x1 … x5') trzyma plan – tam też rozwijają się
+# powtórki na osobne kroki, więc UI nie ma własnej, drugiej prawdy.
+from autorun.plan import REPEAT_MAX
+
+# Model kalkulatora poboru prądu i kalibracja z przebiegu sesji – cała
+# matematyka siedzi tam, interfejs tylko zbiera liczby z pól.
+from autorun import energy
 
 # Domyślny operational dataset Thread (hex) dla triggera 'chip' w kartach
 # pomiaru – ten sam, co domyślny w scripts/pair_and_subscribe.py. Pole w UI
@@ -106,6 +115,41 @@ def _display_path(path):
 def _label(name, item):
     """Nazwa do wyświetlenia: `label` z manifestu, inaczej klucz."""
     return item.get("label", name)
+
+
+def _fmt_hms(seconds):
+    """Czas jako 'h:mm:ss', a poniżej godziny 'mm:ss' – ten sam format na
+    ekranie przebiegu (zegar pomiaru) i w kreatorze (czas kart i suma),
+    żeby te same liczby nie wyglądały w dwóch miejscach inaczej."""
+    seconds = max(0, int(round(seconds)))
+    h, r = divmod(seconds, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _fmt_uA(uA):
+    """Prąd w czytelnej jednostce: nA / µA / mA / A. Wspólny dla ekranu
+    przebiegu (zmierzony prąd) i kalkulatora (policzony) – ta sama liczba
+    nie ma wyglądać w dwóch miejscach inaczej."""
+    if uA is None:
+        return "—"
+    a = abs(uA)
+    if a < 1:
+        return f"{uA * 1000:.1f} nA"
+    if a < 1000:
+        return f"{uA:.1f} µA"
+    if a < 1e6:
+        return f"{uA / 1000:.3f} mA"
+    return f"{uA / 1e6:.3f} A"
+
+
+def _plural_measurements(n):
+    """'1 pomiar' / '3 pomiary' / '7 pomiarów' – odmiana do podpisu sumy."""
+    if n == 1:
+        return "1 pomiar"
+    if 2 <= n % 10 <= 4 and n % 100 not in (12, 13, 14):
+        return f"{n} pomiary"
+    return f"{n} pomiarów"
 
 
 class Check(Checkbox):
@@ -197,6 +241,362 @@ class CardTitle(Static):
             card = card.parent
         if card is not None:
             card.toggle_collapsed()
+
+
+class RepeatButton(Button):
+    """Krotność w nagłówku karty 'Pomiar N': klik przestawia x1 -> x2 -> …
+    -> x5 -> x1. x1 to jeden pomiar (jak dotąd), xK to K OSOBNYCH pomiarów
+    tej samej karty, jeden po drugim – każdy z własnym flashem, oknem
+    pomiaru, katalogiem sesji i wierszem w raporcie. Wspólne dla
+    protokołów, dlatego siedzi w nagłówku, a nie w zakładce."""
+
+    def __init__(self, count=1, **kwargs):
+        super().__init__(classes="card-repeat", **kwargs)
+        self.count = count
+
+    @property
+    def count(self):
+        return self._count
+
+    @count.setter
+    def count(self, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = 1
+        self._count = max(1, min(value, REPEAT_MAX))
+        self.label = f"x{self._count}"
+        # Krotność > 1 wyróżniamy, bo zmienia CZAS przebiegu – przy dwóch
+        # cyfrach w kolumnie kart musi być widać, która karta jedzie kilka
+        # razy, bez czytania każdej z bliska.
+        self.set_class(self._count > 1, "on")
+
+    def bump(self):
+        """Następna krotność w cyklu; po x5 wracamy do x1."""
+        self.count = 1 if self._count >= REPEAT_MAX else self._count + 1
+
+
+# Nazwy składników modelu w interfejsie. Silnik trzyma je jako klucze
+# ('send' / 'poll'), bo po nich rozpoznaje role interwałów w sesji.
+TERM_LABELS = {"send": "wysłania", "poll": "polle",
+               "heartbeat": "heartbeat",
+               energy.ACTIVE_WINDOW: "fast polle"}
+
+# Składniki, których NIE ma każdy protokół – dokładane do sekcji tylko tam,
+# gdzie występują. Zigbee ma heartbeat schedulera ZBOSS: co ~1 s procesor
+# budzi się na ~2 ms, żeby obsłużyć kolejkę timerów stosu, i wraca do snu.
+# To NIE jest keepalive ani poll – nic nie leci przez radio (0.92 µC wobec
+# ~46 µC realnego wysłania), ale przy interwałach rzędu minut ten składnik
+# bywa drugą co do wielkości pozycją budżetu, więc model bez niego zaniża
+# wynik. Wartości domyślne = pomiar z tego repo (0.92 µC co 1 s ≈ 0.92 µA).
+# Siedzi w prekompilowanym libzboss.a, więc aplikacja go nie wyłączy –
+# pole zostaje edytowalne, bo inna wersja stosu może mieć inny koszt.
+# Pola: (rola, etykieta ładunku, ładunek, etykieta interwału, interwał,
+#        nazwa w tabelce wartości oczekiwanych)
+EXTRA_TERMS = {
+    "zigbee": (("heartbeat", "Ładunek ZBOSS (µC):", "0.92",
+                "Interwał ZBOSS (s):", "1", "Ładunek ZBOSS"),),
+}
+
+# Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
+# wielkości zmierzony w tym repo. Każda sekcja ma WŁASNĄ kopię tych pól
+# (patrz CalculatorSection.compose), więc edycja w jednym protokole nie
+# rusza pozostałych dwóch.
+#
+# Liczby domyślne pochodzą z węzła LPN (BLE Mesh) i są dopasowane do
+# przemiatania interwałów, a nie odczytane z jednego okna profilera:
+# dwa przebiegi (sam send 10-600 s oraz send i poll na tym samym
+# interwale) dają układ I_avg = I_base + Q_send/T i I_avg = I_base +
+# (Q_send + Q_poll)/T, więc ładunki wychodzą z nachyleń względem 1/T,
+# a poll z ich różnicy. Baseline 1.54 µA to ekstrapolacja 1/T -> 0, nie
+# osobny pomiar uśpionej płytki – ten dawał 1.4 µA, przy którym model
+# zaniżał długie interwały systematycznie o 9%, bo brakującą podłogę
+# musiał nadrabiać rosnącym "ładunkiem" wysłania.
+REF_FIELDS = (
+    ("baseline", "Baseline (µA)", "1.54"),
+    ("send-charge", "Ładunek send", "20"),
+    ("poll-charge", "Ładunek poll", "56"),
+)
+# Liczby zależą od protokołu, więc nie każdy bierze te z REF_FIELDS.
+# Zigbee: BTZ_EndDevice z tego repo (baseline 3.2 µA, wysłanie 46.2 µC,
+# poll 19.8 µC). Thread rozkłada się odwrotnie niż mesh: wysyłka Mattera
+# jest droga, a poll tani – liczby z LPN dawały tam wynik obok
+# rzeczywistości, dopóki się tego nie nadpisało ręcznie. Baseline Thread
+# jest wpisany osobno, bo 1.54 µA z REF_FIELDS to podłoga TEGO węzła
+# mesh, a nie wartość wspólna dla protokołów. Czego tu nie ma, bierze
+# wartość z REF_FIELDS.
+REF_OVERRIDES = {
+    "zigbee": {"baseline": "3.2", "send-charge": "46.2",
+               "poll-charge": "19.8"},
+    "thread": {"baseline": "2.4", "send-charge": "95.5",
+               "poll-charge": "11"},
+}
+
+
+class RefLabel(Static):
+    """Nazwa wiersza w tabelce wartości oczekiwanych – klik kopiuje liczbę
+    z pola obok (edytowalnego) do odpowiadającego pola kalkulatora tej
+    samej sekcji. Sama liczba w tabelce zostaje nietknięta, więc kolejny
+    klik po edycji wpisuje już nową wartość."""
+
+    def __init__(self, text, field, **kwargs):
+        super().__init__(text, classes="calc-ref-name", **kwargs)
+        self.field = field
+
+    def on_click(self, event):
+        event.stop()
+        value = self.parent.query_one(Input).value
+        section = self.parent
+        while section is not None and not isinstance(section, CalculatorSection):
+            section = section.parent
+        if section is not None:
+            section.apply_reference(self.field, value)
+
+
+class CalculatorSection(Vertical):
+    """Sekcja kalkulatora poboru prądu dla JEDNEGO protokołu.
+
+    Model jest ten sam dla wszystkich trzech (patrz autorun/energy.py):
+    prąd średni to prąd bezczynności plus po jednym składniku na rodzaj
+    wybudzenia. Sekcje są osobne, bo każdy protokół ma własne, wpisane
+    liczby – a nie bo liczą inaczej.
+
+    Sekcja niczego nie mierzy i nie czyta zapisanych przebiegów. Wszystkie
+    liczby wpisuje człowiek; placeholdery podpowiadają rzędy wielkości
+    zmierzone w tym repo na węźle LPN.
+
+    `matter=True` (tylko Thread) dokłada JEDNO pole: liczbę polli robionych
+    w oknie aktywnym po każdej wysyłce. Nie ma osobnego pola na ich ładunek,
+    bo kosztują tyle samo, co zwykły poll – patrz energy.active_window_term.
+    Pozostałe protokoły tego okna nie mają, więc nie mają i pola."""
+
+    def __init__(self, protocol, label, matter=False, **kwargs):
+        super().__init__(classes="calc-section", id=f"calc-{protocol}",
+                         **kwargs)
+        self.protocol = protocol
+        self.proto_label = label
+        self.matter = matter
+
+    def ref_default(self, field):
+        """Wartość oczekiwana pola dla TEGO protokołu: nadpisanie
+        z REF_OVERRIDES, a w jego braku liczba z REF_FIELDS."""
+        override = REF_OVERRIDES.get(self.protocol, {})
+        for name, _label, default in REF_FIELDS:
+            if name == field:
+                return override.get(field, default)
+        return ""
+
+    def _hint(self, field):
+        """Placeholder pola z wartości oczekiwanej – żeby podpowiedź nad
+        pustym polem i liczba w tabelce obok nie mogły się rozjechać."""
+        return f"np. {self.ref_default(field)}"
+
+    def compose(self):
+        yield Label(self.proto_label, classes="h calc-head")
+        with Horizontal(classes="calc-body"):
+            with Vertical(classes="calc-fields"):
+                # Jednostki w nawiasach OKRĄGŁYCH, nie kwadratowych: Label
+                # renderuje treść przez markup Rich, w którym '[s]' jest
+                # znacznikiem przekreślenia – nawias znikał, a resztę
+                # wiersza przekreślało.
+                yield Label("Prąd bezczynności (baseline) w µA:")
+                yield Input(placeholder=self._hint("baseline"),
+                            classes="calc-baseline")
+                with Horizontal(classes="calc-row"):
+                    with Vertical(classes="calc-col"):
+                        yield Label("Ładunek jednego wysłania (µC):")
+                        yield Input(placeholder=self._hint("send-charge"),
+                                    classes="calc-send-charge")
+                    with Vertical(classes="calc-col"):
+                        yield Label("Interwał send (s):")
+                        yield Input(placeholder="np. 30",
+                                    classes="calc-send-period")
+                with Horizontal(classes="calc-row"):
+                    with Vertical(classes="calc-col"):
+                        yield Label("Ładunek jednego polla (µC):")
+                        yield Input(placeholder=self._hint("poll-charge"),
+                                    classes="calc-poll-charge")
+                    with Vertical(classes="calc-col"):
+                        # Puste pola polla znaczą, że węzeł nie pollue –
+                        # etykieta tego nie tłumaczy, bo to widać po
+                        # wyniku (składnik po prostu nie wchodzi do
+                        # rozkładu).
+                        yield Label("Interwał poll (s):")
+                        yield Input(placeholder="np. 60",
+                                    classes="calc-poll-period")
+                # Składniki własne protokołu (patrz EXTRA_TERMS). Wpisane
+                # z góry, a nie jako placeholder: heartbeat jest w stosie
+                # zawsze, więc model ma go liczyć bez proszenia. Puste
+                # pole interwału nadal go wyłącza, jak każdy inny składnik.
+                for role, charge_label, charge_value, period_label, \
+                        period_value, _ref in EXTRA_TERMS.get(self.protocol, ()):
+                    with Horizontal(classes="calc-row"):
+                        with Vertical(classes="calc-col"):
+                            yield Label(charge_label)
+                            yield Input(value=charge_value,
+                                        classes=f"calc-{role}-charge")
+                        with Vertical(classes="calc-col"):
+                            yield Label(period_label)
+                            yield Input(value=period_value,
+                                        classes=f"calc-{role}-period")
+                if self.matter:
+                    # Osobny wiersz, nie trzecia kolumna przy pollu: te
+                    # polle nie chodzą interwałem polla, tylko doklejają
+                    # się do wysyłki, i przy interwale send trzeba je
+                    # czytać.
+                    with Horizontal(classes="calc-row"):
+                        with Vertical(classes="calc-col"):
+                            # "Fast polli", nie "polli": w oknie aktywnym
+                            # idą interwałem fast polla i tylko ta nazwa
+                            # nie myli się ze slow pollem z pola wyżej.
+                            # Bez "(szt.)" na końcu – kolumna ma 29 znaków
+                            # i etykieta z jednostką ucinała się w połowie
+                            # słowa. Że to sztuki, widać po podpowiedzi obok.
+                            yield Label("Fast polli po send:")
+                            yield Input(placeholder="np. 3",
+                                        classes="calc-active-polls")
+                        with Vertical(classes="calc-col"):
+                            yield Static("Kosztują tyle, co zwykły poll, "
+                                         "a ostatni z nich przestawia "
+                                         "licznik slow polla.",
+                                         classes="calc-hint")
+                # Wynik w ramce: to jedyna rzecz w sekcji, po którą się tu
+                # przyszło, więc nie ma być kolejnym wierszem tabelki.
+                # Podpis po lewej, liczba dociągnięta do prawej krawędzi.
+                with Horizontal(classes="calc-average"):
+                    yield Static("Średni pobór prądu",
+                                classes="calc-average-label")
+                    yield Static("—", classes="calc-average-value")
+                yield Static("", classes="calc-budget")
+            # Tabelka wartości oczekiwanych: osobna kolumna po prawej, żeby
+            # klik w wiersz i edycja liczby obok nie kolidowały z polami
+            # kalkulatora w kolumnie po lewej.
+            with Vertical(classes="calc-ref"):
+                yield Static("Wartości oczekiwane", classes="calc-ref-head")
+                extra_refs = tuple(
+                    (f"{role}-charge", ref_label, charge_value)
+                    for role, _cl, charge_value, _pl, _pv, ref_label
+                    in EXTRA_TERMS.get(self.protocol, ()))
+                overrides = REF_OVERRIDES.get(self.protocol, {})
+                for field, label, default in REF_FIELDS + extra_refs:
+                    with Horizontal(classes="calc-ref-row"):
+                        yield RefLabel(label, field)
+                        yield Input(value=overrides.get(field, default),
+                                    classes=f"calc-ref-value calc-ref-{field}")
+
+    def on_mount(self):
+        self.refresh_result()
+
+    # ---------- odczyt pól ----------
+
+    def _value(self, selector):
+        """Liczba z pola albo None (puste / nie liczba). Kalkulator nie
+        krzyczy o niewypełnione pola – po prostu nie liczy tego składnika."""
+        text = self.query_one(selector, Input).value.strip().replace(",", ".")
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+
+    def baseline_uA(self):
+        return self._value(".calc-baseline") or 0.0
+
+    def terms(self):
+        """Składniki modelu z pól. Składnik istnieje, gdy ma i ładunek,
+        i interwał – puste pole interwału znaczy „tego wybudzenia nie ma”
+        (np. węzeł, który nie pollue)."""
+        out = []
+        roles = ("send",) + tuple(
+            row[0] for row in EXTRA_TERMS.get(self.protocol, ()))
+        for role in roles:
+            charge = self._value(f".calc-{role}-charge")
+            period = self._value(f".calc-{role}-period")
+            if charge is None or not period:
+                continue
+            out.append(energy.Term(name=role, charge_uC=charge,
+                                   period_s=period))
+        return out + self.poll_terms()
+
+    def poll_terms(self):
+        """Składniki pollowania: zwykłe i te z okna aktywnego po wysyłce.
+
+        Liczone RAZEM, bo w Thready jedne zależą od drugich – licznik slow
+        polla startuje od ostatniego polla w oknie aktywnym, więc między
+        wysyłkami mieści się ich mniej, niż wychodzi z samego interwału
+        (energy.slow_poll_count). Osobne liczenie zawyżałoby wynik o jeden
+        poll na każdą wysyłkę."""
+        charge = self._value(".calc-poll-charge")
+        if charge is None:
+            return []
+        period = self._value(".calc-poll-period")
+        send_period = self._value(".calc-send-period")
+        count = self._value(".calc-active-polls") if self.matter else None
+        if not count or not send_period:
+            # Bez okna aktywnego nic nie przestawia licznika, więc zwykły
+            # model ciągły. Tak liczą BLE Mesh i Zigbee, i tak liczy Thread
+            # z pustym polem liczby polli.
+            if not period:
+                return []
+            return [energy.Term(name="poll", charge_uC=charge,
+                                period_s=period)]
+        out = []
+        # Pusty interwał polla to węzeł bez cyklicznego pollowania – okno
+        # aktywne ma wtedy nadal swoje polle.
+        if period:
+            out.append(energy.slow_poll_term(charge, period, send_period))
+        out.append(energy.active_window_term(charge, count, send_period))
+        return out
+
+    # ---------- wynik ----------
+
+    def term_label(self, name):
+        """Nazwa składnika w rozkładzie budżetu. W Thready zwykłe
+        pollowanie to SLOW polle, bo w wierszu obok stoją fast polle
+        z okna aktywnego i bez przymiotnika nie widać, który jest który.
+        W BLE Mesh i Zigbee fast polli nie ma, więc doprecyzowanie tylko
+        by sugerowało nieistniejący drugi rodzaj."""
+        if self.matter and name == "poll":
+            return "slow polle"
+        return TERM_LABELS.get(name, name)
+
+    def refresh_result(self):
+        value = self.query_one(".calc-average-value", Static)
+        rows = self.query_one(".calc-budget", Static)
+        baseline = self.baseline_uA()
+        terms = self.terms()
+        if not terms and not baseline:
+            value.update("—")
+            rows.update("Wpisz prąd bezczynności i koszt wybudzeń.")
+            return
+        value.update(_fmt_uA(energy.average_uA(baseline, terms)))
+        lines = []
+        for share in energy.budget(baseline, terms):
+            name = self.term_label(share.name)
+            # Rozkład ZAWSZE w µA, nawet gdy składnik schodzi poniżej 1 µA:
+            # ta tabela służy do porównywania wierszy ze sobą, a jeden
+            # wiersz w nA psułby porównanie mimo poprawnej wartości.
+            lines.append(f"{name:<14}{share.current_uA:9.2f} µA"
+                         f"{share.percent:6.0f}%")
+        rows.update("\n".join(lines))
+
+    def on_input_changed(self, event):
+        # Zdarzenia NIE zatrzymujemy: App też ich słucha (suma czasów
+        # w kreatorze trybu autonomicznego).
+        self.refresh_result()
+
+    # ---------- tabelka wartości oczekiwanych ----------
+
+    def apply_reference(self, field, value):
+        """Wpisz liczbę z tabelki wartości oczekiwanych do pola `field`
+        ('baseline' / 'send-charge' / ... – patrz REF_FIELDS)."""
+        value = value.strip()
+        if not value:
+            return
+        self.query_one(f".calc-{field}", Input).value = value
+        self.refresh_result()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -1018,6 +1418,12 @@ PROTOCOLS = (("ble_mesh", "BLE Mesh", True, False, MESH_SWEEP),
 DEFAULT_PROTOCOL = ""
 # Port dongla wpisywany w karcie od razu (BLE Mesh i Zigbee).
 DEFAULT_DONGLE_PORT = "/dev/ttyACM1"
+# Tryby pracy triggera Matter (zakładka Thread), w kolejności z RadioSet:
+#   pair – parowanie + subskrypcja (urządzenie zostaje SIT-em),
+#   icd  – parowanie z rejestracją klienta check-in + subskrypcja (LIT),
+#   skip – tylko subskrypcja, węzeł już jest w fabryce.
+CHIP_MODES = ("pair", "icd", "skip")
+CHIP_MODE_DEFAULT = "pair"
 
 
 # Pola protokołu nie mają checkboxów „włącz” – liczy się to, co wpisane.
@@ -1072,7 +1478,11 @@ class MeasurementCard(Vertical):
         c = self._config
         opts = [(_label(n, s), n) for n, s in self.scenarios.items()]
         with Horizontal(classes="card-head"):
-            yield CardTitle(f"▼ Pomiar {self.number}", classes="card-title")
+            yield CardTitle(f"▼ {self.number}", classes="card-title")
+            # Krotność w nagłówku, nie w zaawansowanych: widać ją także na
+            # zwiniętej karcie, więc czas całego planu da się oszacować
+            # jednym spojrzeniem na listę pomiarów.
+            yield RepeatButton(c.get("repeat", 1))
             yield CardDelete(self.uid)
         # Ciało karty (chowane przy zwinięciu). Selecty MUSZĄ powstać jako
         # widoczne – Select zamontowany od razu jako display:none nie tworzy
@@ -1276,10 +1686,25 @@ class MeasurementCard(Vertical):
                     yield Input(value=c.get("chip_timeout", "120s"),
                                 placeholder="120s",
                                 classes="card-chip-timeout")
-            yield Check("Węzeł już sparowany (pomiń parowanie, "
-                        "tylko subskrypcja)",
-                        value=c.get("chip_skip", False),
-                        classes="card-chip-skip")
+            # Trzy tryby wykluczają się nawzajem, więc jeden wybór, a nie
+            # osobne checkboxy: rejestracja ICD idzie WYŁĄCZNIE w trakcie
+            # commissioningu, więc „z rejestracją” i „już sparowany” nie mogą
+            # być zaznaczone naraz. Przy wyborze nie da się tego pomylić.
+            # RadioSet, nie Select – zakładka Thread powstaje niewidoczna
+            # (aktywne jest BLE Mesh), a Select zamontowany jako display:none
+            # nie tworzy overlaya (patrz komentarz przy datasecie).
+            yield Label("Co robimy po flashu:")
+            mode = c.get("chip_mode", CHIP_MODE_DEFAULT)
+            with RadioSet(classes="card-chip-mode"):
+                yield RadioButton("Parowanie + subskrypcja",
+                                  value=mode == "pair",
+                                  classes="chip-mode-pair")
+                yield RadioButton(
+                    "Parowanie z rejestracją ICD + subskrypcja (tryb LIT)",
+                    value=mode == "icd", classes="chip-mode-icd")
+                yield RadioButton(
+                    "Tylko subskrypcja (węzeł już sparowany)",
+                    value=mode == "skip", classes="chip-mode-skip")
 
     def on_mount(self):
         # Post-mount: dopiero teraz ukrywamy zaawansowane pola i (ewentualnie)
@@ -1300,16 +1725,31 @@ class MeasurementCard(Vertical):
         self._sync_advanced()
         event.stop()
 
+    def on_button_pressed(self, event):
+        # Krotność obsługujemy TU i zatrzymujemy zdarzenie – klik zmienia
+        # tylko tę kartę. Przyciski „Zastosuj do …” zostawiamy w spokoju:
+        # bez event.stop() lecą dalej, do App.on_button_pressed.
+        if isinstance(event.button, RepeatButton):
+            event.button.bump()
+            # Krotność mnoży liczbę pomiarów, więc zmienia i tytuł tej karty
+            # (gdy zwinięta), i sumę czasów pod listą.
+            self._refresh_title()
+            self.app._refresh_total()
+            event.stop()
+
     def on_tabbed_content_tab_activated(self, event):
         # Każda zakładka ma własne pola serii, więc zmiana protokołu zmienia
-        # też serię – dopisek o niej w tytule musi za tym nadążyć.
+        # też serię – dopisek o niej w tytule i suma czasów muszą za tym
+        # nadążyć (inna zakładka = inna liczba kombinacji).
         self._refresh_title()
+        self.app._refresh_total()
         event.stop()
 
     def on_tabbed_content_cleared(self, event):
         # Wyjście z protokołu (żadna zakładka nie jest aktywna) też zmienia
         # serię – karta staje się zwykłym pomiarem.
         self._refresh_title()
+        self.app._refresh_total()
         event.stop()
 
     def on_mouse_down(self, event):
@@ -1392,6 +1832,28 @@ class MeasurementCard(Vertical):
         widget = self.field(selector)
         return bool(widget.value) if widget is not None else False
 
+    def chip_mode(self, protocol=None):
+        """Wybrany tryb triggera Matter ('pair' | 'icd' | 'skip').
+        Poza zakładką Thread RadioSetu nie ma – wtedy domyślny."""
+        rs = self.field(".card-chip-mode", protocol)
+        if rs is None:
+            return CHIP_MODE_DEFAULT
+        idx = rs.pressed_index
+        return CHIP_MODES[idx] if 0 <= idx < len(CHIP_MODES) \
+            else CHIP_MODE_DEFAULT
+
+    def set_chip_mode(self, mode, protocol=None):
+        """Zaznacz tryb. RadioSet nie ma settera na pressed_index – wybór
+        ustawia się przez .value przycisku, a RadioSet sam odznacza resztę."""
+        rs = self.field(".card-chip-mode", protocol)
+        if rs is None:
+            return
+        cls = {"pair": ".chip-mode-pair", "icd": ".chip-mode-icd",
+               "skip": ".chip-mode-skip"}.get(mode)
+        if cls is None:
+            return
+        rs.query_one(cls, RadioButton).value = True
+
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
 
@@ -1405,51 +1867,102 @@ class MeasurementCard(Vertical):
         self._refresh_title()
 
     def _refresh_title(self):
+        """Nagłówek karty. Rozwinięta pokazuje sam numer – reszta stoi
+        w polach pod nim. Zwinięta dokłada scenariusz, wartości serii
+        i czas, bo to jedyny wiersz, jaki wtedy widać:
+
+            ▶ 1  LPN OFF · (10, 60, 300), (5, 10) · 6 × 20:00 = 2:00:00
+
+        Krotności NIE piszemy – mówi ją przycisk 'xN' obok, a liczba
+        pomiarów przed '×' i tak ją już zawiera."""
         title = self.query_one(".card-title", CardTitle)
         if not self.collapsed:
-            title.update(f"▼ Pomiar {self.number}")
+            title.update(f"▼ {self.number}")
             return
         scen = self._scenario()
         if not scen:
-            title.update(f"▶ Pomiar {self.number} — (wybierz scenariusz)")
+            title.update(f"▶ {self.number}  (wybierz scenariusz)")
             return
-        label = _label(scen, self.scenarios.get(scen, {}))
-        # Numer dokładamy tylko, gdy nazwa scenariusza się powtarza.
-        # Pytamy własny ekran, nie App: App.query widzi tylko wierzchni
-        # ekran, a tytuły odświeżamy też spod otwartego dialogu.
-        dupes = sum(1 for card in self.screen.query(MeasurementCard)
-                    if card._scenario() == scen)
-        suffix = f" · Pomiar {self.number}" if dupes > 1 else ""
-        title.update(f"▶ {label}{suffix}{self._sweep_title()}")
+        parts = [_label(scen, self.scenarios.get(scen, {}))]
+        parts += [p for p in (self._sweep_title(), self._time_title()) if p]
+        title.update(f"▶ {self.number}  " + " · ".join(parts))
 
     def _sweep_title(self):
-        """Dopisek do tytułu zwiniętej karty, gdy karta ma serię (sweep):
-        ' · sweep CONFIG_… ×M'. Przy dwóch osiach dokłada drugą i łączną
-        liczbę pomiarów (iloczyn), bo to ona decyduje o czasie przebiegu:
-        ' · sweep A ×3 · B ×2 = 6'. Pusty, gdy pola wartości wybranego
-        protokołu są puste albo gdy żaden protokół nie jest aktywny. Osie
-        liczymy tak samo jak plan (_sweep_axes), żeby tytuł nie obiecywał
-        pomiarów, których nie będzie."""
+        """Wartości serii do tytułu zwiniętej karty: '(10, 60, 300), (5, 10)'
+        – jedna para nawiasów na oś, w kolejności osi. Pokazujemy WARTOŚCI,
+        nie symbole Kconfig: symbol bywa wpisany domyślnie (PROTOCOLS), więc
+        nie mówi nic nowego, a to wartości decydują, ile pomiarów wyjdzie.
+        Wypisujemy je po sparsowaniu, żeby '10,60' i '10, 60' wyglądały tak
+        samo. Pusty, gdy pola wartości wybranego protokołu są puste albo gdy
+        żaden protokół nie jest aktywny. Osie liczymy tak samo jak plan
+        (_sweep_axes), żeby tytuł nie obiecywał pomiarów, których nie będzie."""
         from autorun.plan import parse_sweep_values
         try:
             cfg = self.get_config()
             if not _sweep_on(cfg):
                 return ""
-            axes = [(p, len(parse_sweep_values(v)))
-                    for p, v in _sweep_axes(cfg)]
+            axes = [parse_sweep_values(v) for _p, v in _sweep_axes(cfg)]
         except ValueError:
             # Wartości bez nazwy parametru – plan to odrzuci przed startem,
             # a tytuł mówi wprost, czego brakuje.
-            return " · sweep (brak parametru)"
+            return "(brak parametru)"
         except Exception:
             return ""
-        text = " · ".join(f"{p} ×{n}" for p, n in axes)
-        if len(axes) > 1:
-            total = 1
-            for _, n in axes:
-                total *= n
-            text += f" = {total}"
-        return f" · sweep {text}"
+        return ", ".join("(" + ", ".join(str(v) for v in vals) + ")"
+                         for vals in axes)
+
+    def _time_title(self):
+        """Czas karty do tytułu zwiniętej karty: samo okno pomiaru przy
+        jednym pomiarze, a przy serii/powtórkach mnożenie z sumą
+        ('6 × 20:00 = 2:00:00'). Liczymy TYLKO okna pomiarowe – build,
+        flash i triggery zależą od sprzętu i cache'u, więc doliczone
+        dawałyby liczbę, która i tak się nie sprawdzi. Puste, gdy czas
+        nie jest jeszcze wpisany albo nie jest czasem."""
+        secs = self.duration_s()
+        if secs is None:
+            return ""
+        n = self.plan_size()
+        if n <= 1:
+            return _fmt_hms(secs)
+        return f"{n} × {_fmt_hms(secs)} = {_fmt_hms(secs * n)}"
+
+    def duration_s(self):
+        """Okno pomiaru karty w sekundach albo None, gdy pole jest puste
+        lub nie jest czasem (kreator zgłosi to dopiero przy Starcie)."""
+        from autorun.plan import parse_duration
+        text = self.query_one(".card-duration", Input).value.strip()
+        if not text:
+            return None
+        try:
+            return parse_duration(text)
+        except ValueError:
+            return None
+
+    def plan_size(self):
+        """Ile POMIARÓW da ta karta: kombinacje serii × krotność. Tyle
+        wierszy trafi do dziennika i tyle okien pomiarowych zajmie karta
+        w przebiegu. Niepełną serię liczymy jak brak serii – plan odrzuci
+        ją przed startem z konkretnym błędem, a tytuł nie ma w tym czasie
+        udawać, że wie lepiej."""
+        from autorun.plan import parse_sweep_values
+        combos = 1
+        try:
+            cfg = self.get_config()
+            if _sweep_on(cfg):
+                for _p, values in _sweep_axes(cfg):
+                    combos *= len(parse_sweep_values(values))
+        except Exception:
+            combos = 1
+        return combos * self.repeat()
+
+    def plan_seconds(self):
+        """Suma okien pomiarowych karty (0.0, gdy czas nie jest wpisany)."""
+        secs = self.duration_s()
+        return 0.0 if secs is None else secs * self.plan_size()
+
+    def repeat(self):
+        """Krotność z przycisku w nagłówku (x1…x5)."""
+        return self.query_one(".card-repeat", RepeatButton).count
 
     def _scenario(self):
         """Wybrany scenariusz albo '' gdy blank (sentinel zależny od wersji
@@ -1502,10 +2015,11 @@ class MeasurementCard(Vertical):
             "chip_min": self._field_value(".card-chip-min"),
             "chip_max": self._field_value(".card-chip-max"),
             "chip_timeout": self._field_value(".card-chip-timeout"),
-            "chip_skip": self._field_flag(".card-chip-skip"),
+            "chip_mode": self.chip_mode(),
             "voltage": self.query_one(".card-voltage", Input).value.strip(),
             "storage": self.query_one(".card-storage", Select).value,
             "sample_rate": self.query_one(".card-rate", Select).value,
+            "repeat": self.query_one(".card-repeat", RepeatButton).count,
         }
 
     def apply_shared(self, cfg):
@@ -1529,8 +2043,7 @@ class MeasurementCard(Vertical):
                               ("chip_endpoint", ".card-chip-endpoint"),
                               ("chip_min", ".card-chip-min"),
                               ("chip_max", ".card-chip-max"),
-                              ("chip_timeout", ".card-chip-timeout"),
-                              ("chip_skip", ".card-chip-skip")):
+                              ("chip_timeout", ".card-chip-timeout")):
             widget = self.field(selector, cfg["protocol"])
             if widget is not None:
                 widget.value = cfg[key]
@@ -1538,6 +2051,8 @@ class MeasurementCard(Vertical):
         dataset = self.field(".card-chip-dataset", cfg["protocol"])
         if dataset is not None:
             dataset.text = cfg["chip_dataset"]
+        # Tryb Mattera osobno – RadioSet nie ma .value (patrz set_chip_mode).
+        self.set_chip_mode(cfg["chip_mode"], cfg["protocol"])
         self.query_one(".card-duration", Input).value = cfg["duration"]
         self.query_one(".card-delay-on", Checkbox).value = cfg["delay_on"]
         self.query_one(".card-delay-s", Input).value = cfg["delay_s"]
@@ -1547,6 +2062,7 @@ class MeasurementCard(Vertical):
         self.query_one(".card-voltage", Input).value = cfg["voltage"]
         self.query_one(".card-storage", Select).value = cfg["storage"]
         self.query_one(".card-rate", Select).value = cfg["sample_rate"]
+        self.query_one(".card-repeat", RepeatButton).count = cfg["repeat"]
         self._sync_advanced()
         self._refresh_title()
 
@@ -1798,26 +2314,9 @@ class AutoRunScreen(Screen):
             self.pause.set()
             btn.label = "Wznów"
 
-    @staticmethod
-    def _fmt_uA(uA):
-        """Prąd w czytelnej jednostce: nA / µA / mA / A."""
-        if uA is None:
-            return "—"
-        a = abs(uA)
-        if a < 1:
-            return f"{uA * 1000:.1f} nA"
-        if a < 1000:
-            return f"{uA:.1f} µA"
-        if a < 1e6:
-            return f"{uA / 1000:.3f} mA"
-        return f"{uA / 1e6:.3f} A"
+    _fmt_uA = staticmethod(_fmt_uA)
 
-    @staticmethod
-    def _fmt_time(s):
-        s = max(0, int(round(s)))
-        h, r = divmod(s, 3600)
-        m, sec = divmod(r, 60)
-        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+    _fmt_time = staticmethod(_fmt_hms)
 
     @classmethod
     def _fmt_countdown(cls, s):
@@ -1830,8 +2329,15 @@ class AutoRunScreen(Screen):
 
     @staticmethod
     def _step_label(ev):
-        """Etykieta kroku do wyświetlenia: 'N.M' dla serii, inaczej numer."""
+        """Etykieta kroku do wyświetlenia: 'N.M' dla serii, 'N/k' dla
+        powtórki, inaczej numer."""
         return ev.data.get("label") or str(ev.step)
+
+    def _step_of(self, ev):
+        """'3/2 z 6' – etykieta kroku i liczba kroków planu. Ukośnik jest
+        zajęty przez numer powtórki, więc miejsca w planie NIE dopisujemy
+        drugim ukośnikiem ('3/2/6' czytało się jak trzy poziomy)."""
+        return f"{self._step_label(ev)} z {self._n_steps}"
 
     @staticmethod
     def _sweep_str(sweep):
@@ -1905,8 +2411,7 @@ class AutoRunScreen(Screen):
         self.pause.clear()
         self.query_one("#stop_measure", Button).label = "Stop"
         sweep = self._sweep_str(ev.data.get("sweep"))
-        head = (f"[b]POMIAR[/b] · Pomiar {self._step_label(ev)}/"
-                f"{self._n_steps} · {ev.name}")
+        head = f"[b]POMIAR[/b] · Pomiar {self._step_of(ev)} · {ev.name}"
         if sweep:
             head += f" · {sweep}"
         self.query_one("#measure-head", Static).update(head)
@@ -1947,8 +2452,7 @@ class AutoRunScreen(Screen):
         btn = self.query_one("#stop_measure", Button)
         sweep = self._sweep_str(ev.data.get("sweep"))
         tail = f" · {sweep}" if sweep else ""
-        base = (f"Pomiar {self._step_label(ev)}/{self._n_steps} · "
-                f"{ev.name}{tail}")
+        base = f"Pomiar {self._step_of(ev)} · {ev.name}{tail}"
         if paused:
             head.update(f"[b]PAUZA[/b] · {base}"
                         f"  (śr {self._fmt_uA(ev.data.get('avg_uA'))})")
@@ -2094,10 +2598,25 @@ class PowerTestApp(App):
     .card-title:hover { color: #bbbbbb; }
     .card-del { width: 3; content-align: center middle; color: #666666; }
     .card-del:hover { background: #333333; color: $text; }
+    /* Krotność karty: przycisk bez ramki i tła, żeby nagłówek (wysoki na
+       jeden wiersz) został linią tekstu, a nie paskiem widgetów. */
+    .card-repeat { width: 4; min-width: 0; height: 1; padding: 0;
+                   border: none; background: transparent; color: #666666;
+                   text-style: none; }
+    /* REGRESJA: ramkę trzeba zdjąć JAWNIE w każdym stanie. Reguły
+       Button:hover / Button:focus / Button.-active są wyżej w
+       specyficzności niż sama klasa, więc po najechaniu i po kliknięciu
+       wracała 'border: round' – a w nagłówku wysokim na jeden wiersz
+       widać wtedy górną krawędź ramki zamiast napisu ('x2' -> '╭──╮').
+       Podświetlenie zostaje, tylko robi je tło, nie ramka. */
+    .card-repeat:hover, .card-repeat:focus, .card-repeat.-active {
+                   border: none; background: #333333; color: $text; }
+    .card-repeat.on, .card-repeat.on:hover, .card-repeat.on:focus,
+    .card-repeat.on.-active { color: $text; text-style: bold; }
     .card-body { height: auto; }
     .card-row { height: auto; }
     .card-col { width: 1fr; height: auto; padding-right: 1; }
-    .card-delay-on, .card-rtt-on, .card-chip-skip {
+    .card-delay-on, .card-rtt-on {
                      border: none; background: transparent;
                      padding: 0; height: 1; width: auto; margin-top: 1; }
     .card-delay-s, .card-voltage { width: 100%; }
@@ -2117,12 +2636,82 @@ class PowerTestApp(App):
     .card-monitor-box, .card-chip-box { height: auto; margin-top: 2; }
     .card-chip-cluster { width: 100%; }
     .card-chip-dataset { width: 100%; height: 6; border: round #555555; }
+    /* Wybór trybu Mattera: ta sama okrągła ramka co dataset, żeby oba
+       segmenty zakładki wyglądały jak jedna rodzina. Domyślna ramka
+       RadioSetu jest gruba i ciągnie na siebie uwagę. */
+    .card-chip-mode { width: 100%; height: auto; margin-top: 1;
+                      border: round #555555; background: transparent;
+                      padding: 0 1; }
+    .card-chip-mode RadioButton { width: 100%; height: 1;
+                                  border: none; background: transparent;
+                                  padding: 0; }
+    .card-chip-mode RadioButton:hover { background: #333333; }
     /* Wyraźniejszy odstęp między sekcją RTT a napięciem/zapisem. */
     .card-vs-row { margin-top: 2; }
     .card-adv { background: transparent; }
     .card-apply-row { height: auto; align-horizontal: center; }
     .card-apply, .card-apply-next { min-width: 0; margin: 1 1; }
     #add_measurement { min-width: 0; width: 72; max-width: 100%; }
+    /* Czas łączny pod listą kart: przygaszony, bo to podsumowanie, nie
+       pole do wypełnienia; wyrównany do prawej krawędzi kolumny kart, żeby
+       liczba stała pod czasami z nagłówków, a nie pod ich numerami. */
+    #total-time { width: 72; max-width: 100%; height: 1;
+                  text-align: right; color: #999999; }
+    /* Kalkulator poboru prądu: sekcje wyglądają jak karty pomiaru, bo są
+       tym samym rodzajem rzeczy – blokiem pól z wynikiem. Szersze niż
+       pozostałe panele (72), bo doszła kolumna z tabelką wartości
+       oczekiwanych po prawej. */
+    #calculator { width: 100; max-width: 100%; height: auto; }
+    .calc-section { width: 100%; height: auto; border: round #555555;
+                    background: transparent; padding: 0 1;
+                    margin-bottom: 1; }
+    .calc-head { margin-top: 0; }
+    .calc-body { height: auto; width: 100%; }
+    .calc-fields { width: 1fr; height: auto; padding-right: 2; }
+    .calc-row { height: auto; width: 100%; }
+    .calc-col { width: 1fr; height: auto; padding-right: 1; }
+    .calc-baseline { width: 100%; }
+    .calc-send-charge, .calc-send-period { width: 100%; }
+    .calc-poll-charge, .calc-poll-period { width: 100%; }
+    .calc-active-polls { width: 100%; }
+    /* Podpowiedź obok pola polli w oknie aktywnym: stoi w kolumnie pola,
+       którego tam nie ma (ładunek bierze się ze zwykłego polla), więc
+       wyrównana do dołu wiersza – na wysokości ramki Inputa obok. */
+    .calc-hint { width: 100%; height: auto; margin-top: 1;
+                 color: #999999; }
+    /* Wynik w ramce – wyróżniony, bo to on jest odpowiedzią sekcji.
+       Jaśniejsza obwódka niż pola, żeby wzrok siadał tutaj. */
+    .calc-average { height: 3; width: 100%; margin-top: 1;
+                    border: round #aaaaaa; padding: 0 1; }
+    .calc-average-label { width: auto; text-style: bold; }
+    .calc-average-value { width: 1fr; text-align: right;
+                          text-style: bold; color: $text; }
+    .calc-budget { height: auto; margin-top: 1; color: #999999; }
+    /* Tabelka wartości oczekiwanych: kolumna po prawej stronie sekcji.
+       Nazwa pola (RefLabel) jest klikalna – kopiuje liczbę z pola obok
+       (edytowalnego Input) do kalkulatora; sama tabelka niczego nie liczy. */
+    .calc-ref { width: 33; height: auto; border-left: round #555555;
+                padding: 0 0 0 2; }
+    .calc-ref-head { color: #999999; margin-bottom: 1; }
+    /* Wiersz ma wysokość pola (3: obwódka/tekst/obwódka) – nazwa dostaje
+       taką samą wysokość i wyśrodkowuje w niej tekst (content-align),
+       więc obie kolumny stoją na tej samej linii bez sztuczek z
+       align-vertical na rzędzie. */
+    .calc-ref-row { height: 3; width: 100%; margin-bottom: 1; }
+    /* Obwódka jest ZAWSZE obecna (w kolorze tła – niewidoczna), żeby
+       najechanie myszką tylko zmieniało jej kolor, a nie dokładało
+       obwódkę i przesuwało layout o dodatkowe wiersze/kolumny. */
+    .calc-ref-name { width: 1fr; height: 3; content-align: left middle;
+                     text-wrap: nowrap; text-overflow: ellipsis;
+                     border: round #121212; padding: 0 1; }
+    .calc-ref-name:hover { border: round #aaaaaa; }
+    /* Input rezerwuje domyślnie padding 0 2 (Input.DEFAULT_CSS) – przy
+       szerokości 9 zostawiało to na tekst tylko 3 kolumny (9 - 2 obwódka
+       - 4 padding), więc "1.54" i "95.5" (3-4 znaki) się nie mieściły i
+       renderowały jako obcięty, nieczytelny fragment. Szerokość dopasowana
+       do najdłuższej wartości (4 cyfry) minimalizuje puste miejsce po
+       prawej – Input renderuje tekst od lewej i nie ma opcji center. */
+    .calc-ref-value { width: 9; padding: 0 1; }
     /* Widoczność .auto-only / .standard-only ustawia _apply_mode() w
        on_mount (PO zamontowaniu) – nie przez display:none w CSS, bo
        Select zamontowany od razu jako display:none nie tworzy overlaya. */
@@ -2317,7 +2906,7 @@ class PowerTestApp(App):
             core.die("manifest musi zawierać sekcje [boards.*] i [scenarios.*]")
         # Start w trybie autonomicznym: to jest tryb, w którym narzędzie
         # samo mierzy (PPK2). Ręczny zostaje pod kliknięciem w przełącznik.
-        self.mode = "auto"              # standard | auto
+        self.mode = "auto"        # standard | auto | calc
         self._card_uid = 0              # licznik kart 'Pomiar N'
         self._card_template = None      # config dziedziczony przez nowe karty
 
@@ -2338,10 +2927,14 @@ class PowerTestApp(App):
                 yield Static("│", classes="mode-sep")
                 yield ModeLabel("Tryb autonomiczny", "auto",
                                 id="mode-label-auto", classes="mode-label")
+                yield Static("│", classes="mode-sep")
+                yield ModeLabel("Kalkulator poboru prądu", "calc",
+                                id="mode-label-calc", classes="mode-label")
             yield Static(LOGO, id="logo")
-            yield Label("Płytka", classes="h")
+            yield Label("Płytka", classes="h measure-only")
             yield Select(((b["board"], n) for n, b in self.boards.items()),
-                         value=default_prof, allow_blank=False, id="profile")
+                         value=default_prof, allow_blank=False, id="profile",
+                         classes="measure-only")
             # --- Tryb ręczny: checklista scenariuszy ---
             yield Label("Scenariusze", classes="h standard-only")
             with Vertical(id="scenarios", classes="standard-only"):
@@ -2360,31 +2953,46 @@ class PowerTestApp(App):
                 yield MeasurementCard(0, self.scenarios, 1)
             yield Button("+ Dodaj pomiar", id="add_measurement",
                          classes="auto-only")
+            # Suma czasów zamyka sekcję pomiarów – stoi pod listą kart,
+            # której dotyczy, a nad polami niezwiązanymi z czasem.
+            yield Static("", id="total-time", classes="auto-only")
 
-            yield Label("Egzemplarz płytki", classes="h")
-            yield Input(placeholder="np. BTZ #2", id="sample")
+            # --- Kalkulator poboru prądu: trzy sekcje, po jednej na
+            # protokół. Nie mierzy niczego i nie czyta zapisanych sesji –
+            # liczy prąd średni z modelu I_avg = I_baseline + Q/T z liczb
+            # wpisanych w polach.
+            with Vertical(id="calculator", classes="calc-only"):
+                for proto, label, _mon, matter, _sweep in PROTOCOLS:
+                    yield CalculatorSection(proto, label, matter=matter)
+
+            yield Label("Egzemplarz płytki", classes="h measure-only")
+            yield Input(placeholder="np. BTZ #2", id="sample",
+                        classes="measure-only")
             yield Check("Wymuś pełny rebuild (gotowe buildy są "
-                        "normalnie pomijane)", value=False, id="pristine")
+                        "normalnie pomijane)", value=False, id="pristine",
+                        classes="measure-only")
             yield Check("Zresetuj płytkę po wgraniu (J-Link)",
                         value=True, id="reset", classes="standard-only")
             yield Check("Przypomnij o odpięciu programatora (SWD/J-Link)",
                         value=True, id="swd_reminder",
                         classes="standard-only")
             with Horizontal(id="actions"):
-                yield Button("Start", id="start")
-                yield Static(classes="actions-gap")
+                yield Button("Start", id="start", classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 yield Button("Zaznacz wszystkie", id="select_all",
                              classes="standard-only")
                 yield Static(classes="actions-gap standard-only")
-                yield Button("Dodaj kod", id="add_fw")
-                yield Static(classes="actions-gap")
+                yield Button("Dodaj kod", id="add_fw",
+                             classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 # Lista scenariuszy (opis + usuwanie) tylko w trybie
                 # autonomicznym – w ręcznym stoi wprost na ekranie.
                 yield Button("Scenariusze", id="scenarios_btn",
                              classes="auto-only")
                 yield Static(classes="actions-gap auto-only")
-                yield Button("Wyniki", id="results_btn")
-                yield Static(classes="actions-gap")
+                yield Button("Wyniki", id="results_btn",
+                             classes="measure-only")
+                yield Static(classes="actions-gap measure-only")
                 yield Button("Wyjście", id="quit")
 
     def _scenario_row(self, n, s, value=False):
@@ -2490,6 +3098,14 @@ class PowerTestApp(App):
 
     def on_mount(self):
         self._apply_mode()
+        self._refresh_total()
+
+    def on_input_changed(self, event):
+        # Czas i wartości serii wpisuje się w Inputach, a od nich zależy
+        # suma pod listą pomiarów – niech nadąża za pisaniem. Zdarzenia NIE
+        # zatrzymujemy: Inputy karty nie mają innych odbiorców, ale i tak
+        # nie ma powodu ich obcinać.
+        self._refresh_total()
 
     def on_button_pressed(self, event):
         if event.button.id == "quit":
@@ -2521,18 +3137,23 @@ class PowerTestApp(App):
 
     def _apply_mode(self):
         """Pokaż/ukryj elementy zależne od trybu i wytłuść aktywną
-        etykietę przełącznika. Widoczność sterowana klasą na widgetach
-        (.auto-only / .standard-only)."""
-        auto = self.mode == "auto"
-        self.query_one("#mode-label-standard", Static).set_class(
-            not auto, "active")
-        self.query_one("#mode-label-auto", Static).set_class(auto, "active")
-        for w in self.query(".auto-only"):
-            w.display = auto
-        for w in self.query(".standard-only"):
-            w.display = not auto
+        etykietę przełącznika.
+
+        Widoczność sterowana klasą na widgetach: `.standard-only`,
+        `.auto-only` i `.calc-only` należą do jednego trybu, a
+        `.measure-only` do dwóch, które faktycznie mierzą – kalkulator nie
+        rusza płytki, więc profil, egzemplarz i przyciski przebiegu nie mają
+        w nim czego robić. Widgety BEZ żadnej z tych klas (logo, Wyniki,
+        Wyjście) są wszędzie."""
+        for mode in ("standard", "auto", "calc"):
+            self.query_one(f"#mode-label-{mode}", Static).set_class(
+                self.mode == mode, "active")
+            for w in self.query(f".{mode}-only"):
+                w.display = self.mode == mode
+        for w in self.query(".measure-only"):
+            w.display = self.mode != "calc"
         start = self.query_one("#start", Button)
-        start.label = "Dalej: PPK2 →" if auto else "Start"
+        start.label = "Dalej: PPK2 →" if self.mode == "auto" else "Start"
         # Szerokość `auto` przycisku nie przelicza się po samej zmianie
         # etykiety – bez tego dłuższy podpis trybu autonomicznego zostawał
         # przycięty do szerokości słowa "Start" ("Dalej").
@@ -2562,6 +3183,7 @@ class PowerTestApp(App):
         # Przewiń do nowej karty dopiero PO zamontowaniu (inaczej wymusza
         # przedwczesny layout Selecta, zanim powstanie jego overlay).
         self.call_after_refresh(card.scroll_visible, animate=False)
+        self.call_after_refresh(self._refresh_total)
 
     def remove_measurement(self, uid):
         cards = list(self.query(MeasurementCard))
@@ -2578,10 +3200,47 @@ class PowerTestApp(App):
         # więc ponowne odpytanie drzewa wciąż widzi znikającą kartę).
         for i, card in enumerate(remaining, 1):
             card.set_number(i)
+        # Suma z POZOSTAŁYCH kart – remove() jest asynchroniczny, więc
+        # liczymy dopiero po odświeżeniu drzewa.
+        self.call_after_refresh(self._refresh_total)
 
     def _refresh_card_titles(self):
         for card in self.query(MeasurementCard):
             card._refresh_title()
+        self._refresh_total()
+
+    def _refresh_total(self):
+        """Czas łączny wszystkich kart pod listą pomiarów. Suma OKIEN
+        pomiarowych (czas × kombinacje serii × krotność) – bez buildu,
+        flasha i triggerów, więc realny przebieg będzie dłuższy.
+
+        Liczymy tylko karty z WPISANYM czasem, żeby liczba w nawiasie
+        opisywała dokładnie to, co pokazuje zegar. Nowa karta dziedziczy
+        serię poprzedniej (bez czasu), więc bez tego warunku suma mówiłaby
+        np. '6:00:00 (36 pomiarów)' – zegar z jednej karty, liczba z dwóch.
+        Gdy żadna karta nie ma jeszcze czasu, piszemy '—' zamiast mylącego
+        '00:00'."""
+        main = self._main_screen()
+        found = main.query("#total-time")
+        if not found:
+            return              # ekran jeszcze nie złożony
+        total = found.first(Static)
+        timed = []
+        for card in main.query(MeasurementCard):
+            # Karta w trakcie usuwania wciąż jest w drzewie (remove() jest
+            # asynchroniczny), ale jej pól już nie ma – pomijamy ją, zamiast
+            # wysypywać odświeżanie sumy na brakującym widgecie.
+            if not (card.query(".card-repeat") and card.query(".card-duration")):
+                continue
+            if card.duration_s() is not None:
+                timed.append(card)
+        if not timed:
+            total.update("Łącznie: —")
+            return
+        seconds = sum(card.plan_seconds() for card in timed)
+        count = sum(card.plan_size() for card in timed)
+        total.update(f"Łącznie: {_fmt_hms(seconds)}  "
+                     f"({_plural_measurements(count)})")
 
     def _card_of(self, widget):
         while widget is not None and not isinstance(widget, MeasurementCard):
@@ -2740,7 +3399,8 @@ class PowerTestApp(App):
         płytki – bierze WIĘKSZY z dwóch czasów, nie sumę, więc tutaj nic
         nie doliczamy."""
         from autorun.plan import (LabelRule, Plan, PlanStep, Storage,
-                                  Trigger, expand_sweep, parse_duration)
+                                  Trigger, expand_repeats, expand_sweep,
+                                  parse_duration)
 
         pristine = self.query_one("#pristine", Checkbox).value
         cards = list(self.query(MeasurementCard))
@@ -2779,15 +3439,15 @@ class PowerTestApp(App):
                 if not c["chip_node_id"]:
                     raise ValueError(
                         f"Pomiar {card.number}: Matter – podaj Node ID.")
-                if not c["chip_skip"]:
+                if c["chip_mode"] != "skip":
                     if not c["chip_dataset"]:
                         raise ValueError(
                             f"Pomiar {card.number}: Matter – podaj dataset "
-                            "Thread (hex) albo zaznacz 'węzeł już sparowany'.")
+                            "Thread (hex) albo wybierz 'tylko subskrypcja'.")
                     if not c["chip_discriminator"]:
                         raise ValueError(
                             f"Pomiar {card.number}: Matter – podaj "
-                            "discriminator albo 'węzeł już sparowany'.")
+                            "discriminator albo 'tylko subskrypcja'.")
                 try:
                     chip_to = (parse_duration(c["chip_timeout"])
                                if c["chip_timeout"] else 120.0)
@@ -2806,7 +3466,8 @@ class PowerTestApp(App):
                     endpoint=c["chip_endpoint"] or "1",
                     min_interval=c["chip_min"] or "1",
                     max_interval=c["chip_max"] or "60",
-                    skip_pairing=c["chip_skip"])
+                    skip_pairing=c["chip_mode"] == "skip",
+                    icd_registration=c["chip_mode"] == "icd")
             elif monitor_port and c["serial_pattern"]:
                 trigger = Trigger(type="serial", pattern=c["serial_pattern"],
                                   timeout_s=180.0)
@@ -2828,18 +3489,26 @@ class PowerTestApp(App):
                 voltage=c["voltage"], trigger=trigger, rtt=rtt,
                 monitor_port=monitor_port, sample_rate=c["sample_rate"],
                 storage=Storage(mode=c["storage"], window_ms=1),
-                labels=labels, pristine=pristine)
+                labels=labels, pristine=pristine,
+                protocol=c["protocol"])
+            # power_cycle zostaje domyślne (True) – kreator go nie ustawia,
+            # więc każdy pomiar z interfejsu ma po flashu odcięcie VOUT.
+            # Wyłączyć da się tylko planem: power_cycle = false w plans/*.toml.
             if _sweep_on(c):
                 # Seria: jedna karta -> "Pomiar N.1 … N.M" (osobne kroki,
                 # każdy z inną flagą -DCONFIG_...=<wartość>, wspólny czas).
                 # Druga oś opcjonalna – wypełniona daje iloczyn kartezjański.
                 try:
-                    steps.extend(expand_sweep(
-                        card.number, _sweep_axes(c), base))
+                    card_steps = expand_sweep(
+                        card.number, _sweep_axes(c), base)
                 except ValueError as e:
                     raise ValueError(f"Pomiar {card.number}: {e}")
             else:
-                steps.append(PlanStep(label=str(card.number), **base))
+                card_steps = [PlanStep(label=str(card.number), **base)]
+            # Krotność ('x1 … x5' w nagłówku karty) na końcu, bo mnoży to,
+            # co karta już wyprodukowała: przy serii każda wartość dostaje
+            # swoje powtórki obok siebie (N.1/1, N.1/2, N.2/1, …).
+            steps.extend(expand_repeats(card_steps, c["repeat"]))
         return Plan(name="interfejs", board=prof_name, steps=steps)
 
 

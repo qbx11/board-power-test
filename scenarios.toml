@@ -131,3 +131,17 @@ note        = "W Power Profiler uśredniaj przez kilka pełnych okresów T."
 # Wpisy, których NIE chcesz trzymać na remote (np. cudze aplikacje
 # `source` z sąsiednich repo), umieść w scenarios.local.toml – ten plik
 # jest w .gitignore i scala się na wierzch tego manifestu przy starcie.
+
+[scenarios.lpn_off]
+label       = "LPN OFF"
+description = "System OFF - prawdziwy pomiar"
+source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_off"
+
+[scenarios.lpn_off_mock]
+label       = "LPN OFF MOCK"
+description = "System OFF - mock pomiaru"
+source      = "../Projekt-BLE-Mesh-Friend/app/apps/lpn_off_mock"
+
+[scenarios.end_device]
+description = "Aplikacja z ../matter-end-device/end_device (build przez west)."
+source      = "../matter-end-device/end_device"

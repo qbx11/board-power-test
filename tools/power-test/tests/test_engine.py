@@ -6,6 +6,7 @@
 # błędów przy timeout triggera i czyste domknięcie po przerwaniu.
 
 import csv
+import os
 import threading
 import time
 import unittest
@@ -77,6 +78,10 @@ class EngineTest(unittest.TestCase):
         # skracamy go, żeby suite nie stał 10 s na każdym takim teście.
         # Sam mechanizm sprawdza test_zapas_po_triggerze_dongla.
         self._patch_engine("SERIAL_START_SETTLE_S", 0.3)
+        # Blokada usypiania odpalałaby prawdziwy systemd-inhibit w każdym
+        # teście – domyślnie wskazujemy komendę, której nie ma (silnik idzie
+        # wtedy ścieżką "bez blokady"). Testy blokady podstawiają atrapę.
+        self._patch_engine("INHIBIT_CMD", "systemd-inhibit-atrapa-brak")
 
     def _patch_engine(self, name, value):
         old = getattr(eng, name)
@@ -143,6 +148,40 @@ class EngineTest(unittest.TestCase):
         self.assertLess(log.index("start"), len(log))
         self.assertGreater(log.index("start"),
                            max(i for i, e in enumerate(log) if e == "dut=ON"))
+
+    def test_dwa_przebiegi_w_tej_samej_sekundzie(self):
+        # Katalog przebiegu ma w nazwie znacznik z dokładnością do sekundy,
+        # więc restart planu zaraz po poprzednim (np. po Esc) trafiał na
+        # istniejącą nazwę i przewracał się na FileExistsError.
+        trig = planmod.Trigger(type="delay", seconds=0)
+        first = self._run(_plan(trigger=trig))
+        dir_a = self.runner.run_dir
+        second = self._run(_plan(trigger=trig))
+        dir_b = self.runner.run_dir
+        self.assertEqual(first[0].status, "done")
+        self.assertEqual(second[0].status, "done")
+        self.assertNotEqual(dir_a, dir_b)
+        self.assertTrue(dir_b.is_dir())
+
+    def test_bez_power_cycle_zasilanie_zostaje(self):
+        # power_cycle=False: po flashu NIE odcinamy VOUT, więc podtrzymana
+        # sekcja RAM (System OFF + retencja) przeżywa i pierwszy cykl może
+        # być ciepły. Zasilanie idzie raz i zostaje aż do końca kroku.
+        self._run(_plan(power_cycle=False,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        start = log.index("start")
+        # Przed pomiarem dokładnie jedno włączenie i ani jednego odcięcia.
+        self.assertEqual(log[:start].count("dut=ON"), 1)
+        self.assertNotIn("dut=OFF", log[:start])
+        # Dla kontrastu: z power-cycle jest OFF/ON między flashem a pomiarem.
+        self.sampler.log.clear()
+        self._run(_plan(power_cycle=True,
+                        trigger=planmod.Trigger(type="delay", seconds=0)))
+        log = self.sampler.log
+        start = log.index("start")
+        self.assertIn("dut=OFF", log[:start])
+        self.assertEqual(log[:start].count("dut=ON"), 2)
 
     def test_csv_row_written(self):
         self._run(_plan(trigger=planmod.Trigger(type="delay", seconds=0)))
@@ -422,6 +461,52 @@ class EngineTest(unittest.TestCase):
         # ~0.5 s * 100 S/s ≈ 50 próbek (a nie ~1000 przy 2000 S/s).
         self.assertLessEqual(abs(results[0].summary["samples"] - 50), 6)
 
+    def _fake_inhibit(self, argv_log):
+        """Atrapa `systemd-inhibit`: zapisuje swój PID i argumenty, potem
+        czeka. Prawdziwa blokada logind żyje tak długo, jak proces, więc po
+        przebiegu test może sprawdzić, że silnik go ubił."""
+        path = self.env.repo / "fake-inhibit"
+        path.write_text("#!/bin/bash\n"
+                        f'echo "$$ $*" > "{argv_log}"\n'
+                        "exec sleep 30\n")
+        path.chmod(0o755)
+        self._patch_engine("INHIBIT_CMD", str(path))
+
+    def test_blokada_usypiania_na_czas_przebiegu(self):
+        # Przebieg autonomiczny bierze blokadę logind (bezczynność, jawny
+        # suspend, klapa) na cały czas trwania i zwalnia ją na wyjściu.
+        # Bez tego laptop usypia w środku okna pomiaru.
+        log = self.env.repo / "inhibit.args"
+        self._fake_inhibit(log)
+        results = self._run(_plan(scenario="zwykly", duration_s=0.1,
+                                  trigger=planmod.Trigger(type="delay",
+                                                          seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        deadline = time.monotonic() + 2.0
+        while not log.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        pid, args = log.read_text().split(" ", 1)
+        self.assertIn("--what=idle:sleep:handle-lid-switch", args)
+        self.assertIn("--mode=block", args)
+        self.assertIn("--who=board-power-test", args)
+        plan_log = (self.runner.run_dir / "plan.log").read_text()
+        self.assertIn("blokada usypiania na czas przebiegu", plan_log)
+        # Zwolniona: proces trzymający blokadę już nie żyje (ubijamy całą
+        # grupę, bo blokadę trzyma komenda uruchomiona przez inhibit).
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid), 0)
+
+    def test_brak_blokady_usypiania_nie_zatrzymuje_przebiegu(self):
+        # Na systemie bez systemd-inhibit pomiar ma iść dalej – tylko
+        # z ostrzeżeniem w plan.log, żeby dało się później zrozumieć
+        # urwany strumień próbek.
+        results = self._run(_plan(scenario="zwykly", duration_s=0.1,
+                                  trigger=planmod.Trigger(type="delay",
+                                                          seconds=0)))
+        self.assertEqual(results[0].status, "done")
+        plan_log = (self.runner.run_dir / "plan.log").read_text()
+        self.assertIn("nie udało się zablokować usypiania", plan_log)
+
     def test_serial_trigger_fires_and_streams(self):
         # Monitor dongla: linie lecą jako 'monitor', a pomiar startuje, gdy
         # linia ZAWIERA fragment triggera (podłańcuch, nie regex). Linia
@@ -694,6 +779,27 @@ class EngineTest(unittest.TestCase):
         self.assertIn("-DCONFIG_P1=20", rows[3]["flagi"])
         self.assertIn("-DCONFIG_P2=200", rows[3]["flagi"])
 
+    def test_protokol_trafia_do_meta_sesji(self):
+        # Protokół znała dotąd tylko karta w interfejsie i ginął po starcie
+        # przebiegu. Kalkulator poboru prądu musi wiedzieć, z której sesji
+        # wolno kalibrować którą sekcję, więc protokół jedzie w meta.json.
+        import json
+        results = self._run(_plan(
+            scenario="zwykly", duration_s=0.15, protocol="zigbee",
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["protocol"], "zigbee")
+
+    def test_krok_bez_protokolu_ma_puste_pole(self):
+        # Zwykły pomiar (karta bez protokołu, plan z TOML-a) – pole jest,
+        # ale puste; kalkulator takiej sesji nie przypisze do sekcji.
+        import json
+        results = self._run(_plan(
+            scenario="zwykly", duration_s=0.15,
+            trigger=planmod.Trigger(type="delay", seconds=0)))
+        meta = json.loads((results[0].session_dir / "meta.json").read_text())
+        self.assertEqual(meta["protocol"], "")
+
     def test_sweep_meta_and_events(self):
         import json
         base = dict(scenario="zwykly", duration_s=0.15, power_cycle=True,
@@ -715,6 +821,35 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(measure[0].data.get("sweep"),
                          [{"param": "CONFIG_LPN_SENSOR_INTERVAL_S",
                            "value": "2"}])
+
+    def test_krotnosc_daje_osobne_pomiary_z_jednego_builda(self):
+        # Krotność karty ('x3'): powtórka to PEŁNY krok – własny flash,
+        # własny katalog sesji i własny wiersz w dzienniku – ale obraz jest
+        # ten sam, więc build leci raz.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="zwykly", duration_s=0.15, label="1",
+                              power_cycle=True,
+                              trigger=planmod.Trigger(type="delay",
+                                                      seconds=0))], 3)
+        results = self._run(planmod.Plan(name="powt", board="btz",
+                                         steps=steps))
+        self.assertEqual([r.status for r in results], ["done"] * 3)
+        self.assertEqual([r.label for r in results], ["1/1", "1/2", "1/3"])
+        # Trzy OSOBNE sesje na dysku, każda z własnymi danymi.
+        dirs = [r.session_dir for r in results]
+        self.assertEqual(len(set(dirs)), 3)
+        self.assertTrue(all((d / "meta.json").is_file() for d in dirs))
+        cmds = self.env.commands()
+        self.assertEqual(len([c for c in cmds if c.startswith("west build")]),
+                         1, "powtórka nie powinna budować drugi raz")
+        self.assertEqual(len([c for c in cmds if c.startswith("west flash")]),
+                         3, "każda powtórka ma swój flash")
+        with open(core.CSV_PATH, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([r["pomiar_id"] for r in rows], ["1/1", "1/2", "1/3"])
+        # Powtórka nie jest serią – kolumny parametrów zostają puste.
+        self.assertTrue(all(not r["parametr"] and not r["wartosc"]
+                            for r in rows))
 
     def test_flash_wymusza_reset_i_erase(self):
         # REGRESJA: bez --reset J-Link zostawia układ w stanie po
@@ -869,6 +1004,46 @@ class EngineTest(unittest.TestCase):
         # w meta triggera został typ chip + parametry subskrypcji
         notes = [ev.text for ev in self.events if ev.kind == "note"]
         self.assertTrue(any("chip node=5" in n for n in notes))
+
+    def test_chip_cmd_icd_registration_flags(self):
+        # Rejestracja ICD dokłada trzy flagi skryptu; weryfikacja
+        # OperatingMode idzie w komplecie, bo przy CONFIG_LOG=n to jedyny
+        # sposób wyłapania, że węzeł jednak jechał w SIT.
+        plan = _plan(scenario="zwykly", duration_s=0.2,
+                     trigger=planmod.Trigger(
+                         type="chip", node_id="5", dataset="0e08aa",
+                         discriminator="3840", icd_registration=True,
+                         icd_stay_active_ms=15000))
+        runner = AutoRunner(
+            plan, self.manifest, "BTZ #1",
+            sampler_factory=lambda p: self.sampler,
+            rtt_factory=lambda prof: FakeRttReader(None),
+            event_cb=self.events.append, dry_run=True)
+        cmd = runner._chip_cmd(plan.steps[0].trigger)
+        self.assertIn("--icd-registration", cmd)
+        self.assertIn("--verify-icd", cmd)
+        self.assertEqual(cmd[cmd.index("--icd-stay-active-duration") + 1],
+                         "15000")
+        # Bez rejestracji żadnej z tych flag nie ma (ścieżka SIT bez zmian).
+        plain = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                                discriminator="3840")
+        cmd = runner._chip_cmd(plain)
+        for flag in ("--icd-registration", "--verify-icd",
+                     "--icd-stay-active-duration"):
+            self.assertNotIn(flag, cmd)
+
+    def test_chip_settle_longer_with_icd_registration(self):
+        # Z rejestracją trzeba przeczekać okno StayActive (węzeł pollue
+        # fast pollingiem jeszcze 30 s po parowaniu), bez niej chip-tool
+        # StayActive pomija i wystarcza krótki zapas.
+        icd = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                              discriminator="3840", icd_registration=True)
+        plain = planmod.Trigger(type="chip", node_id="5", dataset="0e08aa",
+                                discriminator="3840")
+        self.assertEqual(eng.chip_settle_s(icd), eng.CHIP_ICD_START_SETTLE_S)
+        self.assertEqual(eng.chip_settle_s(plain), eng.CHIP_START_SETTLE_S)
+        self.assertGreater(eng.CHIP_ICD_START_SETTLE_S,
+                           eng.CHIP_START_SETTLE_S)
 
     def test_hex_step_skips_build(self):
         # 'hexowy' ma pole hex – FAZA 1 go nie buduje.

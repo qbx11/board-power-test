@@ -104,6 +104,36 @@ label = "Friend Poll"
         self.assertEqual(len(step.labels), 1)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
+    def test_chip_trigger_icd_fields(self):
+        p = _write_plan(self.dir, """
+[plan]
+name = "t"
+[[plan.steps]]
+scenario = "reset_only"
+duration = "30s"
+trigger = { type = "chip", node_id = "5", dataset = "0e08aa", \
+discriminator = "3840", icd_registration = true, icd_stay_active_ms = 15000 }
+""")
+        plan = planmod.load_plan(p)
+        trig = plan.steps[0].trigger
+        self.assertTrue(trig.icd_registration)
+        self.assertEqual(trig.icd_stay_active_ms, 15000)
+        self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
+
+    def test_chip_trigger_icd_defaults_off(self):
+        p = _write_plan(self.dir, """
+[plan]
+name = "t"
+[[plan.steps]]
+scenario = "reset_only"
+duration = "30s"
+trigger = { type = "chip", node_id = "5", dataset = "0e08aa", \
+discriminator = "3840" }
+""")
+        trig = planmod.load_plan(p).steps[0].trigger
+        self.assertFalse(trig.icd_registration)
+        self.assertEqual(trig.icd_stay_active_ms, 30000)
+
     def test_missing_sections(self):
         with self.assertRaises(ValueError):
             planmod.load_plan(_write_plan(self.dir, '[plan]\nname="t"\n'))
@@ -181,6 +211,37 @@ class ValidateTest(unittest.TestCase):
         errs = planmod.validate_plan(planmod.Plan(name="t", steps=[badre]),
                                      MANIFEST)
         self.assertTrue(any("match" in e for e in errs))
+
+    def test_icd_registration_excludes_skip_pairing(self):
+        # Rejestracja ICD idzie wyłącznie w commissioningu, więc razem
+        # ze skip_pairing byłaby cicho zignorowana -> błąd, nie milczenie.
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    skip_pairing=True,
+                                    icd_registration=True))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("icd_registration" in e for e in errs))
+        # Sama rejestracja przy normalnym parowaniu przechodzi.
+        ok = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840",
+                                    icd_registration=True))
+        self.assertEqual(
+            planmod.validate_plan(planmod.Plan(name="t", steps=[ok]),
+                                  MANIFEST), [])
+
+    def test_icd_stay_active_must_be_positive(self):
+        step = planmod.PlanStep(
+            scenario="reset_only", duration_s=30,
+            trigger=planmod.Trigger(type="chip", node_id="5",
+                                    dataset="0e08aa", discriminator="3840",
+                                    icd_stay_active_ms=0))
+        errs = planmod.validate_plan(planmod.Plan(name="t", steps=[step]),
+                                     MANIFEST)
+        self.assertTrue(any("icd_stay_active_ms" in e for e in errs))
 
     def test_rtt_trigger_needs_rtt_on(self):
         step = planmod.PlanStep(
@@ -375,6 +436,60 @@ class SweepTest(unittest.TestCase):
         base = dict(scenario="app", duration_s=60)
         steps = planmod.expand_sweep(
             1, [("CONFIG_LPN_SENSOR_INTERVAL_S", "1, 2")], base)
+        plan = planmod.Plan(name="t", board="btz", steps=steps)
+        self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
+
+    def test_expand_repeats(self):
+        # Krotność karty ('x3'): ten sam krok trzy razy, każdy z własną
+        # etykietą 'N/k'. Ukośnik, nie kropka – kropka jest zajęta przez
+        # serię, więc po etykiecie widać, co jest czym.
+        base = planmod.PlanStep(scenario="app", duration_s=600, label="2",
+                                build_extra_args=["-DCONFIG_LOG=n"])
+        steps = planmod.expand_repeats([base], 3)
+        self.assertEqual([s.label for s in steps], ["2/1", "2/2", "2/3"])
+        # Powtórka jest KOPIĄ: cała reszta pól bez zmian, także flagi builda
+        # (ten sam obraz -> silnik buduje raz, ale flashuje przed każdym).
+        self.assertTrue(all(s.scenario == "app" for s in steps))
+        self.assertTrue(all(s.duration_s == 600 for s in steps))
+        self.assertTrue(all(s.build_extra_args == ["-DCONFIG_LOG=n"]
+                            for s in steps))
+        self.assertIsNot(steps[0], steps[1])
+        # x1 (i mniej) zostawia krok w spokoju – bez sufiksu '/1', żeby
+        # zwykły pomiar wyglądał w raporcie jak dotąd.
+        for count in (1, 0, -2):
+            self.assertEqual([s.label
+                              for s in planmod.expand_repeats([base], count)],
+                             ["2"])
+        # Powyżej limitu UI obcinamy do REPEAT_MAX.
+        self.assertEqual(len(planmod.expand_repeats([base], 99)),
+                         planmod.REPEAT_MAX)
+
+    def test_expand_repeats_po_serii_klei_powtorki_obok_siebie(self):
+        # Seria ×2 z krotnością x3 daje A A A B B B, nie A B A B A B:
+        # powtórki jednego ustawienia mierzą się w najbliższych sobie
+        # warunkach, więc widoczny rozrzut jest rozrzutem POMIARU.
+        steps = planmod.expand_repeats(
+            planmod.expand_sweep(3, [("CONFIG_P", "10, 20")],
+                                 dict(scenario="app", duration_s=60)), 3)
+        self.assertEqual([s.label for s in steps],
+                         ["3.1/1", "3.1/2", "3.1/3",
+                          "3.2/1", "3.2/2", "3.2/3"])
+        self.assertEqual([s.sweep[0][1] for s in steps],
+                         ["10", "10", "10", "20", "20", "20"])
+
+    def test_expand_repeats_bez_etykiety_numeruje_od_pozycji(self):
+        # Kroki spoza kreatora (plan z TOML) etykiety nie mają – powtórka
+        # nie może wyjść jako '/2', bo taki wiersz nic nie mówi.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="app", duration_s=1),
+             planmod.PlanStep(scenario="app", duration_s=1)], 2)
+        self.assertEqual([s.label for s in steps],
+                         ["1/1", "1/2", "2/1", "2/2"])
+
+    def test_repeated_steps_validate_against_manifest(self):
+        # Powtórki to zwykłe PlanStep – przechodzą walidację planu.
+        steps = planmod.expand_repeats(
+            [planmod.PlanStep(scenario="app", duration_s=60, label="1")], 3)
         plan = planmod.Plan(name="t", board="btz", steps=steps)
         self.assertEqual(planmod.validate_plan(plan, MANIFEST), [])
 
