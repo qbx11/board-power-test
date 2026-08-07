@@ -453,6 +453,30 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
                     hint = sec.query_one(f".calc-{field}", Input).placeholder
                     self.assertEqual(hint, f"np. {ref}", f"{proto}/{field}")
 
+    async def test_nazwy_w_tabelce_maja_jednostke_i_sie_mieszcza(self):
+        # Ładunki są w µC i mają to napisane – bez jednostki "20" obok
+        # "1.54 µA" wygląda na drugi prąd, a nie na ładunek.
+        #
+        # Druga połowa testu pilnuje szerokości kolumny: .calc-ref-name ma
+        # text-overflow: ellipsis, więc za wąska tabelka nie wywala testu,
+        # tylko po cichu urywa jednostkę na końcu nazwy. Najdłuższa nazwa
+        # ("Ładunek ZBOSS (µC)" w Zigbee) wypełnia kolumnę dokładnie, więc
+        # każde wydłużenie nazwy musi iść ze zmianą szerokości .calc-ref.
+        app = tui.PowerTestApp()
+        async with app.run_test(size=(160, 200)) as pilot:
+            await pilot.click("#mode-label-calc")
+            await pilot.pause()
+            for proto in ("ble_mesh", "thread", "zigbee"):
+                sec = self.section(app, proto)
+                for label in sec.query(tui.RefLabel):
+                    name = str(label.render())
+                    if name.startswith("Ładunek"):
+                        self.assertTrue(name.endswith("(µC)"),
+                                        f"{proto}: {name!r}")
+                    self.assertLessEqual(len(name),
+                                         label.content_region.width,
+                                         f"{proto}: {name!r} nie mieści się")
+
     async def test_nie_ma_juz_kalibracji_ani_deep_sleepu(self):
         # Kalkulator liczy z wpisanych liczb – nie czyta przebiegów sesji
         # i nie ma drugiego pola podłogi.

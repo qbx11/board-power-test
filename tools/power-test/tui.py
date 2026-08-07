@@ -295,7 +295,7 @@ TERM_LABELS = {"send": "wysłania", "poll": "polle",
 #        nazwa w tabelce wartości oczekiwanych)
 EXTRA_TERMS = {
     "zigbee": (("heartbeat", "Ładunek ZBOSS (µC):", "0.92",
-                "Interwał ZBOSS (s):", "1", "Ładunek ZBOSS"),),
+                "Interwał ZBOSS (s):", "1", "Ładunek ZBOSS (µC)"),),
 }
 
 # Tabelka "wartości oczekiwanych" przy każdej sekcji kalkulatora: rząd
@@ -314,8 +314,8 @@ EXTRA_TERMS = {
 # musiał nadrabiać rosnącym "ładunkiem" wysłania.
 REF_FIELDS = (
     ("baseline", "Baseline (µA)", "1.54"),
-    ("send-charge", "Ładunek send", "20"),
-    ("poll-charge", "Ładunek poll", "56"),
+    ("send-charge", "Ładunek send (µC)", "20"),
+    ("poll-charge", "Ładunek poll (µC)", "56"),
 )
 # Liczby zależą od protokołu, więc nie każdy bierze te z REF_FIELDS.
 # Zigbee: BTZ_EndDevice z tego repo (baseline 3.2 µA, wysłanie 46.2 µC,
@@ -2690,7 +2690,12 @@ class PowerTestApp(App):
     /* Tabelka wartości oczekiwanych: kolumna po prawej stronie sekcji.
        Nazwa pola (RefLabel) jest klikalna – kopiuje liczbę z pola obok
        (edytowalnego Input) do kalkulatora; sama tabelka niczego nie liczy. */
-    .calc-ref { width: 33; height: auto; border-left: round #555555;
+    /* Szerokość 34 wynika z najdłuższej nazwy wiersza: "Ładunek ZBOSS (µC)"
+       to 18 znaków, a na tekst zostaje szerokość tabelki minus obwódka (1),
+       padding (2), pole wartości (9) i obwódka z paddingiem nazwy (4).
+       Nazwa ma text-overflow: ellipsis, więc za wąska kolumna nie rzuca
+       błędem – po cichu obcina jednostkę, czego w testach nie widać. */
+    .calc-ref { width: 34; height: auto; border-left: round #555555;
                 padding: 0 0 0 2; }
     .calc-ref-head { color: #999999; margin-bottom: 1; }
     /* Wiersz ma wysokość pola (3: obwódka/tekst/obwódka) – nazwa dostaje
