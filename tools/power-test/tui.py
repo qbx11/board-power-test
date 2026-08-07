@@ -302,21 +302,34 @@ EXTRA_TERMS = {
 # wielkości zmierzony w tym repo. Każda sekcja ma WŁASNĄ kopię tych pól
 # (patrz CalculatorSection.compose), więc edycja w jednym protokole nie
 # rusza pozostałych dwóch.
+#
+# Liczby domyślne pochodzą z węzła LPN (BLE Mesh) i są dopasowane do
+# przemiatania interwałów, a nie odczytane z jednego okna profilera:
+# dwa przebiegi (sam send 10-600 s oraz send i poll na tym samym
+# interwale) dają układ I_avg = I_base + Q_send/T i I_avg = I_base +
+# (Q_send + Q_poll)/T, więc ładunki wychodzą z nachyleń względem 1/T,
+# a poll z ich różnicy. Baseline 1.54 µA to ekstrapolacja 1/T -> 0, nie
+# osobny pomiar uśpionej płytki – ten dawał 1.4 µA, przy którym model
+# zaniżał długie interwały systematycznie o 9%, bo brakującą podłogę
+# musiał nadrabiać rosnącym "ładunkiem" wysłania.
 REF_FIELDS = (
-    ("baseline", "Baseline (µA)", "2.4"),
-    ("send-charge", "Ładunek send", "22"),
-    ("poll-charge", "Ładunek poll", "1478"),
+    ("baseline", "Baseline (µA)", "1.54"),
+    ("send-charge", "Ładunek send", "20"),
+    ("poll-charge", "Ładunek poll", "56"),
 )
-# Liczby zależą od protokołu, więc nie każdy bierze te z REF_FIELDS (rząd
-# wielkości z węzła LPN). Zigbee: BTZ_EndDevice z tego repo (baseline
-# 3.2 µA, wysłanie 46.2 µC, poll 19.8 µC). Thread rozkłada się odwrotnie
-# niż mesh: wysyłka Mattera jest droga, a poll tani – wpisywanie tam
-# 1478 µC za poll dawało wynik obok rzeczywistości, dopóki się tego nie
-# nadpisało ręcznie. Czego tu nie ma, bierze wartość z REF_FIELDS.
+# Liczby zależą od protokołu, więc nie każdy bierze te z REF_FIELDS.
+# Zigbee: BTZ_EndDevice z tego repo (baseline 3.2 µA, wysłanie 46.2 µC,
+# poll 19.8 µC). Thread rozkłada się odwrotnie niż mesh: wysyłka Mattera
+# jest droga, a poll tani – liczby z LPN dawały tam wynik obok
+# rzeczywistości, dopóki się tego nie nadpisało ręcznie. Baseline Thread
+# jest wpisany osobno, bo 1.54 µA z REF_FIELDS to podłoga TEGO węzła
+# mesh, a nie wartość wspólna dla protokołów. Czego tu nie ma, bierze
+# wartość z REF_FIELDS.
 REF_OVERRIDES = {
     "zigbee": {"baseline": "3.2", "send-charge": "46.2",
                "poll-charge": "19.8"},
-    "thread": {"send-charge": "95.5", "poll-charge": "11"},
+    "thread": {"baseline": "2.4", "send-charge": "95.5",
+               "poll-charge": "11"},
 }
 
 
@@ -2694,7 +2707,7 @@ class PowerTestApp(App):
     .calc-ref-name:hover { border: round #aaaaaa; }
     /* Input rezerwuje domyślnie padding 0 2 (Input.DEFAULT_CSS) – przy
        szerokości 9 zostawiało to na tekst tylko 3 kolumny (9 - 2 obwódka
-       - 4 padding), więc "2.4" i "1478" (3-4 znaki) się nie mieściły i
+       - 4 padding), więc "1.54" i "95.5" (3-4 znaki) się nie mieściły i
        renderowały jako obcięty, nieczytelny fragment. Szerokość dopasowana
        do najdłuższej wartości (4 cyfry) minimalizuje puste miejsce po
        prawej – Input renderuje tekst od lewej i nie ma opcji center. */

@@ -428,7 +428,7 @@ class CalcTuiTest(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(160, 200)) as pilot:
             await pilot.click("#mode-label-calc")
             await pilot.pause()
-            expected = {"ble_mesh": ("2.4", "22", "1478"),
+            expected = {"ble_mesh": ("1.54", "20", "56"),
                         "thread": ("2.4", "95.5", "11"),
                         "zigbee": ("3.2", "46.2", "19.8")}
             for proto, values in expected.items():
